@@ -174,6 +174,21 @@ stays frozen until the target runs and is thawed if anything fails before;
 afterwards it is killed. Open TCP connections reset. The token is sent in
 clear text: use a trusted network.
 
+## Tests
+
+| | What | Needs |
+| --- | --- | --- |
+| `make test` | unit tests | Linux, libseccomp |
+| `hack/e2e.sh` | checkpoint/restore through containerd | root, containerd, CRIU |
+| `hack/e2e-timetravel.sh` | timeline and rewind | root, containerd, CRIU fork |
+| `hack/e2e-migrate.sh` | live migration (pre-copy on x86) | root, containerd, CRIU fork |
+| `hack/smoke-cri.sh` | a pod through CRI with crictl | root, containerd, CNI |
+| `critest --runtime-handler gcr` | CRI conformance | root, containerd, CNI |
+| `make test-k8s` | Kubernetes (k0s via k0da) with a gcr RuntimeClass | docker or podman, k0da |
+
+`sudo hack/ci-setup.sh` prepares a host for the root tests (containerd,
+CNI, cri-tools, the CRIU fork). CI runs all of them on every pull request.
+
 ## Develop
 
 Everything builds and runs in a Linux VM (kernel 6.12+, containerd 2.4, CRIU):

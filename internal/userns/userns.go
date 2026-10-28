@@ -38,9 +38,10 @@ const (
 	// Ranges start at 2^30 and fill up to 2^31: 16384 pods per host.
 	firstBase = 1 << 30
 	slots     = 1 << 14
-
-	stateDir = "/run/gcr/userns"
 )
+
+// stateDir holds the allocation files; a variable for tests.
+var stateDir = "/run/gcr/userns"
 
 // Range is a host ID range a container's IDs 0..Size-1 map to.
 type Range struct {

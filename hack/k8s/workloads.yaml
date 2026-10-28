@@ -1,0 +1,50 @@
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gcr
+handler: gcr
+---
+# Host users (Kubernetes default).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: plain
+spec:
+  runtimeClassName: gcr
+  containers:
+    - name: app
+      image: busybox:1.37
+      command: ["sh", "-c", "echo hello from gcr; sleep 3600"]
+      resources:
+        requests: {cpu: 10m, memory: 16Mi}
+        limits: {cpu: 200m, memory: 64Mi}
+---
+# Kubernetes user namespaces, created by containerd.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hostusers-false
+spec:
+  runtimeClassName: gcr
+  hostUsers: false
+  containers:
+    - name: app
+      image: busybox:1.37
+      command: ["sleep", "3600"]
+---
+# gcr's own user namespaces, opted in.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gcr-userns
+  annotations:
+    gcr.dev/host-users: "false"
+spec:
+  runtimeClassName: gcr
+  containers:
+    - name: app
+      image: busybox:1.37
+      command: ["sleep", "3600"]
+    - name: sidecar
+      image: busybox:1.37
+      command: ["sleep", "3600"]

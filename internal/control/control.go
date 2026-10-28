@@ -25,7 +25,8 @@ import (
 	"github.com/makhov/gcr/internal/timetravel"
 )
 
-const socketDir = "/run/gcr-ctl"
+// socketDir holds the control sockets; a variable for tests.
+var socketDir = "/run/gcr-ctl"
 
 // SocketPath is the control socket of container id in a containerd
 // namespace. It is hashed to stay within sun_path's 108 bytes.

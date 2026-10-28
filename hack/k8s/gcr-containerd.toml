@@ -1,0 +1,6 @@
+# Imported by k0s's containerd (/etc/k0s/containerd.d).
+version = 3
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr]
+  runtime_type = 'io.containerd.gcr.v2'
+  runtime_path = '/usr/local/bin/containerd-shim-gcr-v2'
+  pod_annotations = ['gcr.dev/*']

@@ -1,0 +1,6 @@
+apiVersion: k0da.k0sproject.io/v1alpha1
+kind: Cluster
+spec:
+  nodes:
+    - role: controller
+      image: localhost/k0s-gcr:e2e

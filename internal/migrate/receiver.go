@@ -36,14 +36,15 @@ const (
 //	POST /restore  restore and start; answers once the container runs
 //	POST /abort    give up; Start fails
 type Receiver struct {
-	ctx   context.Context
-	host  string
-	token string
+	ctx    context.Context
+	host   string
+	token  string
 	root   string
 	upper  func() (string, error)
 	idBase func() uint32
 
 	srv *http.Server
+	ln  net.Listener
 
 	mu    sync.Mutex
 	round int
@@ -88,10 +89,14 @@ func NewReceiver(ctx context.Context, addr, token, root string, upper func() (st
 	mux.HandleFunc("POST /restore", r.auth(r.restore))
 	mux.HandleFunc("POST /abort", r.auth(r.abort))
 	r.srv = &http.Server{Handler: mux}
+	r.ln = ln
 	go func() { _ = r.srv.Serve(ln) }()
 	log.G(ctx).WithField("addr", ln.Addr()).Info("migration receiver listening")
 	return r, nil
 }
+
+// Addr is the address the receiver listens on.
+func (r *Receiver) Addr() string { return r.ln.Addr().String() }
 
 // Wait blocks until the source asks for the restore and returns the images
 // directory to restore from.

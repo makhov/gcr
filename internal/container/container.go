@@ -88,9 +88,9 @@ type Container struct {
 	ID     string
 	Bundle string
 
-	namespace  string
-	cfg        *configs.Config
-	rootfs     []mount.Mount
+	namespace      string
+	cfg            *configs.Config
+	rootfs         []mount.Mount
 	spec           *specs.Spec
 	checkpoint     string
 	checkpointFrom func(context.Context) (string, error)
@@ -117,7 +117,7 @@ type Container struct {
 	migrating bool
 	// idBase is the first host ID of the user namespace range, 0 if none.
 	idBase uint32
-	execs     map[string]*Exec
+	execs  map[string]*Exec
 }
 
 // Root returns the libcontainer state directory for a containerd namespace.
@@ -219,21 +219,21 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	}()
 
 	c := &Container{
-		ID:         o.ID,
-		Bundle:     o.Bundle,
-		namespace:  o.Namespace,
-		cfg:        cfg,
-		rootfs:     o.Rootfs,
-		lc:         lc,
-		spec:       spec,
+		ID:             o.ID,
+		Bundle:         o.Bundle,
+		namespace:      o.Namespace,
+		cfg:            cfg,
+		rootfs:         o.Rootfs,
+		lc:             lc,
+		spec:           spec,
 		checkpoint:     o.Checkpoint,
 		checkpointFrom: prep.CheckpointFrom,
 		io:             io,
 		tty:            tty,
 		idBase:         uint32(prep.IDMapRoot),
-		status:     Created,
-		exited:     make(chan struct{}),
-		onExit:     onExit,
+		status:         Created,
+		exited:         make(chan struct{}),
+		onExit:         onExit,
 	}
 	if o.Checkpoint != "" || prep.CheckpointFrom != nil {
 		// Restore happens in Start, the way containerd expects.

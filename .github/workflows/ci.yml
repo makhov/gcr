@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get update && sudo apt-get install -y libseccomp-dev
+      - run: go vet -tags seccomp ./...
+      - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go test -tags seccomp -race ./...
+      - run: make build
+
+  e2e:
+    # Root, containerd 2.4, our CRIU fork; on x86 runners the kernel tracks
+    # dirty memory, so migrations use pre-copy rounds.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: sudo ./hack/ci-setup.sh
+      - run: make build && sudo make install
+      - run: sudo systemctl restart containerd
+      - name: checkpoint/restore
+        run: sudo ./hack/e2e.sh
+      - name: time travel
+        run: sudo ./hack/e2e-timetravel.sh
+      - name: live migration
+        run: sudo ./hack/e2e-migrate.sh
+      - name: CRI smoke
+        run: sudo ./hack/smoke-cri.sh
+      - name: CRI conformance (critest)
+        run: cd /tmp && sudo critest --runtime-handler gcr --ginkgo.no-color --ginkgo.timeout 40m
+      - name: logs
+        if: failure()
+        run: sudo journalctl -u containerd --no-pager | tail -300
+
+  k8s:
+    # Kubernetes (k0s 1.37 via k0da, in Docker) with gcr as a RuntimeClass.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get update && sudo apt-get install -y libseccomp-dev
+      - run: go install github.com/makhov/k0da@latest
+      - run: make test-k8s
