@@ -50,6 +50,8 @@ jobs:
         run: sudo ./hack/e2e-hardening.sh
       - name: Docker-in-Docker
         run: sudo ./hack/e2e-dind.sh
+      - name: Landlock
+        run: sudo ./hack/e2e-landlock.sh
       - name: CRI smoke
         run: sudo ./hack/smoke-cri.sh
       - name: CRI conformance (critest)

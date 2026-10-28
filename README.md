@@ -1,7 +1,8 @@
 # gcr
 
 A containerd runtime (`io.containerd.gcr.v2`) with checkpoint, restore and fork
-built in. Containers run in-process through libcontainer; no runc binary.
+built in. Containers run in-process through libcontainer (from a small runc
+fork, `makhov/runc`, which adds an init hook for Landlock); no runc binary.
 `gcr` is a placeholder name.
 
 ## Status
@@ -11,8 +12,9 @@ built in. Containers run in-process through libcontainer; no runc binary.
   updates, checkpoint, restore. Passes the CRI conformance suite (critest).
 - User namespaces by default (below).
 - Time travel and live migration (below).
-- Hardening: a denied set of system calls on top of any profile (below).
-- Not yet: GPUs, the NVIDIA ioctl proxy, Landlock.
+- Hardening: a denied set of system calls on top of any profile, supervised
+  mounts, and Landlock confining containers to their root (below).
+- Not yet: GPUs, the NVIDIA ioctl proxy.
 
 ## Requirements
 
@@ -20,7 +22,8 @@ built in. Containers run in-process through libcontainer; no runc binary.
 - containerd 2.x
 - libseccomp (runtime and, to build, headers)
 - CRIU for checkpoint/restore; time travel needs the fork with
-  `--seccomp-notify-socket` (see below)
+  `--seccomp-notify-socket` (see below), and keeping Landlock across a
+  restore needs its `--landlock-fs`
 
 ## Install
 
@@ -193,6 +196,39 @@ the policy per runtime handler, in the runtime's options:
 `'off'`. A workload cannot weaken it.
 `hack/e2e-hardening.sh` probes every refused call.
 
+### Landlock
+
+gcr confines each container's processes with Landlock to the container's
+root filesystem: full access beneath its `/`, nothing outside it. Inside,
+this changes nothing; the container's mounts and permissions decide. What
+it stops is reaching the host's files through anything that leads outside:
+a leaked host file descriptor or working directory (runc's CVE-2024-21626),
+a `/proc/<pid>/root` link into another mount namespace, or whatever a
+mount namespace bug would expose. Pipes, sockets and namespace files live
+on internal filesystems Landlock does not restrict.
+
+- **Applied in the container's init,** through an init hook in gcr's runc
+  fork. That happens once the root filesystem is final and before
+  capabilities drop, so no `no_new_privs` is needed and setuid binaries
+  keep working. Everything the init starts inherits it.
+- **Not for `exec`.** Landlock only lets a process trace or inspect
+  (`/proc/<pid>/fd`, `environ`, `root`) processes in its own or a nested
+  domain, and an exec would get a domain of its own. Debuggers, `strace -p`,
+  `jcmd` and the like would stop working on the container.
+- **Not for containers that can mount** (`CAP_SYS_ADMIN`, Docker-in-Docker):
+  Landlock forbids mount changes. Privileged containers are exempt too.
+- **Kept across checkpoint/restore** with the CRIU fork's `--landlock-fs`.
+  The kernel cannot report a process's Landlock domain, so CRIU cannot dump
+  it; gcr asks for the same confinement again. With a CRIU without it, gcr
+  logs that restored containers are not confined.
+- **Containers sharing a PID namespace** (`shareProcessNamespace`, ephemeral
+  debug containers) are separate domains and cannot trace each other.
+
+Set it per runtime handler: `Landlock = 'standard'` (default) or `'off'`.
+Kernels without Landlock run containers unconfined.
+`hack/e2e-landlock.sh` passes a host directory descriptor into a container
+and checks it leads nowhere, before and after a restore.
+
 ### Docker-in-Docker
 
 dockerd runs in a gcr pod with a user namespace without being privileged:
@@ -275,6 +311,7 @@ clear text: use a trusted network.
 | `hack/e2e-timetravel.sh` | timeline and rewind | root, containerd, CRIU fork |
 | `hack/e2e-migrate.sh` | live migration (pre-copy on x86) | root, containerd, CRIU fork |
 | `hack/e2e-hardening.sh` | refused system calls, with hardening on and off; supervised mounts | root, containerd, cc |
+| `hack/e2e-landlock.sh` | a leaked host descriptor, with Landlock on and off, across a restore | root, containerd, CRIU fork, cc, python3 |
 | `hack/e2e-dind.sh` | Docker-in-Docker, unprivileged, in a user namespace | root, containerd, CNI, network |
 | `hack/smoke-cri.sh` | a pod through CRI with crictl | root, containerd, CNI |
 | `critest --runtime-handler gcr` | CRI conformance | root, containerd, CNI |

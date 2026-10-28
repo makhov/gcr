@@ -156,14 +156,10 @@ func New(ctx context.Context, sockDir string, handlers map[string]Handler) (*Sup
 	return s, nil
 }
 
-// WriteCRIUConfig writes a CRIU config file that hands restored listeners
-// to this supervisor. libcontainer restores through CRIU's RPC, which has
-// no field for --seccomp-notify-socket; org.criu.config names the file.
-func (s *Supervisor) WriteCRIUConfig(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(fmt.Sprintf("seccomp-notify-socket %s\n", s.RestorePath)), 0o600)
+// CRIUOption is the CRIU config line that hands restored listeners to this
+// supervisor.
+func (s *Supervisor) CRIUOption() string {
+	return "seccomp-notify-socket " + s.RestorePath
 }
 
 func (s *Supervisor) Close() {
