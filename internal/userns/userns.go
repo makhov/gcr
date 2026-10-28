@@ -241,6 +241,32 @@ func ParseBase(s string) (uint32, error) {
 // BaseFile is written into checkpoints of containers with a user namespace.
 const BaseFile = "gcr-userns-base"
 
+// KeyFile is where a snapshot records the allocator key of the range its
+// container had, so a fork can join the same range: the snapshot's
+// writable layer holds host IDs from it.
+const KeyFile = "gcr-userns-key"
+
+// Join adds id as a user of the range key already holds, for a container
+// that must map the same host IDs as the one a snapshot came from. The
+// range lives until its last user is released.
+func Join(key, id string) (Range, error) {
+	var r Range
+	err := locked(func() error {
+		users := filepath.Join(stateDir, "keys", key)
+		b, err := os.ReadFile(filepath.Join(users, "base"))
+		if err != nil {
+			return fmt.Errorf("user namespace range of %q: %w", key, err)
+		}
+		base, err := ParseBase(string(b))
+		if err != nil {
+			return err
+		}
+		r = Range{Base: base, Key: key}
+		return os.WriteFile(filepath.Join(users, "user-"+id), nil, 0o600)
+	})
+	return r, err
+}
+
 func Release(r Range, id string) error {
 	return locked(func() error {
 		users := filepath.Join(stateDir, "keys", r.Key)

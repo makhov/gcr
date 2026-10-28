@@ -4,6 +4,7 @@
 //
 //	gcr [-n namespace] timeline ID
 //	gcr [-n namespace] rewind ID POINT
+//	gcr [-n namespace] snapshot ID DIR
 //	gcr [-n namespace] migrate [-token TOKEN] ID TARGET-URL
 package main
 
@@ -25,6 +26,7 @@ func main() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: gcr [-n namespace] timeline ID\n"+
 			"       gcr [-n namespace] rewind ID POINT\n"+
+			"       gcr [-n namespace] snapshot ID DIR\n"+
 			"       gcr [-n namespace] migrate [-token TOKEN] ID TARGET-URL\n")
 	}
 	flag.Parse()
@@ -59,6 +61,10 @@ func run(ctx context.Context, ns string, args []string) error {
 			return fmt.Errorf("bad point %q", args[2])
 		}
 		return control.NewClient(ns, args[1]).Rewind(ctx, point)
+	case len(args) == 3 && args[0] == "snapshot":
+		// The container keeps running; containers created with the
+		// annotation gcr.dev/fork-from=DIR start from the snapshot.
+		return control.NewClient(ns, args[1]).Snapshot(ctx, args[2])
 	case len(args) >= 1 && args[0] == "migrate":
 		fs := flag.NewFlagSet("migrate", flag.ExitOnError)
 		token := fs.String("token", os.Getenv("GCR_MIGRATE_TOKEN"), "token the target expects (default $GCR_MIGRATE_TOKEN)")

@@ -5,6 +5,7 @@ package task
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -169,11 +170,30 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 	var hardened bool
 	opts.PrepareSpec = func(spec *specs.Spec) (container.Prepared, error) {
 		prep := container.Prepared{IOOwner: cfg.IOUID}
+		forkFrom, forkKey, err := forkSource(spec)
+		if err != nil {
+			return prep, err
+		}
+		prep.ForkFrom = forkFrom
 		ok, why, err := userns.Decide(spec, cfg.UserNamespaces)
 		if err != nil {
 			return prep, err
 		}
-		if ok {
+		if ok && forkKey != "" {
+			// The snapshot's writable layer, which the fork keeps
+			// underneath its own, holds host IDs from the range its
+			// container mapped; the fork maps the same one.
+			rng, err := userns.Join(forkKey, r.ID)
+			if err != nil {
+				return prep, fmt.Errorf("fork: %w", err)
+			}
+			ex.userns = &rng
+			userns.Apply(spec, rng)
+			if err := userns.OpenNetwork(spec); err != nil {
+				return prep, fmt.Errorf("fork: pod network: %w", err)
+			}
+			prep.IDMap, prep.IDMapRoot, prep.IDKey = rng.IDMapOption(), int(rng.Base), rng.Key
+		} else if ok {
 			var (
 				want uint32
 				err  error
@@ -199,7 +219,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			if err := userns.OpenNetwork(spec); err != nil {
 				return prep, fmt.Errorf("user namespace: pod network: %w", err)
 			}
-			prep.IDMap, prep.IDMapRoot = rng.IDMapOption(), int(rng.Base)
+			prep.IDMap, prep.IDMapRoot, prep.IDKey = rng.IDMapOption(), int(rng.Base), rng.Key
 		} else {
 			log.G(ctx).WithField("reason", why).Debug("no user namespace")
 		}
@@ -310,6 +330,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		Migrate: func(ctx context.Context, target, token string) (migrate.Result, error) {
 			return s.migrateOut(ctx, c, ex, target, token)
 		},
+		Snapshot: c.Snapshot,
 	}
 	if ex.recorder != nil {
 		ex.recorder.Attach(c)
@@ -783,4 +804,32 @@ func (e *extras) coverCgroup(c *container.Container) error {
 	}
 	e.cgroupID = id
 	return nil
+}
+
+// forkSource reads the fork annotation: the snapshot directory a new
+// container starts from, and the allocator key of the user namespace
+// range its container mapped (empty when the snapshot had none).
+func forkSource(spec *specs.Spec) (dir, key string, err error) {
+	dir = spec.Annotations[container.AnnotationForkFrom]
+	if dir == "" {
+		return "", "", nil
+	}
+	if !filepath.IsAbs(dir) {
+		return "", "", fmt.Errorf("%s=%q must be an absolute path: %w",
+			container.AnnotationForkFrom, dir, errdefs.ErrInvalidArgument)
+	}
+	for _, part := range []string{"images", "upper"} {
+		if _, err := os.Stat(filepath.Join(dir, part)); err != nil {
+			return "", "", fmt.Errorf("%s=%q is not a snapshot: %w",
+				container.AnnotationForkFrom, dir, err)
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(dir, userns.KeyFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return dir, "", nil // a snapshot of a container without one
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return dir, strings.TrimSpace(string(b)), nil
 }

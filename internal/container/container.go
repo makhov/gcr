@@ -73,9 +73,18 @@ type Prepared struct {
 	// writable layer to the mapped root (IDMapRoot).
 	IDMap     string
 	IDMapRoot int
+	// IDKey is the allocator key that holds the range; snapshots record it
+	// so a fork can map the same host IDs.
+	IDKey string
 	// IOOwner, if not 0, owns the stdio pipes when the container has a user
 	// namespace gcr did not make (Kubernetes hostUsers: false).
 	IOOwner int
+	// ForkFrom, when set, is a snapshot directory (Snapshot's output) this
+	// container starts from: its processes are restored from the
+	// snapshot's images, and its writable layer is the snapshot's, which
+	// stays read-only underneath a fresh one. Forks of one snapshot
+	// therefore cost one empty layer each, and none of them changes it.
+	ForkFrom string
 	// CgroupOwner, if not 0, is given the container's cgroup (the host UID
 	// of its root), so it can manage nested containers' cgroups.
 	CgroupOwner int
@@ -121,14 +130,22 @@ type Container struct {
 	replaced  chan struct{}
 	// migrating blocks snapshots and rewinds while a migration dumps.
 	migrating bool
-	// idBase is the first host ID of the user namespace range, 0 if none.
+	// idBase is the first host ID of the user namespace range, 0 if none,
+	// and idKey the allocator key that holds it.
 	idBase uint32
+	idKey  string
 	// ioOwner owns the container's ends of the stdio pipes, 0 for root.
 	ioOwner int
 	// cgroupOwner, if not 0, is given the container's cgroup.
 	cgroupOwner int
 	execs       map[string]*Exec
 }
+
+// AnnotationForkFrom starts a container from a snapshot directory
+// (Snapshot's output) instead of its image's entrypoint: its processes are
+// restored from the snapshot and its writable layer sits on top of the
+// snapshot's, which no fork changes.
+const AnnotationForkFrom = "gcr.dev/fork-from"
 
 // Root returns the libcontainer state directory for a containerd namespace.
 func Root(namespace string) string {
@@ -161,6 +178,14 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		if err := os.Chmod(o.Bundle, 0o711); err != nil {
 			return nil, err
 		}
+	}
+	if prep.ForkFrom != "" {
+		// After idmapRootfs, which gives the empty layer to the mapped
+		// root; the files keep the IDs they had in the snapshot.
+		if err := forkUpper(o.Rootfs, prep.ForkFrom); err != nil {
+			return nil, err
+		}
+		o.Checkpoint = filepath.Join(prep.ForkFrom, "images")
 	}
 	rootfs := filepath.Join(o.Bundle, "rootfs")
 	if len(o.Rootfs) > 0 {
@@ -241,6 +266,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		io:             io,
 		tty:            tty,
 		idBase:         uint32(prep.IDMapRoot),
+		idKey:          prep.IDKey,
 		ioOwner:        max(prep.IDMapRoot, prep.IOOwner),
 		cgroupOwner:    prep.CgroupOwner,
 		status:         Created,
@@ -403,7 +429,20 @@ func (c *Container) Snapshot(ctx context.Context, dir string) (retErr error) {
 	if err != nil {
 		return fmt.Errorf("checkpoint (criu log in %s): %w", work, err)
 	}
-	return nil
+	return c.saveRange(dir)
+}
+
+// saveRange records the user namespace range the container maps, which a
+// fork of this snapshot has to map as well: the writable layer the
+// snapshot copied holds host IDs from it.
+func (c *Container) saveRange(dir string) error {
+	if c.idBase == 0 {
+		return nil
+	}
+	if err := os.WriteFile(filepath.Join(dir, userns.BaseFile), []byte(strconv.Itoa(int(c.idBase))), 0o600); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, userns.KeyFile), []byte(c.idKey), 0o600)
 }
 
 // Rewind replaces the running processes and writable layer with the ones in
@@ -584,6 +623,35 @@ func mountAll(mounts []mount.Mount, target string) error {
 
 func systemdCgroupPath(spec *specs.Spec) bool {
 	return spec.Linux != nil && strings.Count(spec.Linux.CgroupsPath, ":") == 2
+}
+
+// forkUpper gives a forked container the files the snapshot had, by
+// copying the snapshot's writable layer into the container's own: the
+// fork then writes above them and changes nothing the snapshot or another
+// fork of it sees. The copy is a reflink where the filesystem has them
+// (btrfs, xfs) and real bytes where it does not (ext4), so on ext4 a fork
+// costs the size of the snapshot's layer, not of the image.
+func forkUpper(mounts []mount.Mount, dir string) error {
+	from := filepath.Join(dir, "upper")
+	if _, err := os.Stat(from); err != nil {
+		return fmt.Errorf("fork: %w", err)
+	}
+	for _, m := range mounts {
+		if m.Type != "overlay" {
+			return fmt.Errorf("fork needs an overlay rootfs, got %q: %w", m.Type, errdefs.ErrNotImplemented)
+		}
+		for _, o := range m.Options {
+			upper, ok := strings.CutPrefix(o, "upperdir=")
+			if !ok {
+				continue
+			}
+			if err := copyTree(from, upper); err != nil {
+				return fmt.Errorf("fork: copy the snapshot's layer: %w", err)
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("fork needs an overlay rootfs with a writable layer: %w", errdefs.ErrNotImplemented)
 }
 
 // idmapRootfs adds idmapping to an overlay rootfs: containerd's mount code

@@ -44,6 +44,14 @@ type Timeline interface {
 type Handlers struct {
 	Timeline Timeline
 	Migrate  func(ctx context.Context, target, token string) (migrate.Result, error)
+	// Snapshot writes the running container's processes and writable
+	// layer to dir, and leaves it running; containers can then be forked
+	// from it.
+	Snapshot func(ctx context.Context, dir string) error
+}
+
+type snapshotRequest struct {
+	Dir string `json:"dir"`
 }
 
 type migrateRequest struct {
@@ -86,6 +94,24 @@ func Serve(ctx context.Context, namespace, id string, h Handlers) (*Server, erro
 			return
 		}
 		if err := h.Timeline.Rewind(context.WithoutCancel(ctx), point); err != nil {
+			httpError(w, err)
+		}
+	})
+	mux.HandleFunc("POST /snapshot", func(w http.ResponseWriter, r *http.Request) {
+		if h.Snapshot == nil {
+			http.Error(w, "snapshots are not supported for this container", http.StatusNotFound)
+			return
+		}
+		var req snapshotRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Dir == "" {
+			http.Error(w, "need dir", http.StatusBadRequest)
+			return
+		}
+		if !filepath.IsAbs(req.Dir) {
+			http.Error(w, "dir must be absolute", http.StatusBadRequest)
+			return
+		}
+		if err := h.Snapshot(context.WithoutCancel(ctx), req.Dir); err != nil {
 			httpError(w, err)
 		}
 	})
@@ -151,6 +177,11 @@ func (c *Client) Timeline(ctx context.Context) ([]timetravel.Point, error) {
 
 func (c *Client) Rewind(ctx context.Context, point int) error {
 	return c.do(ctx, http.MethodPost, fmt.Sprintf("/rewind/%d", point), nil, nil)
+}
+
+// Snapshot asks the container to write a snapshot to dir and keep running.
+func (c *Client) Snapshot(ctx context.Context, dir string) error {
+	return c.do(ctx, http.MethodPost, "/snapshot", snapshotRequest{Dir: dir}, nil)
 }
 
 func (c *Client) Migrate(ctx context.Context, target, token string) (migrate.Result, error) {
