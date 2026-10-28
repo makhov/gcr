@@ -88,3 +88,36 @@ func TestCRIUConfig(t *testing.T) {
 		t.Fatal("writing without a path:", err)
 	}
 }
+
+func TestReadLayers(t *testing.T) {
+	dir := t.TempDir()
+	if l, err := ReadLayers(dir); err != nil || l != nil {
+		t.Fatalf("no file: %q, %v", l, err)
+	}
+	a, b := t.TempDir(), t.TempDir()
+	if err := writeLayers(dir, []string{a, b}); err != nil {
+		t.Fatal(err)
+	}
+	if l, err := ReadLayers(dir); err != nil || !slices.Equal(l, []string{a, b}) {
+		t.Fatalf("read back %q, %v; want %q", l, err, []string{a, b})
+	}
+	got, err := ForkLayers(dir)
+	if err == nil {
+		t.Fatalf("fork of a directory without upper/: %q", got)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "upper"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = ForkLayers(dir); err != nil || !slices.Equal(got, []string{filepath.Join(dir, "upper"), a, b}) {
+		t.Fatalf("fork layers %q, %v", got, err)
+	}
+	// Each is an overlay lowerdir: relative paths and separators are refused.
+	for _, bad := range []string{"rel", "/a:b", "/a,b"} {
+		if err := os.WriteFile(filepath.Join(dir, LayersFile), []byte(bad+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadLayers(dir); err == nil {
+			t.Errorf("layer %q accepted", bad)
+		}
+	}
+}

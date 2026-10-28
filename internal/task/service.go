@@ -177,6 +177,15 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			return prep, err
 		}
 		prep.ForkFrom = forkFrom
+		switch {
+		case forkFrom != "":
+			prep.Layers, err = container.ForkLayers(forkFrom)
+		case r.Checkpoint != "":
+			prep.Layers, err = container.ReadLayers(r.Checkpoint)
+		}
+		if err != nil {
+			return prep, fmt.Errorf("layers: %w", err)
+		}
 		if v, ok := spec.Annotations[container.AnnotationLazyRestore]; ok {
 			if prep.LazyPages, err = strconv.ParseBool(v); err != nil {
 				return prep, fmt.Errorf("%s=%q: %w", container.AnnotationLazyRestore, v, errdefs.ErrInvalidArgument)
@@ -248,7 +257,8 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			recv, err := migrate.NewReceiver(s.ctx, addr, spec.Annotations[migrate.AnnotationToken],
 				filepath.Join(ex.stateDir, "migrate-in"),
 				func() (string, error) { return c.UpperDir() },
-				func() uint32 { return c.IDBase() })
+				func() uint32 { return c.IDBase() },
+				func() []string { return c.Layers() })
 			if err != nil {
 				return prep, fmt.Errorf("migration receiver: %w", err)
 			}

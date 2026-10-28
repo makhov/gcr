@@ -118,9 +118,12 @@ type Prepared struct {
 	// ForkFrom, when set, is a snapshot directory (Snapshot's output) this
 	// container starts from: its processes are restored from the
 	// snapshot's images, and its writable layer is the snapshot's, which
-	// stays read-only underneath a fresh one. Forks of one snapshot
-	// therefore cost one empty layer each, and none of them changes it.
+	// stays read-only underneath a fresh one (Layers). Forks of one
+	// snapshot therefore cost one empty layer each, and none changes it.
 	ForkFrom string
+	// Layers are read-only layers mounted between the writable layer and
+	// the image's, top first (ForkLayers, or a checkpoint's ReadLayers).
+	Layers []string
 	// CgroupOwner, if not 0, is given the container's cgroup (the host UID
 	// of its root), so it can manage nested containers' cgroups.
 	CgroupOwner int
@@ -142,6 +145,7 @@ type Container struct {
 	namespace      string
 	cfg            *configs.Config
 	rootfs         []mount.Mount
+	layers         []string // read-only, between rootfs's upper and lower layers
 	spec           *specs.Spec
 	checkpoint     string
 	checkpointFrom func(context.Context) (string, error)
@@ -229,11 +233,6 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		}
 	}
 	if prep.ForkFrom != "" {
-		// After idmapRootfs, which gives the empty layer to the mapped
-		// root; the files keep the IDs they had in the snapshot.
-		if err := forkUpper(o.Rootfs, prep.ForkFrom); err != nil {
-			return nil, err
-		}
 		o.Checkpoint = filepath.Join(prep.ForkFrom, "images")
 	}
 	rootfs := filepath.Join(o.Bundle, "rootfs")
@@ -241,7 +240,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		if err := os.MkdirAll(rootfs, 0o711); err != nil {
 			return nil, err
 		}
-		if err := mountAll(o.Rootfs, rootfs); err != nil {
+		if err := mountRootfs(o.Rootfs, rootfs, prep.Layers); err != nil {
 			return nil, fmt.Errorf("mount rootfs: %w", err)
 		}
 		defer func() {
@@ -311,6 +310,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		namespace:      o.Namespace,
 		cfg:            cfg,
 		rootfs:         o.Rootfs,
+		layers:         prep.Layers,
 		lc:             lc,
 		spec:           spec,
 		checkpoint:     o.Checkpoint,
@@ -462,6 +462,12 @@ func (c *Container) Checkpoint(ctx context.Context, opts CheckpointOpts) error {
 	if err := c.saveGPU(opts.ImagePath); err != nil {
 		return err
 	}
+	// A restore must mount the same layers under the writable layer
+	// containerd saves with the checkpoint, which holds only what this
+	// container changed above them.
+	if err := writeLayers(opts.ImagePath, c.layers); err != nil {
+		return err
+	}
 	// A restore must use the same user namespace range: CRIU restores the
 	// processes into the mapping they were dumped with.
 	if c.idBase != 0 {
@@ -472,6 +478,10 @@ func (c *Container) Checkpoint(ctx context.Context, opts CheckpointOpts) error {
 
 // IDBase is the container's user namespace range (first host ID), 0 if none.
 func (c *Container) IDBase() uint32 { return c.idBase }
+
+// Layers are the read-only layers between the container's writable layer
+// and its image's, top first: those of the snapshots it was forked from.
+func (c *Container) Layers() []string { return c.layers }
 
 // Running reports whether the container's processes have started.
 func (c *Container) Running() bool {
@@ -517,6 +527,11 @@ func (c *Container) Snapshot(ctx context.Context, dir string) (retErr error) {
 	if err := c.saveRange(dir); err != nil {
 		return err
 	}
+	// dir/upper is only what this container changed above its layers;
+	// forks of dir mount them beneath it.
+	if err := writeLayers(dir, c.layers); err != nil {
+		return err
+	}
 	return c.saveGPU(filepath.Join(dir, "images"))
 }
 
@@ -556,6 +571,16 @@ func (c *Container) Rewind(ctx context.Context, dir string) error {
 	upper, err := c.UpperDir()
 	if err != nil {
 		return err
+	}
+	// The snapshot's writable layer is what changed above its layers,
+	// and only means the same above the same ones.
+	layers, err := ReadLayers(dir)
+	if err != nil {
+		return err
+	}
+	if !slices.Equal(layers, c.layers) {
+		return fmt.Errorf("%s was taken above other layers (%q) than this container has (%q): %w",
+			dir, layers, c.layers, errdefs.ErrFailedPrecondition)
 	}
 
 	replaced := make(chan struct{})
@@ -600,7 +625,7 @@ func (c *Container) replace(upper, dir string) error {
 	if err := copyTree(filepath.Join(dir, "upper"), upper); err != nil {
 		return fmt.Errorf("restore writable layer: %w", err)
 	}
-	if err := mountAll(c.rootfs, rootfs); err != nil {
+	if err := mountRootfs(c.rootfs, rootfs, c.layers); err != nil {
 		return fmt.Errorf("mount rootfs: %w", err)
 	}
 	lc, err := libcontainer.Create(Root(c.namespace), c.ID, c.cfg)
@@ -794,35 +819,6 @@ func mountAll(mounts []mount.Mount, target string) error {
 
 func systemdCgroupPath(spec *specs.Spec) bool {
 	return spec.Linux != nil && strings.Count(spec.Linux.CgroupsPath, ":") == 2
-}
-
-// forkUpper gives a forked container the files the snapshot had, by
-// copying the snapshot's writable layer into the container's own: the
-// fork then writes above them and changes nothing the snapshot or another
-// fork of it sees. The copy is a reflink where the filesystem has them
-// (btrfs, xfs) and real bytes where it does not (ext4), so on ext4 a fork
-// costs the size of the snapshot's layer, not of the image.
-func forkUpper(mounts []mount.Mount, dir string) error {
-	from := filepath.Join(dir, "upper")
-	if _, err := os.Stat(from); err != nil {
-		return fmt.Errorf("fork: %w", err)
-	}
-	for _, m := range mounts {
-		if m.Type != "overlay" {
-			return fmt.Errorf("fork needs an overlay rootfs, got %q: %w", m.Type, errdefs.ErrNotImplemented)
-		}
-		for _, o := range m.Options {
-			upper, ok := strings.CutPrefix(o, "upperdir=")
-			if !ok {
-				continue
-			}
-			if err := copyTree(from, upper); err != nil {
-				return fmt.Errorf("fork: copy the snapshot's layer: %w", err)
-			}
-			return nil
-		}
-	}
-	return fmt.Errorf("fork needs an overlay rootfs with a writable layer: %w", errdefs.ErrNotImplemented)
 }
 
 // idmapRootfs adds idmapping to an overlay rootfs: containerd's mount code

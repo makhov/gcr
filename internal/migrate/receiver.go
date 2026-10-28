@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/containerd/errdefs"
@@ -42,6 +44,7 @@ type Receiver struct {
 	root   string
 	upper  func() (string, error)
 	idBase func() uint32
+	layers func() []string
 
 	srv *http.Server
 	ln  net.Listener
@@ -57,9 +60,10 @@ type Receiver struct {
 }
 
 // NewReceiver listens on addr. root holds the round directories; upper
-// returns the target container's writable layer and idBase its user
-// namespace range (0 if none).
-func NewReceiver(ctx context.Context, addr, token, root string, upper func() (string, error), idBase func() uint32) (*Receiver, error) {
+// returns the target container's writable layer, idBase its user
+// namespace range (0 if none) and layers the read-only layers beneath its
+// writable layer.
+func NewReceiver(ctx context.Context, addr, token, root string, upper func() (string, error), idBase func() uint32, layers func() []string) (*Receiver, error) {
 	if token == "" {
 		return nil, fmt.Errorf("%s needs %s: %w", AnnotationIn, AnnotationToken, errdefs.ErrInvalidArgument)
 	}
@@ -79,7 +83,7 @@ func NewReceiver(ctx context.Context, addr, token, root string, upper func() (st
 	}
 	r := &Receiver{
 		ctx:  ctx,
-		host: host, token: token, root: root, upper: upper, idBase: idBase,
+		host: host, token: token, root: root, upper: upper, idBase: idBase, layers: layers,
 		ready: make(chan string, 1), result: make(chan error, 1), aborted: make(chan struct{}),
 	}
 	mux := http.NewServeMux()
@@ -155,6 +159,13 @@ func (r *Receiver) finishRound() error {
 // must have been created with the same range.
 const HeaderIDBase = "Gcr-Userns-Base"
 
+// HeaderLayers carries the read-only layers beneath the source's writable
+// layer, ':'-separated (overlay's own separator, so no layer has one). The
+// writable layer sent is only what changed above them, so the target must
+// have been created with the same ones: a fork of the same snapshot, on
+// storage both hosts see at the same path.
+const HeaderLayers = "Gcr-Layers"
+
 func (r *Receiver) startRound(w http.ResponseWriter, req *http.Request) {
 	src, _ := strconv.ParseUint(req.Header.Get(HeaderIDBase), 10, 32)
 	if dst := r.idBase(); uint32(src) != dst {
@@ -163,6 +174,15 @@ func (r *Receiver) startRound(w http.ResponseWriter, req *http.Request) {
 			hint = "create the target with gcr.dev/host-users=true"
 		}
 		http.Error(w, fmt.Sprintf("user namespace ranges differ (source %d, target %d): %s", src, dst, hint), http.StatusConflict)
+		return
+	}
+	var srcLayers []string
+	if h := req.Header.Get(HeaderLayers); h != "" {
+		srcLayers = strings.Split(h, ":")
+	}
+	if dst := r.layers(); !slices.Equal(srcLayers, dst) {
+		http.Error(w, fmt.Sprintf("layers beneath the writable layer differ (source %q, target %q): "+
+			"create the target with the source's %s", srcLayers, dst, "gcr.dev/fork-from"), http.StatusConflict)
 		return
 	}
 	r.mu.Lock()

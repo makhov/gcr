@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/checkpoint-restore/go-criu/v8/stats"
@@ -40,6 +41,8 @@ type Source interface {
 	UpperDir() (string, error)
 	// IDBase is the user namespace range's first host ID, 0 if none.
 	IDBase() uint32
+	// Layers are the read-only layers beneath the writable layer.
+	Layers() []string
 }
 
 // Result describes a finished migration.
@@ -60,7 +63,7 @@ func Send(ctx context.Context, src Source, target, token, work string) (res Resu
 	if err != nil {
 		return res, err
 	}
-	c := &client{base: u, token: token, idBase: src.IDBase()}
+	c := &client{base: u, token: token, idBase: src.IDBase(), layers: src.Layers()}
 	// Once the target runs the container, the source must never run again:
 	// no abort, no thaw, whatever happens after.
 	handedOver := false
@@ -155,6 +158,7 @@ type client struct {
 	base   *url.URL
 	token  string
 	idBase uint32
+	layers []string
 }
 
 func (c *client) do(ctx context.Context, method, path string, body io.Reader, out any) error {
@@ -164,6 +168,9 @@ func (c *client) do(ctx context.Context, method, path string, body io.Reader, ou
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set(HeaderIDBase, strconv.Itoa(int(c.idBase)))
+	if len(c.layers) > 0 {
+		req.Header.Set(HeaderLayers, strings.Join(c.layers, ":"))
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err

@@ -183,6 +183,11 @@ func testFork(t *testing.T, lazy bool) {
 	}
 	t.Logf("%d forks running from one snapshot in %s (lazy=%v)", forks, started.Round(time.Millisecond), lazy)
 
+	// Nothing was copied: every fork mounts the snapshot's layer itself.
+	if n := mountsOf(t, filepath.Join(dir, "upper")); n != forks {
+		t.Fatalf("%d overlays mount the snapshot's layer, want one a fork (%d)", n, forks)
+	}
+
 	// Each has its own writable layer: what one writes stays there, and
 	// the snapshot underneath is unchanged for the others.
 	for i, c := range children {
@@ -196,4 +201,81 @@ func testFork(t *testing.T, lazy bool) {
 			t.Fatalf("fork %d sees %q: forks share a writable layer", i, out)
 		}
 	}
+	if _, err := os.Stat(filepath.Join(dir, "upper", "whoami")); err == nil {
+		t.Fatal("a fork wrote into the snapshot's layer")
+	}
+}
+
+// A fork of a fork mounts both snapshots' layers, newest on top: what the
+// first fork wrote is there, and what it deleted from the first snapshot's
+// layer is gone, though that layer still has it.
+func TestForkOfFork(t *testing.T) {
+	ns := framework.NewNamespace(t, "gcr-e2e")
+	parent := ns.Run(framework.UniqueID("parent"), framework.Spec{Args: []string{"sh", "-c", counter}})
+	framework.Eventually(t, time.Minute, "the parent to start counting", func() bool {
+		s, _ := parent.ReadFile("/tmp/count")
+		n, err := strconv.Atoi(s)
+		return err == nil && n > 0
+	})
+	first := filepath.Join(framework.TempDir(t), "first")
+	if err := control.NewClient(ns.Name, parent.ID).Snapshot(t.Context(), first); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	a := ns.Run(framework.UniqueID("fork-a"), framework.Spec{
+		Args:        []string{"sh", "-c", counter},
+		Annotations: map[string]string{container.AnnotationForkFrom: first},
+	})
+	if out, code := a.Exec("sh", "-c", "rm /parent && echo a > /a"); code != 0 {
+		t.Fatalf("fork a: %s", out)
+	}
+	second := filepath.Join(framework.TempDir(t), "second")
+	if err := control.NewClient(ns.Name, a.ID).Snapshot(t.Context(), second); err != nil {
+		t.Fatalf("snapshot of a fork: %v", err)
+	}
+	at := a.ReadInt("/tmp/count")
+	if b, err := os.ReadFile(filepath.Join(second, container.LayersFile)); err != nil ||
+		strings.TrimSpace(string(b)) != filepath.Join(first, "upper") {
+		t.Fatalf("second snapshot's layers: %q, %v; want the first's", b, err)
+	}
+
+	b := ns.Run(framework.UniqueID("fork-b"), framework.Spec{
+		Args:        []string{"sh", "-c", counter},
+		Annotations: map[string]string{container.AnnotationForkFrom: second},
+	})
+	if s, err := b.ReadFile("/a"); err != nil || s != "a" {
+		t.Fatalf("fork b: /a is %q, %v: the second snapshot's layer is missing", s, err)
+	}
+	if out, code := b.Exec("test", "-e", "/parent"); code == 0 {
+		t.Fatalf("fork b sees /parent, which fork a deleted: %s", out)
+	}
+	if _, err := os.Stat(filepath.Join(first, "upper", "parent")); err != nil {
+		t.Fatalf("the first snapshot's layer lost /parent: %v", err)
+	}
+	if n := b.ReadInt("/tmp/count"); n < at {
+		t.Fatalf("fork b: count %d, below the second snapshot's %d", n, at)
+	}
+	// Each layer is mounted, not copied: by a and b, and by b.
+	if n := mountsOf(t, filepath.Join(first, "upper")); n != 2 {
+		t.Fatalf("%d overlays mount the first snapshot's layer, want 2", n)
+	}
+	if n := mountsOf(t, filepath.Join(second, "upper")); n != 1 {
+		t.Fatalf("%d overlays mount the second snapshot's layer, want 1", n)
+	}
+}
+
+// mountsOf counts the overlays that have layer among their lower layers.
+func mountsOf(t *testing.T, layer string) int {
+	t.Helper()
+	b, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, l := range strings.Split(string(b), "\n") {
+		if strings.Contains(l, " - overlay ") && (strings.Contains(l, "lowerdir="+layer+":") || strings.Contains(l, ":"+layer+":")) {
+			n++
+		}
+	}
+	return n
 }
