@@ -34,6 +34,7 @@ import (
 	"github.com/makhov/gcr/internal/control"
 	"github.com/makhov/gcr/internal/migrate"
 	"github.com/makhov/gcr/internal/timetravel"
+	"github.com/makhov/gcr/internal/userns"
 )
 
 // stateRoot holds per-container state (timelines, migration rounds) by
@@ -59,8 +60,10 @@ type service struct {
 type extras struct {
 	recorder *timetravel.Recorder // time travel, if enabled
 	receiver *migrate.Receiver    // incoming migration, if requested
+	userns   *userns.Range        // the container's user namespace range
 	control  *control.Server
 	stateDir string
+	id       string
 }
 
 func (e *extras) Close() {
@@ -72,6 +75,9 @@ func (e *extras) Close() {
 	}
 	if e.recorder != nil {
 		_ = e.recorder.Close()
+	}
+	if e.userns != nil {
+		_ = userns.Release(*e.userns, e.id)
 	}
 	_ = os.RemoveAll(e.stateDir)
 }
@@ -109,7 +115,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		rootfs = append(rootfs, mount.Mount{Type: m.Type, Source: m.Source, Target: m.Target, Options: m.Options})
 	}
 
-	ex := &extras{stateDir: filepath.Join(stateRoot, ns, r.ID)}
+	ex := &extras{stateDir: filepath.Join(stateRoot, ns, r.ID), id: r.ID}
 	var c *container.Container
 	opts := container.CreateOpts{
 		ID:         r.ID,
@@ -123,10 +129,41 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 	}
 	opts.PrepareSpec = func(spec *specs.Spec) (container.Prepared, error) {
 		var prep container.Prepared
+		if ok, why := userns.Wanted(spec); ok {
+			var (
+				want uint32
+				err  error
+			)
+			if v, ok := spec.Annotations[userns.AnnotationBase]; ok {
+				if want, err = userns.ParseBase(v); err != nil {
+					return prep, err
+				}
+			}
+			if r.Checkpoint != "" {
+				if b, err := os.ReadFile(filepath.Join(r.Checkpoint, userns.BaseFile)); err == nil {
+					if want, err = userns.ParseBase(string(b)); err != nil {
+						return prep, err
+					}
+				}
+			}
+			rng, err := userns.Allocate(spec, ns, r.ID, want)
+			if err != nil {
+				return prep, fmt.Errorf("user namespace: %w", err)
+			}
+			ex.userns = &rng
+			userns.Apply(spec, rng)
+			if err := userns.OpenNetwork(spec); err != nil {
+				return prep, fmt.Errorf("user namespace: pod network: %w", err)
+			}
+			prep.IDMap, prep.IDMapRoot = rng.IDMapOption(), int(rng.Base)
+		} else {
+			log.G(ctx).WithField("reason", why).Debug("no user namespace")
+		}
 		if addr, ok := spec.Annotations[migrate.AnnotationIn]; ok {
 			recv, err := migrate.NewReceiver(s.ctx, addr, spec.Annotations[migrate.AnnotationToken],
 				filepath.Join(ex.stateDir, "migrate-in"),
-				func() (string, error) { return c.UpperDir() })
+				func() (string, error) { return c.UpperDir() },
+				func() uint32 { return c.IDBase() })
 			if err != nil {
 				return prep, fmt.Errorf("migration receiver: %w", err)
 			}
@@ -183,7 +220,18 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 }
 
 func (s *service) Start(ctx context.Context, r *taskAPI.StartRequest) (*taskAPI.StartResponse, error) {
-	c, err := s.get(r.ID, r.ExecID)
+	if r.ExecID != "" {
+		e, err := s.getExec(r.ID, r.ExecID)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.Start(ctx); err != nil {
+			return nil, errgrpc.ToGRPC(err)
+		}
+		s.send(&eventstypes.TaskExecStarted{ContainerID: r.ID, ExecID: e.ID, Pid: uint32(e.Pid())})
+		return &taskAPI.StartResponse{Pid: uint32(e.Pid())}, nil
+	}
+	c, err := s.get(r.ID, "")
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +252,18 @@ func (s *service) Start(ctx context.Context, r *taskAPI.StartRequest) (*taskAPI.
 }
 
 func (s *service) Delete(ctx context.Context, r *taskAPI.DeleteRequest) (*taskAPI.DeleteResponse, error) {
-	c, err := s.get(r.ID, r.ExecID)
+	if r.ExecID != "" {
+		e, err := s.getExec(r.ID, r.ExecID)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.Delete(); err != nil {
+			return nil, errgrpc.ToGRPC(err)
+		}
+		status, at := e.Exit()
+		return &taskAPI.DeleteResponse{Pid: uint32(e.Pid()), ExitStatus: status, ExitedAt: protobuf.ToTimestamp(at)}, nil
+	}
+	c, err := s.get(r.ID, "")
 	if err != nil {
 		return nil, err
 	}
@@ -244,7 +303,18 @@ func (s *service) State(ctx context.Context, r *taskAPI.StateRequest) (*taskAPI.
 		Bundle: c.Bundle,
 		Pid:    uint32(c.Pid()),
 	}
-	switch c.Status() {
+	status, exit := c.Status(), c.Exit
+	if r.ExecID != "" {
+		e, err := s.getExec(r.ID, r.ExecID)
+		if err != nil {
+			return nil, err
+		}
+		resp.ExecID = e.ID
+		resp.Pid = uint32(e.Pid())
+		resp.Terminal = e.Spec().Terminal
+		status, exit = e.Status(), e.Exit
+	}
+	switch status {
 	case container.Created:
 		resp.Status = apitask.Status_CREATED
 	case container.Running:
@@ -253,15 +323,25 @@ func (s *service) State(ctx context.Context, r *taskAPI.StateRequest) (*taskAPI.
 		resp.Status = apitask.Status_PAUSED
 	case container.Stopped:
 		resp.Status = apitask.Status_STOPPED
-		status, at := c.Exit()
-		resp.ExitStatus = status
+		code, at := exit()
+		resp.ExitStatus = code
 		resp.ExitedAt = protobuf.ToTimestamp(at)
 	}
 	return resp, nil
 }
 
 func (s *service) Kill(ctx context.Context, r *taskAPI.KillRequest) (*ptypes.Empty, error) {
-	c, err := s.get(r.ID, r.ExecID)
+	if r.ExecID != "" {
+		e, err := s.getExec(r.ID, r.ExecID)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.Kill(syscall.Signal(r.Signal)); err != nil {
+			return nil, errgrpc.ToGRPC(err)
+		}
+		return empty, nil
+	}
+	c, err := s.get(r.ID, "")
 	if err != nil {
 		return nil, err
 	}
@@ -321,12 +401,20 @@ func (s *service) Wait(ctx context.Context, r *taskAPI.WaitRequest) (*taskAPI.Wa
 	if err != nil {
 		return nil, err
 	}
+	exited, exit := c.Exited(), c.Exit
+	if r.ExecID != "" {
+		e, err := s.getExec(r.ID, r.ExecID)
+		if err != nil {
+			return nil, err
+		}
+		exited, exit = e.Exited(), e.Exit
+	}
 	select {
-	case <-c.Exited():
+	case <-exited:
 	case <-ctx.Done():
 		return nil, errgrpc.ToGRPC(ctx.Err())
 	}
-	status, at := c.Exit()
+	status, at := exit()
 	return &taskAPI.WaitResponse{ExitStatus: status, ExitedAt: protobuf.ToTimestamp(at)}, nil
 }
 
@@ -349,15 +437,75 @@ func (s *service) Shutdown(ctx context.Context, r *taskAPI.ShutdownRequest) (*pt
 }
 
 func (s *service) Exec(ctx context.Context, r *taskAPI.ExecProcessRequest) (*ptypes.Empty, error) {
-	return nil, errgrpc.ToGRPCf(errdefs.ErrNotImplemented, "exec")
+	c, err := s.get(r.ID, "")
+	if err != nil {
+		return nil, err
+	}
+	v, err := typeurl.UnmarshalAny(r.Spec)
+	if err != nil {
+		return nil, errgrpc.ToGRPC(err)
+	}
+	spec, ok := v.(*specs.Process)
+	if !ok {
+		return nil, errgrpc.ToGRPCf(errdefs.ErrInvalidArgument, "exec spec is %T", v)
+	}
+	spec.Terminal = r.Terminal
+	_, err = c.AddExec(ctx, r.ExecID, spec, r.Stdin, r.Stdout, r.Stderr, func(e *container.Exec) {
+		code, at := e.Exit()
+		s.send(&eventstypes.TaskExit{
+			ContainerID: r.ID,
+			ID:          e.ID,
+			Pid:         uint32(e.Pid()),
+			ExitStatus:  code,
+			ExitedAt:    protobuf.ToTimestamp(at),
+		})
+	})
+	if err != nil {
+		return nil, errgrpc.ToGRPC(err)
+	}
+	s.send(&eventstypes.TaskExecAdded{ContainerID: r.ID, ExecID: r.ExecID})
+	return empty, nil
 }
 
 func (s *service) ResizePty(ctx context.Context, r *taskAPI.ResizePtyRequest) (*ptypes.Empty, error) {
-	return nil, errgrpc.ToGRPCf(errdefs.ErrNotImplemented, "terminal")
+	if r.ExecID != "" {
+		e, err := s.getExec(r.ID, r.ExecID)
+		if err != nil {
+			return nil, err
+		}
+		if err := e.Resize(r.Width, r.Height); err != nil {
+			return nil, errgrpc.ToGRPC(err)
+		}
+		return empty, nil
+	}
+	c, err := s.get(r.ID, "")
+	if err != nil {
+		return nil, err
+	}
+	if err := c.Resize(r.Width, r.Height); err != nil {
+		return nil, errgrpc.ToGRPC(err)
+	}
+	return empty, nil
 }
 
 func (s *service) CloseIO(ctx context.Context, r *taskAPI.CloseIORequest) (*ptypes.Empty, error) {
-	return nil, errgrpc.ToGRPCf(errdefs.ErrNotImplemented, "close io")
+	if !r.Stdin {
+		return empty, nil
+	}
+	if r.ExecID != "" {
+		e, err := s.getExec(r.ID, r.ExecID)
+		if err != nil {
+			return nil, err
+		}
+		e.CloseStdin()
+		return empty, nil
+	}
+	c, err := s.get(r.ID, "")
+	if err != nil {
+		return nil, err
+	}
+	c.CloseStdin()
+	return empty, nil
 }
 
 func (s *service) Pause(ctx context.Context, r *taskAPI.PauseRequest) (*ptypes.Empty, error) {
@@ -385,11 +533,38 @@ func (s *service) Resume(ctx context.Context, r *taskAPI.ResumeRequest) (*ptypes
 }
 
 func (s *service) Update(ctx context.Context, r *taskAPI.UpdateTaskRequest) (*ptypes.Empty, error) {
-	return nil, errgrpc.ToGRPCf(errdefs.ErrNotImplemented, "update")
+	c, err := s.get(r.ID, "")
+	if err != nil {
+		return nil, err
+	}
+	v, err := typeurl.UnmarshalAny(r.Resources)
+	if err != nil {
+		return nil, errgrpc.ToGRPC(err)
+	}
+	res, ok := v.(*specs.LinuxResources)
+	if !ok {
+		return nil, errgrpc.ToGRPCf(errdefs.ErrInvalidArgument, "resources are %T", v)
+	}
+	if err := c.Update(res); err != nil {
+		return nil, errgrpc.ToGRPC(err)
+	}
+	return empty, nil
 }
 
 func (s *service) Stats(ctx context.Context, r *taskAPI.StatsRequest) (*taskAPI.StatsResponse, error) {
-	return nil, errgrpc.ToGRPCf(errdefs.ErrNotImplemented, "stats")
+	c, err := s.get(r.ID, "")
+	if err != nil {
+		return nil, err
+	}
+	m, err := c.Stats()
+	if err != nil {
+		return nil, errgrpc.ToGRPC(err)
+	}
+	a, err := typeurl.MarshalAnyToProto(m)
+	if err != nil {
+		return nil, errgrpc.ToGRPC(err)
+	}
+	return &taskAPI.StatsResponse{Stats: a}, nil
 }
 
 // migrateOut sends container c to the receiver at target.
@@ -411,15 +586,31 @@ func (s *service) migrateOut(ctx context.Context, c *container.Container, ex *ex
 	return res, err
 }
 
-func (s *service) get(id, execID string) (*container.Container, error) {
-	if execID != "" {
-		return nil, errgrpc.ToGRPCf(errdefs.ErrNotImplemented, "exec processes")
+// getExec returns the exec process execID of container id.
+func (s *service) getExec(id, execID string) (*container.Exec, error) {
+	c, err := s.get(id, "")
+	if err != nil {
+		return nil, err
 	}
+	e, err := c.Exec(execID)
+	if err != nil {
+		return nil, errgrpc.ToGRPC(err)
+	}
+	return e, nil
+}
+
+// get returns container id; with an exec id it only checks the exec exists.
+func (s *service) get(id, execID string) (*container.Container, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	c, ok := s.containers[id]
+	s.mu.Unlock()
 	if !ok {
 		return nil, errgrpc.ToGRPCf(errdefs.ErrNotFound, "container %s", id)
+	}
+	if execID != "" {
+		if _, err := c.Exec(execID); err != nil {
+			return nil, errgrpc.ToGRPC(err)
+		}
 	}
 	return c, nil
 }

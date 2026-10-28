@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -25,6 +27,8 @@ import (
 	"github.com/opencontainers/runc/libcontainer/specconv"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
+
+	"github.com/makhov/gcr/internal/userns"
 )
 
 // StateRoot holds libcontainer state, one directory per containerd namespace.
@@ -64,6 +68,11 @@ type Prepared struct {
 	// CheckpointFrom, when set, makes Start wait for it to return a
 	// directory of CRIU images and restore from it (incoming migration).
 	CheckpointFrom func(context.Context) (string, error)
+	// IDMap, when set (containerd's "0:host:size" form), mounts the image
+	// layers idmapped for the container's user namespace and hands a fresh
+	// writable layer to the mapped root (IDMapRoot).
+	IDMap     string
+	IDMapRoot int
 }
 
 type CheckpointOpts struct {
@@ -85,7 +94,8 @@ type Container struct {
 	spec           *specs.Spec
 	checkpoint     string
 	checkpointFrom func(context.Context) (string, error)
-	io             *stdio
+	io             *stdio // pipes, when the init has no terminal
+	tty            *ttyIO // when it has one
 
 	// op serializes operations that replace or freeze the processes
 	// (snapshot, rewind) against each other and against delete.
@@ -105,6 +115,9 @@ type Container struct {
 	replaced  chan struct{}
 	// migrating blocks snapshots and rewinds while a migration dumps.
 	migrating bool
+	// idBase is the first host ID of the user namespace range, 0 if none.
+	idBase uint32
+	execs     map[string]*Exec
 }
 
 // Root returns the libcontainer state directory for a containerd namespace.
@@ -122,9 +135,6 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	if spec.Process == nil {
 		return nil, fmt.Errorf("spec has no process: %w", errdefs.ErrInvalidArgument)
 	}
-	if spec.Process.Terminal {
-		return nil, fmt.Errorf("terminal: %w", errdefs.ErrNotImplemented)
-	}
 	var prep Prepared
 	if o.PrepareSpec != nil {
 		if prep, err = o.PrepareSpec(spec); err != nil {
@@ -132,12 +142,22 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		}
 	}
 
+	if prep.IDMap != "" {
+		if o.Rootfs, err = idmapRootfs(o.Rootfs, prep.IDMap, prep.IDMapRoot); err != nil {
+			return nil, err
+		}
+		// The container's init runs as the mapped root and must reach
+		// bundle/rootfs; containerd creates the bundle 0700.
+		if err := os.Chmod(o.Bundle, 0o711); err != nil {
+			return nil, err
+		}
+	}
 	rootfs := filepath.Join(o.Bundle, "rootfs")
 	if len(o.Rootfs) > 0 {
 		if err := os.MkdirAll(rootfs, 0o711); err != nil {
 			return nil, err
 		}
-		if err := mount.All(o.Rootfs, rootfs); err != nil {
+		if err := mountAll(o.Rootfs, rootfs); err != nil {
 			return nil, fmt.Errorf("mount rootfs: %w", err)
 		}
 		defer func() {
@@ -153,9 +173,15 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	cfg, err := specconv.CreateLibcontainerConfig(&specconv.CreateOpts{
 		CgroupName: o.ID,
 		Spec:       spec,
+		// "slice:prefix:name" is how CRI asks for the systemd cgroup driver.
+		UseSystemdCgroup: systemdCgroupPath(spec),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("convert spec: %w", err)
+	}
+	if spec.Process.Terminal && (o.Checkpoint != "" || prep.CheckpointFrom != nil || prep.CRIUConfig != "") {
+		// CRIU restores only pipes for stdio; a pty would need --shell-job.
+		return nil, fmt.Errorf("checkpoint, time travel and migration need a container without a terminal: %w", errdefs.ErrNotImplemented)
 	}
 	if prep.CRIUConfig != "" {
 		cfg.Labels = append(cfg.Labels, "org.criu.config="+prep.CRIUConfig)
@@ -170,13 +196,25 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		}
 	}()
 
-	io, err := openStdio(ctx, o.Stdin, o.Stdout, o.Stderr)
+	var (
+		io  *stdio
+		tty *ttyIO
+	)
+	if spec.Process.Terminal {
+		tty, err = openTTY(ctx, o.Stdin, o.Stdout)
+	} else {
+		io, err = openStdio(ctx, o.Stdin, o.Stdout, o.Stderr)
+	}
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
 		if retErr != nil {
-			io.Close()
+			if tty != nil {
+				tty.Close()
+			} else {
+				io.Close()
+			}
 		}
 	}()
 
@@ -191,6 +229,8 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		checkpoint:     o.Checkpoint,
 		checkpointFrom: prep.CheckpointFrom,
 		io:             io,
+		tty:            tty,
+		idBase:         uint32(prep.IDMapRoot),
 		status:     Created,
 		exited:     make(chan struct{}),
 		onExit:     onExit,
@@ -206,6 +246,11 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	}
 	if err := lc.Start(proc); err != nil {
 		return nil, fmt.Errorf("start init: %w", err)
+	}
+	if tty != nil {
+		if err := tty.started(); err != nil {
+			return nil, err
+		}
 	}
 	if err := c.track(proc); err != nil {
 		return nil, err
@@ -251,7 +296,7 @@ func (c *Container) restore(images string) error {
 		WorkDirectory:   work,
 	})
 	if err != nil {
-		c.io.detach()
+		c.io.detach() // restore requires pipes, never a terminal
 		return fmt.Errorf("restore (criu log in %s): %w", work, err)
 	}
 	_ = os.RemoveAll(work)
@@ -288,8 +333,16 @@ func (c *Container) Checkpoint(ctx context.Context, opts CheckpointOpts) error {
 	if err != nil {
 		return fmt.Errorf("checkpoint (criu log in %s): %w", work, err)
 	}
+	// A restore must use the same user namespace range: CRIU restores the
+	// processes into the mapping they were dumped with.
+	if c.idBase != 0 {
+		return os.WriteFile(filepath.Join(opts.ImagePath, userns.BaseFile), []byte(strconv.Itoa(int(c.idBase))), 0o600)
+	}
 	return nil
 }
+
+// IDBase is the container's user namespace range (first host ID), 0 if none.
+func (c *Container) IDBase() uint32 { return c.idBase }
 
 // Running reports whether the container's processes have started.
 func (c *Container) Running() bool {
@@ -390,7 +443,7 @@ func (c *Container) replace(upper, dir string) error {
 	if err := copyTree(filepath.Join(dir, "upper"), upper); err != nil {
 		return fmt.Errorf("restore writable layer: %w", err)
 	}
-	if err := mount.All(c.rootfs, rootfs); err != nil {
+	if err := mountAll(c.rootfs, rootfs); err != nil {
 		return fmt.Errorf("mount rootfs: %w", err)
 	}
 	lc, err := libcontainer.Create(Root(c.namespace), c.ID, c.cfg)
@@ -498,6 +551,52 @@ func (c *Container) Stop() error {
 	return nil
 }
 
+// mountAll mounts a copy of mounts: containerd's idmapped overlay setup
+// rewrites the options slice in place (lowerdir= to temporary idmapped
+// copies it removes afterwards), and the originals are mounted again on a
+// rewind.
+func mountAll(mounts []mount.Mount, target string) error {
+	cp := make([]mount.Mount, len(mounts))
+	for i, m := range mounts {
+		m.Options = slices.Clone(m.Options)
+		cp[i] = m
+	}
+	return mount.All(cp, target)
+}
+
+func systemdCgroupPath(spec *specs.Spec) bool {
+	return spec.Linux != nil && strings.Count(spec.Linux.CgroupsPath, ":") == 2
+}
+
+// idmapRootfs adds idmapping to an overlay rootfs: containerd's mount code
+// idmaps the lower layers, and a still empty upper layer is given to the
+// container's root so files it creates are owned by the mapped IDs.
+func idmapRootfs(mounts []mount.Mount, idmap string, root int) ([]mount.Mount, error) {
+	out := slices.Clone(mounts)
+	for i, m := range out {
+		if m.Type != "overlay" {
+			return nil, fmt.Errorf("user namespaces need an overlay rootfs, got %q: %w", m.Type, errdefs.ErrNotImplemented)
+		}
+		for _, o := range m.Options {
+			upper, ok := strings.CutPrefix(o, "upperdir=")
+			if !ok {
+				continue
+			}
+			entries, err := os.ReadDir(upper)
+			if err != nil {
+				return nil, err
+			}
+			if len(entries) == 0 {
+				if err := os.Chown(upper, root, root); err != nil {
+					return nil, fmt.Errorf("give writable layer to the container's root: %w", err)
+				}
+			}
+		}
+		out[i].Options = append(slices.Clone(m.Options), "uidmap="+idmap, "gidmap="+idmap)
+	}
+	return out, nil
+}
+
 // UpperDir returns the writable layer of an overlay rootfs.
 func (c *Container) UpperDir() (string, error) {
 	for _, m := range c.rootfs {
@@ -558,8 +657,36 @@ func (c *Container) Delete(ctx context.Context) error {
 	if err := mount.UnmountRecursive(filepath.Join(c.Bundle, "rootfs"), 0); err != nil {
 		errs = append(errs, err)
 	}
-	c.io.Close()
+	c.mu.Lock()
+	execs := c.execs
+	c.execs = nil
+	c.mu.Unlock()
+	for _, e := range execs {
+		e.closeIO()
+	}
+	if c.tty != nil {
+		c.tty.Close()
+	} else {
+		c.io.Close()
+	}
 	return errors.Join(errs...)
+}
+
+// Resize sets the init's terminal size.
+func (c *Container) Resize(width, height uint32) error {
+	if c.tty == nil {
+		return fmt.Errorf("container has no terminal: %w", errdefs.ErrFailedPrecondition)
+	}
+	return c.tty.resize(width, height)
+}
+
+// CloseStdin gives the init EOF on stdin.
+func (c *Container) CloseStdin() {
+	if c.tty != nil {
+		c.tty.closeStdin()
+	} else {
+		c.io.closeStdin()
+	}
 }
 
 // Pause freezes every process in the container's cgroup.
@@ -627,7 +754,11 @@ func (c *Container) initProcess() (*libcontainer.Process, error) {
 		return nil, err
 	}
 	proc.Init = true
-	if proc.Stdin, proc.Stdout, proc.Stderr, err = c.io.attach(); err != nil {
+	if c.tty != nil {
+		c.tty.setup(proc, c.spec.Process.ConsoleSize)
+		return proc, nil
+	}
+	if proc.Stdin, proc.Stdout, proc.Stderr, err = c.io.attach(int(c.idBase)); err != nil {
 		return nil, err
 	}
 	return proc, nil
@@ -643,7 +774,9 @@ func (c *Container) track(proc *libcontainer.Process) error {
 	c.mu.Lock()
 	c.pid = pid
 	c.mu.Unlock()
-	c.io.detach()
+	if c.io != nil {
+		c.io.detach()
+	}
 
 	go func() {
 		st, _ := proc.Wait()
@@ -656,7 +789,15 @@ func (c *Container) track(proc *libcontainer.Process) error {
 			return
 		}
 		c.mu.Unlock()
-		c.io.wait()
+		if c.tty != nil {
+			c.tty.wait()
+			c.tty.Close()
+		} else {
+			c.io.wait()
+			// containerd (and ctr attached to the task) read the fifos
+			// until EOF.
+			c.io.Close()
+		}
 		c.markExited(st)
 	}()
 	return nil

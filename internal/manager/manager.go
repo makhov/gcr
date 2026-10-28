@@ -20,7 +20,15 @@ import (
 	"github.com/containerd/containerd/v2/defaults"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/shim"
+	"github.com/containerd/typeurl/v2"
 	"github.com/opencontainers/runc/libcontainer"
+	"github.com/opencontainers/runc/libcontainer/capabilities"
+	"github.com/opencontainers/runc/libcontainer/configs"
+	"github.com/opencontainers/runc/libcontainer/seccomp"
+	"github.com/opencontainers/runc/libcontainer/specconv"
+	runcfeatures "github.com/opencontainers/runc/types/features"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/opencontainers/runtime-spec/specs-go/features"
 	"golang.org/x/sys/unix"
 
 	"github.com/makhov/gcr/internal/container"
@@ -152,9 +160,46 @@ func (m *manager) Stop(ctx context.Context, id string) (shim.StopStatus, error) 
 	}, nil
 }
 
+// Info reports what gcr supports, in the form of `runc features`.
+// containerd's CRI reads it, e.g. to allow user namespace pods.
 func (m *manager) Info(ctx context.Context, optionsR io.Reader) (*types.RuntimeInfo, error) {
+	t := true
+	feat := &features.Features{
+		OCIVersionMin: "1.0.0",
+		OCIVersionMax: specs.Version,
+		Annotations: map[string]string{
+			runcfeatures.AnnotationRuncCheckpointEnabled: "true",
+		},
+		Hooks:        configs.KnownHookNames(),
+		MountOptions: specconv.KnownMountOptions(),
+		Linux: &features.Linux{
+			Namespaces:   specconv.KnownNamespaces(),
+			Capabilities: capabilities.KnownCapabilities(),
+			Cgroup:       &features.Cgroup{V2: &t, Systemd: &t},
+			Apparmor:     &features.Apparmor{Enabled: &t},
+			Selinux:      &features.Selinux{Enabled: &t},
+			MountExtensions: &features.MountExtensions{
+				IDMap: &features.IDMap{Enabled: &t},
+			},
+		},
+	}
+	if seccomp.Enabled {
+		feat.Linux.Seccomp = &features.Seccomp{
+			Enabled:        &t,
+			Actions:        seccomp.KnownActions(),
+			Operators:      seccomp.KnownOperators(),
+			Archs:          seccomp.KnownArchs(),
+			KnownFlags:     seccomp.KnownFlags(),
+			SupportedFlags: seccomp.SupportedFlags(),
+		}
+	}
+	a, err := typeurl.MarshalAnyToProto(feat)
+	if err != nil {
+		return nil, err
+	}
 	return &types.RuntimeInfo{
-		Name:    m.name,
-		Version: &types.RuntimeVersion{Version: "dev"},
+		Name:     m.name,
+		Version:  &types.RuntimeVersion{Version: "dev"},
+		Features: a,
 	}, nil
 }

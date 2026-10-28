@@ -1,7 +1,8 @@
 #!/bin/bash
 # End-to-end migration on one host, from containerd namespace "src" to "dst".
 # A counter migrates and must carry on from where it was; a migration the
-# target refuses must leave the source running.
+# target refuses (here: a different user namespace range) must leave the
+# source running.
 set -euo pipefail
 
 RUNTIME=io.containerd.gcr.v2
@@ -28,23 +29,29 @@ fail() { echo "FAIL: $*"; exit 1; }
 
 for ns in src dst; do ctr -n $ns image pull "$IMAGE" >/dev/null; done
 
-echo "== source"
+echo "== a target with another user namespace range is refused; the source keeps running"
 ctr -n src run -d --runtime "$RUNTIME" "$IMAGE" "$ID" "${CMD[@]}"
-sleep 2
-
-echo "== a refused migration leaves the source running"
 ctr -n dst run -d --runtime "$RUNTIME" \
 	--annotation gcr.dev/migrate-in=$ADDR --annotation gcr.dev/migrate-token=$TOKEN \
 	"$IMAGE" "$ID" "${CMD[@]}" >/dev/null 2>&1 &
-sleep 1
-if gcr -n src migrate -token wrong "$ID" "http://$ADDR" 2>/dev/null; then
-	fail "migration with a wrong token succeeded"
+sleep 2
+if out=$(gcr -n src migrate -token "$TOKEN" "$ID" "http://$ADDR" 2>&1); then
+	fail "migration between different user namespace ranges succeeded"
 fi
+echo "$out" | grep -q "user namespace ranges differ" || fail "unexpected error: $out"
 a=$(cat "$(rootfs src)/tmp/count"); sleep 0.5; b=$(cat "$(rootfs src)/tmp/count")
 [ "$b" -gt "$a" ] || fail "source stopped after a refused migration"
-echo "source still counting ($a -> $b)"
+echo "refused: ${out#gcr: }"
+cleanup
 
-echo "== migrate"
+# The source holds its range until it is killed, so on one host the target
+# cannot take it; across hosts it would be created with gcr.dev/userns-base.
+echo "== migrate (host users on one host)"
+ctr -n src run -d --runtime "$RUNTIME" --annotation gcr.dev/host-users=true "$IMAGE" "$ID" "${CMD[@]}"
+ctr -n dst run -d --runtime "$RUNTIME" --annotation gcr.dev/host-users=true \
+	--annotation gcr.dev/migrate-in=$ADDR --annotation gcr.dev/migrate-token=$TOKEN \
+	"$IMAGE" "$ID" "${CMD[@]}" >/dev/null 2>&1 &
+sleep 2
 gcr -n src migrate -token "$TOKEN" "$ID" "http://$ADDR"
 last=$(cat "$(rootfs src)/tmp/count")
 sleep 1

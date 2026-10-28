@@ -20,7 +20,8 @@ import (
 // rewind) gets fresh output pipes from attach.
 type stdio struct {
 	// stdin pipe: the read end is handed to every incarnation.
-	inR, inW *os.File
+	inR, inW  *os.File
+	stdinFifo io.Closer
 	// fifos that output pipes are copied to; nil when not requested.
 	stdout, stderr io.Writer
 
@@ -52,6 +53,7 @@ func openStdio(ctx context.Context, stdin, stdout, stderr string) (_ *stdio, ret
 			return nil, fmt.Errorf("open stdin fifo: %w", err)
 		}
 		s.closers = append(s.closers, f)
+		s.stdinFifo = f
 		go func() {
 			_, _ = io.Copy(w, f)
 			w.Close()
@@ -87,11 +89,16 @@ func openStdio(ctx context.Context, stdin, stdout, stderr string) (_ *stdio, ret
 
 // attach creates output pipes for a new incarnation and starts copying them
 // to the fifos. It returns the files to give the init process; nil means
-// /dev/null.
-func (s *stdio) attach() (in io.Reader, out, errw io.Writer, err error) {
+// /dev/null. owner, if not 0, is the host ID of the container's root in its
+// user namespace: the container's pipe ends become its, so the process can
+// reopen them (/dev/stdout, /proc/self/fd/1), as runc does.
+func (s *stdio) attach(owner int) (in io.Reader, out, errw io.Writer, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.inR != nil {
+		if err := chown(s.inR, owner); err != nil {
+			return nil, nil, nil, err
+		}
 		in = s.inR
 	}
 	for _, o := range []struct {
@@ -106,6 +113,11 @@ func (s *stdio) attach() (in io.Reader, out, errw io.Writer, err error) {
 		}
 		r, w, err := os.Pipe()
 		if err != nil {
+			return nil, nil, nil, err
+		}
+		if err := chown(w, owner); err != nil {
+			r.Close()
+			w.Close()
 			return nil, nil, nil, err
 		}
 		*o.end = w
@@ -125,6 +137,13 @@ func (s *stdio) attach() (in io.Reader, out, errw io.Writer, err error) {
 	return in, out, errw, nil
 }
 
+func chown(f *os.File, owner int) error {
+	if owner == 0 {
+		return nil
+	}
+	return f.Chown(owner, owner)
+}
+
 // detach drops the shim's copies of the incarnation's output ends, so the
 // copies end when the container's processes close theirs.
 func (s *stdio) detach() {
@@ -136,6 +155,16 @@ func (s *stdio) detach() {
 		}
 	}
 	s.out, s.errw = nil, nil
+}
+
+// closeStdin gives the process EOF on stdin (CloseIO).
+func (s *stdio) closeStdin() {
+	if s.stdinFifo != nil {
+		s.stdinFifo.Close()
+	}
+	if s.inW != nil {
+		s.inW.Close()
+	}
 }
 
 // wait blocks until all container output has been copied to the fifos.

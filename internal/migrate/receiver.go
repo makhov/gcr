@@ -39,8 +39,9 @@ type Receiver struct {
 	ctx   context.Context
 	host  string
 	token string
-	root  string
-	upper func() (string, error)
+	root   string
+	upper  func() (string, error)
+	idBase func() uint32
 
 	srv *http.Server
 
@@ -55,8 +56,9 @@ type Receiver struct {
 }
 
 // NewReceiver listens on addr. root holds the round directories; upper
-// returns the target container's writable layer.
-func NewReceiver(ctx context.Context, addr, token, root string, upper func() (string, error)) (*Receiver, error) {
+// returns the target container's writable layer and idBase its user
+// namespace range (0 if none).
+func NewReceiver(ctx context.Context, addr, token, root string, upper func() (string, error), idBase func() uint32) (*Receiver, error) {
 	if token == "" {
 		return nil, fmt.Errorf("%s needs %s: %w", AnnotationIn, AnnotationToken, errdefs.ErrInvalidArgument)
 	}
@@ -76,7 +78,7 @@ func NewReceiver(ctx context.Context, addr, token, root string, upper func() (st
 	}
 	r := &Receiver{
 		ctx:  ctx,
-		host: host, token: token, root: root, upper: upper,
+		host: host, token: token, root: root, upper: upper, idBase: idBase,
 		ready: make(chan string, 1), result: make(chan error, 1), aborted: make(chan struct{}),
 	}
 	mux := http.NewServeMux()
@@ -143,7 +145,21 @@ func (r *Receiver) finishRound() error {
 	return err
 }
 
+// HeaderIDBase carries the source's user namespace range (0: none). CRIU
+// restores processes into the mapping they were dumped with, so the target
+// must have been created with the same range.
+const HeaderIDBase = "Gcr-Userns-Base"
+
 func (r *Receiver) startRound(w http.ResponseWriter, req *http.Request) {
+	src, _ := strconv.ParseUint(req.Header.Get(HeaderIDBase), 10, 32)
+	if dst := r.idBase(); uint32(src) != dst {
+		hint := fmt.Sprintf("create the target with %s=%d", "gcr.dev/userns-base", src)
+		if src == 0 {
+			hint = "create the target with gcr.dev/host-users=true"
+		}
+		http.Error(w, fmt.Sprintf("user namespace ranges differ (source %d, target %d): %s", src, dst, hint), http.StatusConflict)
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := r.finishRound(); err != nil {
