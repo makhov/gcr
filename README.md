@@ -11,7 +11,7 @@ fork, `makhov/runc`, which adds an init hook for Landlock); no runc binary.
   resize, state, kill, wait, delete, pids, pause, resume, stats, resource
   updates, checkpoint, restore. Passes the CRI conformance suite (critest).
 - User namespaces by default (below).
-- Time travel and live migration (below).
+- Time travel, live migration and fork (below).
 - Hardening: a denied set of system calls on top of any profile, supervised
   mounts, a netlink policy (BPF LSM) and Landlock confining containers to
   their root (below).
@@ -356,6 +356,40 @@ Rewind replaces the processes and the writable layer in place; containerd
 keeps seeing one running task. It needs CRIU with `--seccomp-notify-socket`
 ([makhov/criu#1](https://github.com/makhov/criu/pull/1)) installed as `criu`.
 
+## Fork
+
+A snapshot of a running container is a starting point for any number of
+new ones. The parent keeps running:
+
+```sh
+gcr snapshot my-container /var/lib/gcr/snapshots/warm
+ctr run -d --runtime io.containerd.gcr.v2 \
+  --annotation gcr.dev/fork-from=/var/lib/gcr/snapshots/warm \
+  docker.io/library/python:3.13 fork-1 python3 -c 'pass'
+```
+
+Each fork restores the snapshot's processes, so it starts with whatever
+the parent had in memory (an interpreter up, a model loaded) instead of
+from its image's entrypoint, and gets the snapshot's files with its own
+writable layer on top: what one fork writes, no other fork and not the
+snapshot ever sees. The image the container is created with supplies the
+lower layers and must be the one the snapshot was taken from.
+
+Forks share the parent's user namespace range, because the snapshot's
+files carry host IDs from it: they are isolated from other containers,
+not from each other at the host-ID level, which suits fanning one
+workload out and not running two tenants. The snapshot's writable layer
+is copied into each fork, with reflinks where the filesystem has them
+(btrfs, xfs) and real bytes where it does not (ext4); sharing it as a
+read-only layer instead would cost nothing per fork, and needs gcr to
+assemble the overlay itself, since containerd's idmapped overlay wants
+every layer under one directory and would map the snapshot's twice.
+Memory is copied per fork as well: CRIU's lazy pages would let a fork run
+before its memory is loaded, and sharing it copy-on-write is the open
+question in the design.
+
+`test/e2e/fork` snapshots a counter and runs ten forks of it at once.
+
 ## Live migration
 
 The target is an ordinary gcr container with the same image and command,
@@ -400,6 +434,7 @@ CRI, checkpoint/restore, static helper programs to run in containers):
 | --- | --- |
 | `checkpoint` | a counter carries on after checkpoint/restore, in the same user namespace |
 | `timetravel` | a timeline, a rewind; the counter, the filesystem and the recording carry on from the point |
+| `fork` | ten containers from one snapshot: each resumes its memory, each has its own writable layer |
 | `migrate` | live migration between containerd namespaces (pre-copy on x86); a refused one leaves the source running |
 | `hardening` | refused system calls with hardening on and off; supervised mounts, by exact return value; nested user namespaces; the netlink policy (BPF LSM) |
 | `landlock` | a leaked host descriptor, with Landlock on and off, across a restore |
