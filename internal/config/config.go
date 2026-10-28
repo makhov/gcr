@@ -17,6 +17,7 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 
 	"github.com/makhov/gcr/internal/hardening"
+	"github.com/makhov/gcr/internal/landlock"
 	"github.com/makhov/gcr/internal/userns"
 )
 
@@ -26,6 +27,8 @@ type Config struct {
 	UserNamespaces userns.Mode `toml:"UserNamespaces"`
 	// Hardening is "standard" (default) or "off"; see hardening.Level.
 	Hardening hardening.Level `toml:"Hardening"`
+	// Landlock is "standard" (default) or "off"; see landlock.Level.
+	Landlock landlock.Level `toml:"Landlock"`
 
 	// IOUID and IOGID own the container's stdio pipes. containerd sets
 	// them (in runc's options) for Kubernetes user namespace pods, so the
@@ -36,7 +39,7 @@ type Config struct {
 // FromOptions decodes the runtime options of a create request. No options
 // means the defaults.
 func FromOptions(a *anypb.Any) (Config, error) {
-	c := Config{UserNamespaces: userns.Auto, Hardening: hardening.Standard}
+	c := Config{UserNamespaces: userns.Auto, Hardening: hardening.Standard, Landlock: landlock.Standard}
 	if a == nil || len(a.GetValue()) == 0 {
 		return c, nil
 	}
@@ -67,6 +70,9 @@ func FromOptions(a *anypb.Any) (Config, error) {
 		return c, err
 	}
 	if err := c.Hardening.Validate(); err != nil {
+		return c, err
+	}
+	if err := c.Landlock.Validate(); err != nil {
 		return c, err
 	}
 	return c, nil

@@ -34,6 +34,7 @@ import (
 	"github.com/makhov/gcr/internal/container"
 	"github.com/makhov/gcr/internal/control"
 	"github.com/makhov/gcr/internal/hardening"
+	"github.com/makhov/gcr/internal/landlock"
 	"github.com/makhov/gcr/internal/migrate"
 	"github.com/makhov/gcr/internal/supervisor"
 	"github.com/makhov/gcr/internal/timetravel"
@@ -196,6 +197,17 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		for _, name := range hard.Supervised {
 			handlers[name] = hardening.Handlers[name]
 		}
+		// Options for this container's restores. libcontainer restores
+		// through CRIU's RPC, which has no fields for them; a config file
+		// that org.criu.config names does.
+		var criuOpts []string
+		if why := landlock.Decide(spec, cfg.Landlock); why != "" {
+			log.G(ctx).WithField("reason", why).Debug("no Landlock")
+		} else if opt, ok := landlock.CRIUOption(); ok {
+			criuOpts = append(criuOpts, opt)
+		} else {
+			log.G(ctx).Warn("CRIU cannot restore Landlock (no --landlock-fs): restored containers will not be confined")
+		}
 		policy, err := timetravel.ParsePolicy(spec.Annotations)
 		if err != nil {
 			return prep, err
@@ -214,19 +226,24 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 				handlers[name] = rec.Handle
 			}
 		}
-		if len(handlers) == 0 {
-			return prep, nil
+		if len(handlers) > 0 {
+			sup, err := supervisor.New(s.ctx, strings.TrimSuffix(control.SocketPath(ns, r.ID), ".sock")+".sup", handlers)
+			if err != nil {
+				return prep, fmt.Errorf("supervisor: %w", err)
+			}
+			ex.supervisor = sup
+			spec.Linux.Seccomp.ListenerPath = sup.HandoffPath
+			// Restores hand the restored listeners back to this supervisor.
+			criuOpts = append(criuOpts, sup.CRIUOption())
 		}
-		sup, err := supervisor.New(s.ctx, strings.TrimSuffix(control.SocketPath(ns, r.ID), ".sock")+".sup", handlers)
-		if err != nil {
-			return prep, fmt.Errorf("supervisor: %w", err)
-		}
-		ex.supervisor = sup
-		spec.Linux.Seccomp.ListenerPath = sup.HandoffPath
-		// Restores hand the restored listeners back to this supervisor.
-		prep.CRIUConfig = filepath.Join(ex.stateDir, "criu.conf")
-		if err := sup.WriteCRIUConfig(prep.CRIUConfig); err != nil {
-			return prep, err
+		if len(criuOpts) > 0 {
+			prep.CRIUConfig = filepath.Join(ex.stateDir, "criu.conf")
+			if err := os.MkdirAll(ex.stateDir, 0o700); err != nil {
+				return prep, err
+			}
+			if err := os.WriteFile(prep.CRIUConfig, []byte(strings.Join(criuOpts, "\n")+"\n"), 0o600); err != nil {
+				return prep, fmt.Errorf("CRIU config: %w", err)
+			}
 		}
 		return prep, nil
 	}

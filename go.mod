@@ -15,11 +15,13 @@ require (
 	github.com/containerd/plugin v1.1.0
 	github.com/containerd/ttrpc v1.2.9
 	github.com/containerd/typeurl/v2 v2.3.0
+	github.com/cyphar/filepath-securejoin v0.7.0
 	github.com/opencontainers/cgroups v0.1.0
 	github.com/opencontainers/runc v1.5.2
 	github.com/opencontainers/runtime-spec v1.3.0
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/seccomp/libseccomp-golang v0.12.0
+	github.com/sirupsen/logrus v1.10.2
 	golang.org/x/sys v0.48.0
 	google.golang.org/protobuf v1.36.12
 )
@@ -34,7 +36,6 @@ require (
 	github.com/containerd/continuity v0.5.0 // indirect
 	github.com/containerd/go-runc v1.2.1 // indirect
 	github.com/coreos/go-systemd/v22 v22.7.0 // indirect
-	github.com/cyphar/filepath-securejoin v0.7.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
@@ -50,7 +51,6 @@ require (
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/opencontainers/selinux v1.15.1 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/sirupsen/logrus v1.10.2 // indirect
 	github.com/vishvananda/netlink v1.3.1 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
@@ -64,3 +64,5 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260825221802-da73d73af1c5 // indirect
 	google.golang.org/grpc v1.83.2 // indirect
 )
+
+replace github.com/opencontainers/runc => github.com/makhov/runc v0.0.0-20261028125522-2e2f678fc660

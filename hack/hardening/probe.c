@@ -6,6 +6,10 @@
 // "probe mount" (run with CAP_SYS_ADMIN) instead checks mounts gcr performs
 // for the container, by their exact return value: a refusal must be -1
 // with errno set, and paths through /proc/self must mean the caller.
+//
+// "probe leak SOCKET" receives a directory descriptor over the unix socket
+// SOCKET (as a leaked host descriptor would reach a container) and reads
+// "secret" through it: hack/e2e-landlock.sh.
 // Build: cc -static -O2 -o probe probe.c
 #define _GNU_SOURCE
 #include <errno.h>
@@ -17,6 +21,7 @@
 #include <sys/mount.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <netinet/in.h>
@@ -76,7 +81,40 @@ static int mounts(void) {
 	return 0;
 }
 
+static int leak(const char *path) {
+	struct sockaddr_un addr = {.sun_family = AF_UNIX};
+	char byte, cbuf[CMSG_SPACE(sizeof(int))], secret[64] = "";
+	struct iovec iov = {.iov_base = &byte, .iov_len = 1};
+	struct msghdr msg = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = cbuf, .msg_controllen = sizeof(cbuf)};
+	struct cmsghdr *cmsg;
+	int sk, dirfd, fd;
+
+	strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+	sk = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (sk < 0 || connect(sk, (struct sockaddr *)&addr, sizeof(addr)) < 0 || recvmsg(sk, &msg, 0) < 1) {
+		printf("leak NOFD %s\n", strerrorname_np(errno));
+		return 1;
+	}
+	cmsg = CMSG_FIRSTHDR(&msg);
+	if (!cmsg || cmsg->cmsg_type != SCM_RIGHTS) {
+		printf("leak NOFD\n");
+		return 1;
+	}
+	memcpy(&dirfd, CMSG_DATA(cmsg), sizeof(int));
+	fd = openat(dirfd, "secret", O_RDONLY);
+	if (fd < 0) {
+		printf("leak %s\n", strerrorname_np(errno));
+		return 0;
+	}
+	if (read(fd, secret, sizeof(secret) - 1) < 0)
+		secret[0] = 0;
+	printf("leak OK %s", secret);
+	return 0;
+}
+
 int main(int argc, char **argv) {
+	if (argc > 2 && strcmp(argv[1], "leak") == 0)
+		return leak(argv[2]);
 	if (argc > 1 && strcmp(argv[1], "mount") == 0)
 		return mounts();
 	report("io_uring_setup", syscall(SYS_io_uring_setup, 0, NULL));
