@@ -62,6 +62,8 @@ jobs:
           cat /etc/containerd/config.toml
       - run: make build && sudo make install
       - run: sudo systemctl restart containerd
+      - name: clear what an earlier run left behind
+        run: sudo ./hack/clean-e2e.sh
       - name: end-to-end tests
         run: make test-e2e
       - name: the netlink policy refused something
@@ -72,4 +74,9 @@ jobs:
             { echo "the policy refused nothing: it is not being applied"; exit 1; }
       - name: logs
         if: failure()
-        run: sudo journalctl -u containerd --no-pager | tail -300
+        run: |
+          uptime
+          sudo journalctl -u containerd --no-pager | tail -300
+      - name: leave nothing running
+        if: always()
+        run: sudo ./hack/clean-e2e.sh

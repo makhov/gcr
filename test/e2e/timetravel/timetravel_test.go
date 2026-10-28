@@ -9,6 +9,7 @@ package timetravel
 
 import (
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -48,7 +49,13 @@ func TestRewind(t *testing.T) {
 		return points
 	}
 
-	time.Sleep(8 * time.Second)
+	// The container deletes /keep at count 25; how long that takes is the
+	// machine's business, not the test's.
+	framework.Eventually(t, time.Minute, "the container to pass count 25", func() bool {
+		s, err := c.ReadFile("/tmp/count")
+		n, convErr := strconv.Atoi(s)
+		return err == nil && convErr == nil && n >= 25
+	})
 	before := c.ReadInt("/tmp/count")
 	if _, err := os.Stat(c.Rootfs("/keep")); !os.IsNotExist(err) {
 		t.Fatalf("/keep should be gone at count %d", before)
@@ -79,12 +86,13 @@ func TestRewind(t *testing.T) {
 		t.Fatalf("task is %s after rewind", st)
 	}
 
-	time.Sleep(4 * time.Second)
-	later := c.ReadInt("/tmp/count")
-	// Same pace as before the rewind (~4/s): execs are not held or failing.
-	if later-after < 10 {
-		t.Fatalf("counter too slow after rewind (%d -> %d in 4s)", after, later)
-	}
+	// It keeps counting, so its execs are neither held nor failing; on a
+	// loaded machine that takes longer than the 4s it needs when idle.
+	var later int
+	framework.Eventually(t, time.Minute, "the counter to advance by 10 after the rewind", func() bool {
+		later = c.ReadInt("/tmp/count")
+		return later-after >= 10
+	})
 	// Points taken after the rewind prove the supervisor got the restored
 	// listener.
 	var fresh int

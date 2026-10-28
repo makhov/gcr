@@ -406,6 +406,10 @@ CRI, checkpoint/restore, static helper programs to run in containers):
 | `dind` | Docker-in-Docker, unprivileged, in a user namespace |
 | `cri` | a pod through CRI: exec, exit codes, logs, updates, stats, user namespace |
 
+`sudo hack/clean-e2e.sh` removes what a failed run left behind (a leaked
+counter container keeps writing, which slows the next run down). Runs
+take a lock (`/tmp/gcr-e2e.lock`), so a run started while another is in
+progress waits rather than competing with it for the machine.
 `make test-e2e` runs them all, each package's test binary as root, one
 package at a time; `make test-e2e E2E='-run Landlock ./test/e2e/landlock'`
 picks some. `sudo hack/ci-setup.sh` prepares a host for them (containerd,
