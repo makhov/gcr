@@ -247,18 +247,27 @@ func (c *Container) ReadFile(path string) (string, error) {
 	return strings.TrimSpace(string(b)), err
 }
 
-// ReadInt reads a number from a file in the container's root filesystem.
+// ReadInt reads a number from a file in the container's root filesystem,
+// waiting briefly for one: the container may be between writes.
 func (c *Container) ReadInt(path string) int {
 	c.ns.t.Helper()
-	s, err := c.ReadFile(path)
-	if err != nil {
-		c.ns.t.Fatal(err)
+	var last string
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s, err := c.ReadFile(path)
+		if err == nil {
+			if n, convErr := strconv.Atoi(s); convErr == nil {
+				return n
+			}
+			last = s
+		} else {
+			last = err.Error()
+		}
+		if time.Now().After(deadline) {
+			c.ns.t.Fatalf("%s: no number after 5s (last %q)", path, last)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	n, err := strconv.Atoi(s)
-	if err != nil {
-		c.ns.t.Fatalf("%s: %q is not a number", path, s)
-	}
-	return n
 }
 
 // Status is the task's status.

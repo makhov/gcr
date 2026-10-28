@@ -32,7 +32,7 @@ func TestRewind(t *testing.T) {
 			echo keep > /keep
 			i=0
 			while true; do
-				i=$((i+1)); echo $i > /tmp/count
+				i=$((i+1)); echo $i > /tmp/count.new && mv /tmp/count.new /tmp/count
 				[ $i -eq 25 ] && rm /keep
 				/bin/true
 				sleep 0.2
