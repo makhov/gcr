@@ -22,8 +22,11 @@ func TestApplyWithoutProfile(t *testing.T) {
 	if !slices.Equal(sc.Syscalls[0].Names, Denied) || sc.Syscalls[0].Action != specs.ActErrno {
 		t.Fatalf("first rule %+v", sc.Syscalls[0])
 	}
+	if r := sc.Syscalls[1]; !slices.Equal(r.Names, Absent) || *r.ErrnoRet != uint(unix.ENOSYS) {
+		t.Fatalf("second rule %+v", r)
+	}
 	var userns, clone3, raw bool
-	for _, r := range sc.Syscalls[1:] {
+	for _, r := range sc.Syscalls[2:] {
 		switch {
 		case slices.Contains(r.Names, "unshare") && len(r.Args) == 1 && r.Args[0].Op == specs.OpMaskedEqual:
 			userns = true
@@ -49,7 +52,7 @@ func TestApplyMergesIntoProfile(t *testing.T) {
 	}}}
 	Apply(s, Standard)
 	rules := s.Linux.Seccomp.Syscalls
-	if len(rules) != 3 {
+	if len(rules) != 4 {
 		t.Fatalf("rules %+v", rules)
 	}
 	if !slices.Equal(rules[0].Names, []string{"read"}) {
@@ -58,13 +61,19 @@ func TestApplyMergesIntoProfile(t *testing.T) {
 	if !slices.Equal(rules[1].Names, []string{"clone"}) || len(rules[1].Args) != 1 {
 		t.Fatalf("profile's argument rule changed: %+v", rules[1])
 	}
-	if last := rules[2]; !slices.Equal(last.Names, Denied) || last.Action != specs.ActErrno {
-		t.Fatalf("denied rule %+v", last)
+	if r := rules[2]; !slices.Equal(r.Names, Denied) || r.Action != specs.ActErrno {
+		t.Fatalf("denied rule %+v", r)
+	}
+	if r := rules[3]; !slices.Equal(r.Names, Absent) || *r.ErrnoRet != uint(unix.ENOSYS) {
+		t.Fatalf("absent rule %+v", r)
 	}
 }
 
 func TestApplySkips(t *testing.T) {
-	priv := &specs.Spec{Process: &specs.Process{Capabilities: &specs.LinuxCapabilities{Bounding: []string{"CAP_SYS_ADMIN"}}}}
+	priv := &specs.Spec{
+		Process: &specs.Process{Capabilities: &specs.LinuxCapabilities{Bounding: []string{"CAP_SYS_ADMIN"}}},
+		Linux:   &specs.Linux{Resources: &specs.LinuxResources{Devices: []specs.LinuxDeviceCgroup{{Allow: true, Access: "rwm"}}}},
+	}
 	if r := Apply(priv, Standard); r.Skipped == "" || priv.Linux.Seccomp != nil {
 		t.Fatal("privileged container hardened")
 	}
@@ -87,7 +96,7 @@ func TestApplySkips(t *testing.T) {
 }
 
 func TestApplySupervisesMountWithSysAdmin(t *testing.T) {
-	// CAP_SYS_ADMIN with masked paths: not privileged, can mount.
+	// CAP_SYS_ADMIN without access to all devices: not privileged, can mount.
 	s := &specs.Spec{
 		Process: &specs.Process{Capabilities: &specs.LinuxCapabilities{Bounding: []string{"CAP_SYS_ADMIN"}}},
 		Linux:   &specs.Linux{MaskedPaths: []string{"/proc/kcore"}},
@@ -113,6 +122,30 @@ func TestApplySupervisesMountWithSysAdmin(t *testing.T) {
 	for _, rule := range s.Linux.Seccomp.Syscalls {
 		if slices.Contains(rule.Names, "mount") && rule.Action != specs.ActNotify {
 			t.Fatalf("mount still allowed by %+v", rule)
+		}
+	}
+}
+
+func TestApplySupervisesSetnsInUserNamespace(t *testing.T) {
+	s := &specs.Spec{
+		Process: &specs.Process{Capabilities: &specs.LinuxCapabilities{Bounding: []string{"CAP_SYS_ADMIN"}}},
+		Linux:   &specs.Linux{Namespaces: []specs.LinuxNamespace{{Type: specs.UserNamespace}}},
+	}
+	r := Apply(s, Standard)
+	if !slices.Equal(r.Supervised, []string{"mount", "setns"}) {
+		t.Fatalf("Apply = %+v", r)
+	}
+
+	// A default-deny profile gets pivot_root for runtimes inside.
+	s.Linux.Seccomp = &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
+	Apply(s, Standard)
+	last := s.Linux.Seccomp.Syscalls[len(s.Linux.Seccomp.Syscalls)-1]
+	if !slices.Equal(last.Names, []string{"pivot_root"}) || last.Action != specs.ActAllow {
+		t.Fatalf("pivot_root rule %+v", last)
+	}
+	for _, name := range r.Supervised {
+		if Handlers[name] == nil {
+			t.Errorf("no handler for %s", name)
 		}
 	}
 }

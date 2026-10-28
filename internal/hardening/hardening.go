@@ -15,6 +15,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/makhov/gcr/internal/ocispec"
+	"github.com/makhov/gcr/internal/supervisor"
 )
 
 // Level is a runtime handler's hardening policy.
@@ -51,8 +52,6 @@ var Denied = []string{
 	"io_uring_setup", "io_uring_enter", "io_uring_register",
 	// Kernel programs, profiling and fault handling from user space.
 	"bpf", "perf_event_open", "userfaultfd",
-	// The kernel keyring is not namespaced.
-	"add_key", "keyctl", "request_key",
 	// The new mount API; reachable from user namespaces and exploited
 	// (CVE-2022-0185). Mounts for Docker-in-Docker go through the
 	// supervisor later.
@@ -63,7 +62,23 @@ var Denied = []string{
 	"open_by_handle_at",
 }
 
+// Absent are refused with ENOSYS, as if the kernel lacked them: callers
+// treat that as "no such feature" and carry on (runc only skips joining a
+// session keyring on ENOSYS).
+var Absent = []string{
+	// The kernel keyring is not namespaced.
+	"add_key", "keyctl", "request_key",
+}
+
 const eperm = uint(unix.EPERM)
+
+// denyRules refuse Denied and Absent.
+func denyRules() []specs.LinuxSyscall {
+	return []specs.LinuxSyscall{
+		{Names: slices.Clone(Denied), Action: specs.ActErrno, ErrnoRet: ptr(eperm)},
+		{Names: slices.Clone(Absent), Action: specs.ActErrno, ErrnoRet: ptr(uint(unix.ENOSYS))},
+	}
+}
 
 // argumentRules deny by argument; they only go into gcr's own profile
 // (see Apply).
@@ -110,15 +125,16 @@ type Result struct {
 // Apply hardens spec at level.
 //
 // Without a workload profile gcr installs its own: allow everything except
-// Denied and the argument rules. With one, Denied is merged in and wins
+// Denied, Absent and the argument rules. With one, those two are merged in and wins
 // over the profile's own rules for those calls; argument rules are not,
 // because combining them with the profile's own argument conditions for the
 // same calls cannot be done safely in one filter.
 //
 // A container that can mount (CAP_SYS_ADMIN, not privileged; in a user
 // namespace that capability is scoped to it) has mount(2) sent to the
-// supervisor, which allows only MountFilesystems. The caller must then
-// give the filter a listener.
+// supervisor, which allows only MountFilesystems, and in a user namespace
+// setns(2) too (see HandleSetns). The caller must then give the filter a
+// listener and Handlers.
 func Apply(spec *specs.Spec, level Level) Result {
 	if level == Off {
 		return Result{Skipped: "Hardening = off"}
@@ -135,28 +151,57 @@ func Apply(spec *specs.Spec, level Level) Result {
 	}
 	var res Result
 	supervise := ocispec.HasCapability(spec, "CAP_SYS_ADMIN")
+	userns := inUserNamespace(spec)
 	if supervise {
 		res.Supervised = []string{"mount"}
+		if userns {
+			res.Supervised = append(res.Supervised, "setns")
+		}
 	}
 	if sc == nil {
 		allowPing(spec)
 		sc = &specs.LinuxSeccomp{
 			DefaultAction: specs.ActAllow,
 			Architectures: nativeArchitectures(),
-			Syscalls: append([]specs.LinuxSyscall{
-				{Names: slices.Clone(Denied), Action: specs.ActErrno, ErrnoRet: ptr(eperm)},
-			}, argumentRules()...),
+			Syscalls:      append(denyRules(), argumentRules()...),
 		}
 		spec.Linux.Seccomp = sc
 	} else {
-		sc.Syscalls = without(sc.Syscalls, Denied)
-		sc.Syscalls = append(sc.Syscalls, specs.LinuxSyscall{Names: slices.Clone(Denied), Action: specs.ActErrno, ErrnoRet: ptr(eperm)})
+		sc.Syscalls = without(without(sc.Syscalls, Denied), Absent)
+		sc.Syscalls = append(sc.Syscalls, denyRules()...)
 	}
 	if supervise {
 		sc.Syscalls = without(sc.Syscalls, res.Supervised)
 		sc.Syscalls = append(sc.Syscalls, specs.LinuxSyscall{Names: slices.Clone(res.Supervised), Action: specs.ActNotify})
 	}
+	if supervise && userns && sc.DefaultAction != specs.ActAllow {
+		// Container runtimes inside need pivot_root, which default
+		// profiles leave out. It only changes the caller's own mount
+		// namespace, which a user namespace's CAP_SYS_ADMIN already
+		// lets it rearrange through the supervised mount.
+		sc.Syscalls = without(sc.Syscalls, nestedRuntime)
+		sc.Syscalls = append(sc.Syscalls, specs.LinuxSyscall{Names: slices.Clone(nestedRuntime), Action: specs.ActAllow})
+	}
 	return res
+}
+
+// nestedRuntime are calls a container runtime inside a container needs
+// beyond mount and setns.
+var nestedRuntime = []string{"pivot_root"}
+
+// Handlers are the supervisor handlers for the calls Apply may supervise.
+var Handlers = map[string]supervisor.Handler{
+	"mount": HandleMount,
+	"setns": HandleSetns,
+}
+
+func inUserNamespace(spec *specs.Spec) bool {
+	for _, ns := range spec.Linux.Namespaces {
+		if ns.Type == specs.UserNamespace {
+			return true
+		}
+	}
+	return false
 }
 
 // without drops names from rules, removing rules left empty.

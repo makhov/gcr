@@ -50,6 +50,7 @@ func TestWanted(t *testing.T) {
 	t.Run("privileged", func(t *testing.T) {
 		s := podSpec(nil, ownNamespaces...)
 		s.Process.Capabilities.Bounding = append(s.Process.Capabilities.Bounding, "CAP_SYS_ADMIN")
+		s.Linux.Resources = &specs.LinuxResources{Devices: []specs.LinuxDeviceCgroup{{Allow: true, Access: "rwm"}}}
 		if ok, _, _ := Decide(s, Auto); ok {
 			t.Fatal("privileged container got a user namespace")
 		}
@@ -75,6 +76,7 @@ func TestDecideModes(t *testing.T) {
 	}
 	priv := podSpec(nil, ownNamespaces...)
 	priv.Process.Capabilities.Bounding = append(priv.Process.Capabilities.Bounding, "CAP_SYS_ADMIN")
+	priv.Linux.Resources = &specs.LinuxResources{Devices: []specs.LinuxDeviceCgroup{{Allow: true, Access: "rwm"}}}
 	if _, _, err := Decide(priv, Always); !errdefs.IsFailedPrecondition(err) {
 		t.Fatalf("always: privileged container: %v, want refused", err)
 	}
@@ -180,5 +182,28 @@ func TestApply(t *testing.T) {
 	}
 	if slices.Contains(s.Mounts[2].Options, "idmap") {
 		t.Fatalf("proc mount idmapped: %+v", s.Mounts[2])
+	}
+}
+
+func TestDelegateCgroup(t *testing.T) {
+	spec := func(caps ...string) *specs.Spec {
+		return &specs.Spec{
+			Process: &specs.Process{Capabilities: &specs.LinuxCapabilities{Bounding: caps}},
+			Linux:   &specs.Linux{UIDMappings: []specs.LinuxIDMapping{{ContainerID: 0, HostID: 1 << 30, Size: 65536}}},
+			Mounts:  []specs.Mount{{Destination: "/sys/fs/cgroup", Type: "cgroup", Options: []string{"nosuid", "ro"}}},
+		}
+	}
+	s := spec("CAP_SYS_ADMIN")
+	if got := DelegateCgroup(s); got != 1<<30 {
+		t.Fatalf("owner %d, want %d", got, 1<<30)
+	}
+	if !slices.Equal(s.Mounts[0].Options, []string{"nosuid"}) {
+		t.Fatalf("cgroup mount options %v", s.Mounts[0].Options)
+	}
+	if s := spec(); DelegateCgroup(s) != 0 || len(s.Mounts[0].Options) != 2 {
+		t.Fatal("delegated without CAP_SYS_ADMIN")
+	}
+	if s := spec("CAP_SYS_ADMIN"); func() int { s.Linux.UIDMappings = nil; return DelegateCgroup(s) }() != 0 {
+		t.Fatal("delegated without a user namespace")
 	}
 }
