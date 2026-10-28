@@ -101,7 +101,10 @@ func TestPod(t *testing.T) {
 	t.Run("user namespace", func(t *testing.T) {
 		f := strings.Fields(run(t, "cat", "/proc/self/uid_map"))
 		if len(f) != 3 || f[0] != "0" || !strings.HasPrefix(f[1], "1073") || f[2] != "65536" {
-			t.Fatalf("not in a gcr user namespace: %v", f)
+			// The pod asks for one with gcr.dev/host-users, which reaches
+			// the shim only if containerd passes gcr's annotations on.
+			t.Fatalf("not in a gcr user namespace: %v; is pod_annotations = ['gcr.dev/*'] set "+
+				"for the gcr runtime in /etc/containerd/config.toml? (hack/ci-setup.sh writes it)", f)
 		}
 		if owner := run(t, "stat", "-c", "%u:%g", "/bin/sh"); owner != "0:0" {
 			t.Fatalf("image files owned by %s inside", owner)
