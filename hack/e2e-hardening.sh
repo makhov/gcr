@@ -44,4 +44,36 @@ for c in io_uring_setup socket_alg clone3; do
 	case "$got" in EPERM | ENOSYS) fail "$c still refused with Hardening = off ($got)" ;; esac
 done
 echo "io_uring_setup, AF_ALG and clone3 no longer refused"
+mounts() { # extra ctr flags...
+	ctr run --rm --runtime "$RUNTIME" "$@" "$IMAGE" "$ID" sh -c '
+		try() { name=$1; shift; if "$@" 2>/dev/null; then echo "$name OK"; else echo "$name EPERM"; fi; }
+		mkdir -p /mnt /opt /media
+		try tmpfs mount -t tmpfs none /mnt
+		grep -q " /mnt tmpfs " /proc/mounts && echo "visible OK" || echo "visible MISSING"
+		try ramfs mount -t ramfs none /opt
+		try proc mount -t proc proc /media
+		mkdir -p /srv/a /srv/b; try bind mount --bind /srv/a /srv/b
+		# A bind remount: busybox passes a plain remount the options from
+		# /proc/mounts, where tmpfs shows its owner as an unmapped host ID.
+		try remount mount -o remount,bind,ro /mnt
+	' | sort
+}
+check() { # output line want
+	echo "$1" | grep -qx "$2" || fail "want '$2' in: $(echo "$1" | tr '\n' ' ')"
+}
+
+echo "== supervised mount (CAP_SYS_ADMIN, user namespace)"
+out=$(mounts --cap-add CAP_SYS_ADMIN)
+echo "$out" | column -t
+for l in "tmpfs OK" "visible OK" "ramfs EPERM" "proc OK" "bind OK" "remount OK"; do check "$out" "$l"; done
+
+echo "== supervised mount (CAP_SYS_ADMIN, host users)"
+out=$(mounts --cap-add CAP_SYS_ADMIN --annotation gcr.dev/host-users=true)
+for l in "tmpfs OK" "ramfs EPERM" "proc OK"; do check "$out" "$l"; done
+echo "tmpfs and proc allowed, ramfs refused"
+
+echo "== no CAP_SYS_ADMIN: the kernel refuses, gcr does not mount for it"
+out=$(mounts)
+check "$out" "tmpfs EPERM"
+echo "tmpfs refused"
 echo PASS

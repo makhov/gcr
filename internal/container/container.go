@@ -184,9 +184,9 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	if err != nil {
 		return nil, fmt.Errorf("convert spec: %w", err)
 	}
-	if spec.Process.Terminal && (o.Checkpoint != "" || prep.CheckpointFrom != nil || prep.CRIUConfig != "") {
+	if spec.Process.Terminal && (o.Checkpoint != "" || prep.CheckpointFrom != nil) {
 		// CRIU restores only pipes for stdio; a pty would need --shell-job.
-		return nil, fmt.Errorf("checkpoint, time travel and migration need a container without a terminal: %w", errdefs.ErrNotImplemented)
+		return nil, fmt.Errorf("restore and migration need a container without a terminal: %w", errdefs.ErrNotImplemented)
 	}
 	if prep.CRIUConfig != "" {
 		cfg.Labels = append(cfg.Labels, "org.criu.config="+prep.CRIUConfig)

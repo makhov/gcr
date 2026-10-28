@@ -12,7 +12,7 @@ built in. Containers run in-process through libcontainer; no runc binary.
 - User namespaces by default (below).
 - Time travel and live migration (below).
 - Hardening: a denied set of system calls on top of any profile (below).
-- Not yet: GPUs, the system call supervisor for risky calls, Landlock.
+- Not yet: GPUs, the NVIDIA ioctl proxy, Landlock.
 
 ## Requirements
 
@@ -161,6 +161,16 @@ exploits reachable from containers:
   `AF_VSOCK`, `AF_KEY` and `AF_ALG` sockets, and raw IP sockets (`ping` uses
   ICMP datagram sockets, which gcr opens); `clone3` returns ENOSYS so libc
   falls back to `clone`.
+
+A container that can mount (it has `CAP_SYS_ADMIN` without being
+privileged; in a user namespace that capability only reaches the namespace)
+has `mount(2)` handed to gcr's supervisor. The supervisor allows `proc`,
+`sysfs`, `tmpfs`, `devpts`, `mqueue`, `cgroup2` and `overlay`, and bind
+mounts, remounts and propagation changes; other filesystems the kernel would
+allow in a user namespace (`ramfs`, `fuse`, ...) are refused. It performs the
+mount itself, from the arguments it copied and checked (so another thread
+cannot swap them after the check), in the caller's namespaces and with its
+IDs and capabilities, so the kernel's own checks are the caller's.
 
 Privileged containers are exempt. Kubernetes pods that run explicitly
 `Unconfined` (Kubernetes' default, which a runtime cannot tell from an

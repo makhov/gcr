@@ -38,9 +38,9 @@ func TestAddTrigger(t *testing.T) {
 
 	// No profile: allow everything except the trigger calls.
 	s := &specs.Spec{}
-	p.AddTrigger(s, "/run/x.sock")
+	p.AddTrigger(s)
 	sc := s.Linux.Seccomp
-	if sc.DefaultAction != specs.ActAllow || sc.ListenerPath != "/run/x.sock" || len(sc.Syscalls) != 1 || sc.Syscalls[0].Action != specs.ActNotify {
+	if sc.DefaultAction != specs.ActAllow || len(sc.Syscalls) != 1 || sc.Syscalls[0].Action != specs.ActNotify {
 		t.Fatalf("seccomp %+v", sc)
 	}
 
@@ -52,7 +52,7 @@ func TestAddTrigger(t *testing.T) {
 			{Names: []string{"execveat"}, Action: specs.ActAllow},
 		},
 	}}}
-	p.AddTrigger(s, "/run/y.sock")
+	p.AddTrigger(s)
 	got := s.Linux.Seccomp.Syscalls
 	if len(got) != 2 || !slices.Equal(got[0].Names, []string{"read", "write"}) || got[1].Action != specs.ActNotify {
 		t.Fatalf("rules %+v", got)

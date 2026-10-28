@@ -13,6 +13,8 @@ import (
 	"github.com/containerd/errdefs"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
+
+	"github.com/makhov/gcr/internal/ocispec"
 )
 
 // Level is a runtime handler's hardening policy.
@@ -96,49 +98,79 @@ func argumentRules() []specs.LinuxSyscall {
 	return rules
 }
 
-// Apply hardens spec at level. It returns why it left spec alone, if it did.
+// Result says what Apply did.
+type Result struct {
+	// Skipped says why spec was left alone, "" if it was hardened.
+	Skipped string
+	// Supervised lists calls the filter now hands to the container's
+	// supervisor (mount, for containers that can mount).
+	Supervised []string
+}
+
+// Apply hardens spec at level.
 //
 // Without a workload profile gcr installs its own: allow everything except
 // Denied and the argument rules. With one, Denied is merged in and wins
 // over the profile's own rules for those calls; argument rules are not,
 // because combining them with the profile's own argument conditions for the
 // same calls cannot be done safely in one filter.
-func Apply(spec *specs.Spec, level Level) string {
+//
+// A container that can mount (CAP_SYS_ADMIN, not privileged; in a user
+// namespace that capability is scoped to it) has mount(2) sent to the
+// supervisor, which allows only MountFilesystems. The caller must then
+// give the filter a listener.
+func Apply(spec *specs.Spec, level Level) Result {
 	if level == Off {
-		return "Hardening = off"
+		return Result{Skipped: "Hardening = off"}
 	}
 	if spec.Linux == nil {
 		spec.Linux = &specs.Linux{}
 	}
-	if p := spec.Process; p != nil && p.Capabilities != nil && slices.Contains(p.Capabilities.Bounding, "CAP_SYS_ADMIN") {
-		return "privileged container"
+	if ocispec.Privileged(spec) {
+		return Result{Skipped: "privileged container"}
 	}
 	sc := spec.Linux.Seccomp
 	if sc == nil && level == Standard && spec.Annotations[containerTypeAnnotation] != "" {
-		return "Kubernetes pod with seccomp Unconfined"
+		return Result{Skipped: "Kubernetes pod with seccomp Unconfined"}
+	}
+	var res Result
+	supervise := ocispec.HasCapability(spec, "CAP_SYS_ADMIN")
+	if supervise {
+		res.Supervised = []string{"mount"}
 	}
 	if sc == nil {
 		allowPing(spec)
-		spec.Linux.Seccomp = &specs.LinuxSeccomp{
+		sc = &specs.LinuxSeccomp{
 			DefaultAction: specs.ActAllow,
 			Architectures: nativeArchitectures(),
 			Syscalls: append([]specs.LinuxSyscall{
 				{Names: slices.Clone(Denied), Action: specs.ActErrno, ErrnoRet: ptr(eperm)},
 			}, argumentRules()...),
 		}
-		return ""
+		spec.Linux.Seccomp = sc
+	} else {
+		sc.Syscalls = without(sc.Syscalls, Denied)
+		sc.Syscalls = append(sc.Syscalls, specs.LinuxSyscall{Names: slices.Clone(Denied), Action: specs.ActErrno, ErrnoRet: ptr(eperm)})
 	}
-	var rules []specs.LinuxSyscall
-	for _, r := range sc.Syscalls {
+	if supervise {
+		sc.Syscalls = without(sc.Syscalls, res.Supervised)
+		sc.Syscalls = append(sc.Syscalls, specs.LinuxSyscall{Names: slices.Clone(res.Supervised), Action: specs.ActNotify})
+	}
+	return res
+}
+
+// without drops names from rules, removing rules left empty.
+func without(rules []specs.LinuxSyscall, names []string) []specs.LinuxSyscall {
+	var out []specs.LinuxSyscall
+	for _, r := range rules {
 		r.Names = slices.DeleteFunc(slices.Clone(r.Names), func(n string) bool {
-			return slices.Contains(Denied, n)
+			return slices.Contains(names, n)
 		})
 		if len(r.Names) > 0 {
-			rules = append(rules, r)
+			out = append(out, r)
 		}
 	}
-	sc.Syscalls = append(rules, specs.LinuxSyscall{Names: slices.Clone(Denied), Action: specs.ActErrno, ErrnoRet: ptr(eperm)})
-	return ""
+	return out
 }
 
 // allowPing opens ICMP datagram sockets (ping without raw sockets, which

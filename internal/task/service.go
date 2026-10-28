@@ -35,6 +35,7 @@ import (
 	"github.com/makhov/gcr/internal/control"
 	"github.com/makhov/gcr/internal/hardening"
 	"github.com/makhov/gcr/internal/migrate"
+	"github.com/makhov/gcr/internal/supervisor"
 	"github.com/makhov/gcr/internal/timetravel"
 	"github.com/makhov/gcr/internal/userns"
 )
@@ -60,12 +61,13 @@ type service struct {
 
 // extras is what a container has beyond containerd's task API.
 type extras struct {
-	recorder *timetravel.Recorder // time travel, if enabled
-	receiver *migrate.Receiver    // incoming migration, if requested
-	userns   *userns.Range        // the container's user namespace range
-	control  *control.Server
-	stateDir string
-	id       string
+	recorder   *timetravel.Recorder   // time travel, if enabled
+	supervisor *supervisor.Supervisor // if the filter hands calls to user space
+	receiver   *migrate.Receiver      // incoming migration, if requested
+	userns     *userns.Range          // the container's user namespace range
+	control    *control.Server
+	stateDir   string
+	id         string
 }
 
 func (e *extras) Close() {
@@ -74,6 +76,9 @@ func (e *extras) Close() {
 	}
 	if e.receiver != nil {
 		e.receiver.Close()
+	}
+	if e.supervisor != nil {
+		e.supervisor.Close()
 	}
 	if e.recorder != nil {
 		_ = e.recorder.Close()
@@ -180,21 +185,49 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			ex.receiver = recv
 			prep.CheckpointFrom = recv.Wait
 		}
-		if why := hardening.Apply(spec, cfg.Hardening); why != "" {
-			log.G(ctx).WithField("reason", why).Debug("not hardened")
+		// Calls the container's seccomp filter hands to its supervisor.
+		handlers := map[string]supervisor.Handler{}
+		hard := hardening.Apply(spec, cfg.Hardening)
+		if hard.Skipped != "" {
+			log.G(ctx).WithField("reason", hard.Skipped).Debug("not hardened")
+		}
+		for _, name := range hard.Supervised {
+			if name == "mount" {
+				handlers[name] = hardening.HandleMount
+			}
 		}
 		policy, err := timetravel.ParsePolicy(spec.Annotations)
-		if err != nil || policy == nil {
+		if err != nil {
 			return prep, err
 		}
-		rec, err := timetravel.NewRecorder(s.ctx, policy, filepath.Join(ex.stateDir, "time-travel"),
-			strings.TrimSuffix(control.SocketPath(ns, r.ID), ".sock")+".tt")
-		if err != nil {
-			return prep, fmt.Errorf("time travel: %w", err)
+		if policy != nil {
+			if spec.Process.Terminal {
+				return prep, fmt.Errorf("time travel needs a container without a terminal: %w", errdefs.ErrNotImplemented)
+			}
+			rec, err := timetravel.NewRecorder(policy, filepath.Join(ex.stateDir, "time-travel"))
+			if err != nil {
+				return prep, fmt.Errorf("time travel: %w", err)
+			}
+			ex.recorder = rec
+			policy.AddTrigger(spec)
+			for _, name := range policy.Syscalls {
+				handlers[name] = rec.Handle
+			}
 		}
-		ex.recorder = rec
-		policy.AddTrigger(spec, rec.HandoffPath())
-		prep.CRIUConfig = rec.CRIUConfig()
+		if len(handlers) == 0 {
+			return prep, nil
+		}
+		sup, err := supervisor.New(s.ctx, strings.TrimSuffix(control.SocketPath(ns, r.ID), ".sock")+".sup", handlers)
+		if err != nil {
+			return prep, fmt.Errorf("supervisor: %w", err)
+		}
+		ex.supervisor = sup
+		spec.Linux.Seccomp.ListenerPath = sup.HandoffPath
+		// Restores hand the restored listeners back to this supervisor.
+		prep.CRIUConfig = filepath.Join(ex.stateDir, "criu.conf")
+		if err := sup.WriteCRIUConfig(prep.CRIUConfig); err != nil {
+			return prep, err
+		}
 		return prep, nil
 	}
 	c, err = container.Create(ctx, opts, s.handleExit)

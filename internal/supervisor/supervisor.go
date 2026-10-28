@@ -1,6 +1,10 @@
 //go:build linux
 
-package timetravel
+// Package supervisor answers a container's seccomp user notifications:
+// system calls its filter hands to user space (time-travel triggers,
+// mounts). One supervisor serves one container; libcontainer allows a
+// single listener per container.
+package supervisor
 
 import (
 	"bytes"
@@ -10,47 +14,133 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
+	"syscall"
 
 	"github.com/containerd/log"
 	libseccomp "github.com/seccomp/libseccomp-golang"
 	"golang.org/x/sys/unix"
 )
 
-// Trigger is a held system call that may take a point.
-type Trigger struct {
+// Call is one held system call. A handler either lets it run (Continue)
+// or answers it itself (Reply); if it does neither, the call continues.
+type Call struct {
 	Pid     int
 	Syscall string
-	Path    string
-	Argv    []string
+	Args    [6]uint64
+
+	fd   libseccomp.ScmpFd
+	id   uint64
+	ctx  context.Context
+	once sync.Once
 }
 
-// Handler gets each held call. It must call allow exactly once to let the
-// call continue; it may keep working after that.
-type Handler func(ctx context.Context, t Trigger, allow func())
+// Continue lets the call run in the kernel as the caller made it. Its
+// arguments may have changed since a handler read them; use it only where
+// that does not matter.
+func (c *Call) Continue() {
+	c.respond(&libseccomp.ScmpNotifResp{ID: c.id, Flags: libseccomp.NotifRespFlagContinue})
+}
 
-// Supervisor answers seccomp notifications for one container. Listeners come
-// from libcontainer when the container starts (HandoffPath) and from CRIU
-// --seccomp-notify-socket after a restore (RestorePath).
+// Reply answers the call without running it: val on success, or errno.
+func (c *Call) Reply(val uint64, errno syscall.Errno) {
+	if errno != 0 {
+		c.respond(&libseccomp.ScmpNotifResp{ID: c.id, Error: -int32(errno)})
+		return
+	}
+	c.respond(&libseccomp.ScmpNotifResp{ID: c.id, Val: val})
+}
+
+func (c *Call) respond(r *libseccomp.ScmpNotifResp) {
+	c.once.Do(func() {
+		// ENOENT: the task was killed or interrupted while its call was held.
+		if err := libseccomp.NotifRespond(c.fd, r); err != nil && !errors.Is(err, unix.ENOENT) {
+			log.G(c.ctx).WithError(err).Warn("seccomp notify respond")
+		}
+	})
+}
+
+// Valid reports whether the call is still pending: reads of the caller's
+// memory are only meaningful while it is (the pid may be reused otherwise).
+func (c *Call) Valid() bool {
+	return libseccomp.NotifIDValid(c.fd, c.id) == nil
+}
+
+// ReadString reads a NUL-terminated string of at most max bytes from the
+// caller's memory. The copy is what a handler must act on.
+func (c *Call) ReadString(addr uint64, max int) (string, error) {
+	if addr == 0 {
+		return "", nil
+	}
+	buf := make([]byte, max+1)
+	n, err := c.readMem(addr, buf)
+	if n == 0 && err != nil {
+		return "", err
+	}
+	i := bytes.IndexByte(buf[:n], 0)
+	if i < 0 {
+		return "", fmt.Errorf("string at %#x longer than %d bytes", addr, max)
+	}
+	if !c.Valid() {
+		return "", errors.New("call no longer pending")
+	}
+	return string(buf[:i]), nil
+}
+
+// ReadUint64 reads a little-endian word (the byte order of every arch gcr
+// supports) from the caller's memory.
+func (c *Call) ReadUint64(addr uint64) (uint64, error) {
+	var b [8]byte
+	if _, err := c.readMem(addr, b[:]); err != nil {
+		return 0, err
+	}
+	return binary.LittleEndian.Uint64(b[:]), nil
+}
+
+func (c *Call) readMem(addr uint64, buf []byte) (int, error) {
+	f, err := os.Open(fmt.Sprintf("/proc/%d/mem", c.Pid))
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	return f.ReadAt(buf, int64(addr))
+}
+
+// Handler answers one held call.
+type Handler func(ctx context.Context, c *Call)
+
+// Supervisor receives the container's listeners: from libcontainer when the
+// container starts (HandoffPath) and from CRIU --seccomp-notify-socket
+// after a restore (RestorePath), and dispatches calls to handlers.
 type Supervisor struct {
 	HandoffPath string
 	RestorePath string
 
-	handle Handler
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	lns    []net.Listener
+	handlers map[string]Handler
+	ctx      context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	lns      []net.Listener
 }
 
-func NewSupervisor(ctx context.Context, handoffPath, restorePath string, handle Handler) (*Supervisor, error) {
+// New listens in sockDir and dispatches calls by system call name.
+func New(ctx context.Context, sockDir string, handlers map[string]Handler) (*Supervisor, error) {
+	if err := os.MkdirAll(sockDir, 0o700); err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(ctx)
-	s := &Supervisor{HandoffPath: handoffPath, RestorePath: restorePath, handle: handle, ctx: ctx, cancel: cancel}
-
+	s := &Supervisor{
+		HandoffPath: filepath.Join(sockDir, "handoff.sock"),
+		RestorePath: filepath.Join(sockDir, "restore.sock"),
+		handlers:    handlers,
+		ctx:         ctx,
+		cancel:      cancel,
+	}
 	// libcontainer connects with SOCK_STREAM, CRIU with SOCK_SEQPACKET.
 	for _, l := range []struct{ path, network string }{
-		{handoffPath, "unix"},
-		{restorePath, "unixpacket"},
+		{s.HandoffPath, "unix"},
+		{s.RestorePath, "unixpacket"},
 	} {
 		_ = os.Remove(l.path)
 		ln, err := net.Listen(l.network, l.path)
@@ -63,6 +153,16 @@ func NewSupervisor(ctx context.Context, handoffPath, restorePath string, handle 
 		go s.accept(ln.(*net.UnixListener))
 	}
 	return s, nil
+}
+
+// WriteCRIUConfig writes a CRIU config file that hands restored listeners
+// to this supervisor. libcontainer restores through CRIU's RPC, which has
+// no field for --seccomp-notify-socket; org.criu.config names the file.
+func (s *Supervisor) WriteCRIUConfig(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(fmt.Sprintf("seccomp-notify-socket %s\n", s.RestorePath)), 0o600)
 }
 
 func (s *Supervisor) Close() {
@@ -150,67 +250,13 @@ func (s *Supervisor) serve(fd int) {
 			log.G(s.ctx).WithError(err).Error("seccomp listener receive")
 			return
 		}
-		var once sync.Once
-		allow := func() {
-			once.Do(func() {
-				// ENOENT: the task was killed while its call was held.
-				err := libseccomp.NotifRespond(sfd, &libseccomp.ScmpNotifResp{ID: req.ID, Flags: libseccomp.NotifRespFlagContinue})
-				if err != nil && !errors.Is(err, unix.ENOENT) {
-					log.G(s.ctx).WithError(err).Warn("seccomp notify respond")
-				}
-			})
+		c := &Call{Pid: int(req.Pid), fd: sfd, id: req.ID, ctx: s.ctx}
+		copy(c.Args[:], req.Data.Args)
+		name, err := req.Data.Syscall.GetName()
+		if h, ok := s.handlers[name]; err == nil && ok {
+			c.Syscall = name
+			h(s.ctx, c)
 		}
-		if t, ok := readTrigger(sfd, req); ok {
-			s.handle(s.ctx, t, allow)
-		}
-		allow()
+		c.Continue() // no-op if the handler answered
 	}
-}
-
-func readTrigger(fd libseccomp.ScmpFd, req *libseccomp.ScmpNotifReq) (Trigger, bool) {
-	name, err := req.Data.Syscall.GetName()
-	if err != nil {
-		return Trigger{}, false
-	}
-	t := Trigger{Pid: int(req.Pid), Syscall: name}
-	mem, err := os.Open(fmt.Sprintf("/proc/%d/mem", req.Pid))
-	if err != nil {
-		return t, true
-	}
-	defer mem.Close()
-
-	// execve(path, argv, envp); execveat(dirfd, path, argv, envp, flags)
-	pathArg, argvArg := req.Data.Args[0], req.Data.Args[1]
-	if name == "execveat" {
-		pathArg, argvArg = req.Data.Args[1], req.Data.Args[2]
-	}
-	t.Path = readString(mem, pathArg)
-	for i := uint64(0); i < 32 && argvArg != 0; i++ {
-		var ptr [8]byte
-		if _, err := mem.ReadAt(ptr[:], int64(argvArg+i*8)); err != nil {
-			break
-		}
-		p := binary.LittleEndian.Uint64(ptr[:])
-		if p == 0 {
-			break
-		}
-		t.Argv = append(t.Argv, readString(mem, p))
-	}
-	// The pid may have exited and been reused while we read its memory.
-	if libseccomp.NotifIDValid(fd, req.ID) != nil {
-		return Trigger{}, false
-	}
-	return t, true
-}
-
-func readString(mem *os.File, addr uint64) string {
-	if addr == 0 {
-		return ""
-	}
-	buf := make([]byte, 4096)
-	n, _ := mem.ReadAt(buf, int64(addr))
-	if i := bytes.IndexByte(buf[:n], 0); i >= 0 {
-		n = i
-	}
-	return string(buf[:n])
 }
