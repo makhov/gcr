@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -28,6 +29,7 @@ import (
 	"github.com/containerd/log"
 	"github.com/containerd/ttrpc"
 	"github.com/containerd/typeurl/v2"
+	"github.com/opencontainers/runc/libcontainer/seccomp"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/makhov/gcr/internal/config"
@@ -239,6 +241,17 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			}
 			ex.supervisor = sup
 			spec.Linux.Seccomp.ListenerPath = sup.HandoffPath
+			// Once the supervisor has taken a call, the caller waits for
+			// the answer without being interrupted by signals (short of
+			// being killed). Otherwise a signal (Go's preemption SIGURG,
+			// in a nested runc) makes the kernel restart the call after
+			// the supervisor already performed it: a mount done twice,
+			// the second failing with EBUSY.
+			if !waitKillable() {
+				log.G(ctx).Debug("no SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV (libseccomp < 2.6): a signal can make a supervised call run twice")
+			} else if !slices.Contains(spec.Linux.Seccomp.Flags, specs.LinuxSeccompFlagWaitKillableRecv) {
+				spec.Linux.Seccomp.Flags = append(spec.Linux.Seccomp.Flags, specs.LinuxSeccompFlagWaitKillableRecv)
+			}
 			// Restores hand the restored listeners back to this supervisor.
 			criuOpts = append(criuOpts, sup.CRIUOption())
 		}
@@ -702,3 +715,10 @@ func (s *service) send(evt any) {
 		log.G(s.ctx).WithError(err).Errorf("publish %T", evt)
 	}
 }
+
+// waitKillable reports whether libseccomp can set
+// SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV: 2.6.0, API level 7.
+var waitKillable = sync.OnceValue(func() bool {
+	major, minor, _ := seccomp.Version()
+	return major > 2 || (major == 2 && minor >= 6)
+})
