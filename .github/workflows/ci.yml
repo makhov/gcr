@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 # One run per branch or PR at a time; a new push cancels the old run.

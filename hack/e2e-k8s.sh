@@ -12,7 +12,13 @@ CLUSTER=${CLUSTER:-gcr-e2e}
 IMAGE=localhost/k0s-gcr:e2e
 ENGINE=${K0DA_RUNTIME:-$(command -v docker >/dev/null && echo docker || echo podman)}
 
-fail() { echo "FAIL: $*"; kc get pods -o wide || true; kc describe pods | tail -40 || true; exit 1; }
+fail() {
+	echo "FAIL: $*"
+	kc get pods -o wide || true
+	kc describe nodes | grep -E -A8 "^(Taints|Conditions):" || true
+	kc get events -A --sort-by=.lastTimestamp | tail -25 || true
+	exit 1
+}
 node() { "$ENGINE" exec -i "$CLUSTER" "$@"; }
 kc() { node k0s kubectl "$@"; }
 
@@ -75,9 +81,11 @@ echo "== UserNamespaces = always (gcr-userns handler)"
 enforced=$(kc exec enforced -- cat /proc/self/uid_map | tr -s ' ')
 echo "enforced:$enforced"
 case "$enforced" in " 0 1073"*" 65536") ;; *) fail "handler did not enforce a user namespace";; esac
+# The refusal shows in the last failure; between retries the waiting message
+# is just the back-off.
 for _ in $(seq 30); do
-	reason=$(kc get pod enforced-privileged -o jsonpath='{.status.containerStatuses[0].state.waiting.message}')
-	[ -n "$reason" ] && break
+	reason=$(kc get pod enforced-privileged -o jsonpath='{.status.containerStatuses[0].lastState.terminated.message}{.status.containerStatuses[0].state.waiting.message}')
+	echo "$reason" | grep -q "cannot run in a user namespace" && break
 	sleep 2
 done
 echo "privileged on gcr-userns: ${reason:0:160}"
