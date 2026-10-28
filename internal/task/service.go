@@ -203,6 +203,19 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 					"allow lazy restores: %w", container.AnnotationLazyRestore, errdefs.ErrFailedPrecondition)
 			}
 		}
+		if v, ok := spec.Annotations[container.AnnotationMemoryMerge]; ok {
+			if prep.MemoryMerge, err = strconv.ParseBool(v); err != nil {
+				return prep, fmt.Errorf("%s=%q: %w", container.AnnotationMemoryMerge, v, errdefs.ErrInvalidArgument)
+			}
+			if prep.MemoryMerge {
+				if err := container.MemoryMergeAvailable(); err != nil {
+					return prep, fmt.Errorf("%s: %v: %w", container.AnnotationMemoryMerge, err, errdefs.ErrFailedPrecondition)
+				}
+			}
+			// The container's init reads it back from its labels, which
+			// are the annotations as written.
+			spec.Annotations[container.AnnotationMemoryMerge] = strconv.FormatBool(prep.MemoryMerge)
+		}
 		ok, why, err := userns.Decide(spec, cfg.UserNamespaces)
 		if err != nil {
 			return prep, err

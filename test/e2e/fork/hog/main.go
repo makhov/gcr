@@ -8,6 +8,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"strconv"
@@ -23,10 +24,12 @@ func main() {
 		os.Exit(2)
 	}
 	// One byte per page carries the pattern; every page is touched, so
-	// the snapshot holds them all.
+	// the snapshot holds them all. Each page also carries its own number,
+	// so no two are alike: only forks of one snapshot share contents.
 	chunk := make([]byte, mib<<20)
 	for i := 0; i < len(chunk); i += pageSize {
 		chunk[i] = byte(i / pageSize % 251)
+		binary.LittleEndian.PutUint64(chunk[i+8:], uint64(i/pageSize))
 	}
 	write("/tmp/ready", strconv.Itoa(mib))
 

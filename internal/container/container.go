@@ -115,6 +115,10 @@ type Prepared struct {
 	IOOwner int
 	// LazyPages fills the restored memory on demand (AnnotationLazyRestore).
 	LazyPages bool
+	// MemoryMerge lets the kernel merge the container's memory with
+	// identical memory elsewhere (AnnotationMemoryMerge): its init turns it
+	// on for a new container, criu's process for a restored one.
+	MemoryMerge bool
 	// ForkFrom, when set, is a snapshot directory (Snapshot's output) this
 	// container starts from: its processes are restored from the
 	// snapshot's images, and its writable layer is the snapshot's, which
@@ -181,10 +185,13 @@ type Container struct {
 	// lazyPages restores memory on demand, through a criu lazy-pages
 	// daemon this container starts for each restore.
 	lazyPages bool
-	criu      CRIUConfig
-	gpu       *gpu.Info
-	gpuError  error
-	execs     map[string]*Exec
+	// memoryMerge runs criu with memory merging on, which the tasks it
+	// restores inherit.
+	memoryMerge bool
+	criu        CRIUConfig
+	gpu         *gpu.Info
+	gpuError    error
+	execs       map[string]*Exec
 }
 
 // AnnotationLazyRestore makes a restore fill memory on demand instead of
@@ -193,6 +200,12 @@ type Container struct {
 // touched. A fork of a large snapshot starts in the time its first pages
 // take, not its whole memory.
 const AnnotationLazyRestore = "gcr.dev/lazy-restore"
+
+// AnnotationMemoryMerge lets the kernel merge the container's memory with
+// identical memory of other containers that allow it (KSM), copying a page
+// again when one writes it. Forks of one snapshot start with identical
+// copies of its memory, so ten of them come to little more than one.
+const AnnotationMemoryMerge = "gcr.dev/memory-merge"
 
 // AnnotationForkFrom starts a container from a snapshot directory
 // (Snapshot's output) instead of its image's entrypoint: its processes are
@@ -322,6 +335,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		ioOwner:        max(prep.IDMapRoot, prep.IOOwner),
 		cgroupOwner:    prep.CgroupOwner,
 		lazyPages:      prep.LazyPages,
+		memoryMerge:    prep.MemoryMerge,
 		criu:           prep.CRIU,
 		gpu:            prep.GPU,
 		gpuError:       prep.GPUError,
@@ -414,6 +428,7 @@ func (c *Container) restore(images string) error {
 		WorkDirectory:   work,
 		LazyPages:       c.lazyPages,
 		StatusFd:        -1,
+		Command:         c.criuCommand(),
 	})
 	if err != nil {
 		c.io.detach() // restore requires pipes, never a terminal

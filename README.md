@@ -2,7 +2,8 @@
 
 A containerd runtime (`io.containerd.gcr.v2`) with checkpoint, restore and fork
 built in. Containers run in-process through libcontainer (from a small runc
-fork, `makhov/runc`, which adds an init hook for Landlock); no runc binary.
+fork, `makhov/runc`, which adds an init hook and a way to wrap the criu it
+runs); no runc binary.
 `gcr` is a placeholder name.
 
 ## Status
@@ -448,9 +449,8 @@ A fork of a snapshot holding 384 MiB of touched memory takes 175 ms to
 start this way against 459 ms eagerly, and the gap grows with the
 snapshot. What it costs: the daemon has to outlive the restore, and a
 container whose daemon dies before it has touched every page gets SIGBUS
-on the next one (gcr logs that the daemon stopped early). Memory is still
-copied per fork, not shared; sharing it copy-on-write is the open question
-in the design.
+on the next one (gcr logs that the daemon stopped early). Each page is
+still a fork's own copy once it arrives; see below for sharing them.
 
 **The node has to allow it.** The restored tasks open the userfaultfd
 themselves, from inside the container's user namespace, and the kernel
@@ -469,7 +469,43 @@ the filter is in place) uses it. So the exposure is to whatever else runs
 on the node, which argues for turning it on where gcr containers are the
 only unprivileged workload and leaving it alone elsewhere.
 
-`test/e2e/fork` snapshots a counter and runs ten forks of it at once.
+### Shared memory
+
+Forks of one snapshot start with identical copies of its memory. With
+`gcr.dev/memory-merge=true` the kernel's same-page merging (KSM) folds
+those copies into one, copy-on-write: a fork pays again only for the pages
+it writes. Ten forks of a snapshot holding 128 MiB come to about 210 MiB a
+second after they start, against 1.25 GiB without it.
+
+How: Linux 6.4's `PR_SET_MEMORY_MERGE` marks all of a process's memory
+mergeable, and its children inherit it. gcr runs the criu that restores a
+container through the shim, which sets it before exec'ing criu, so every
+task criu restores has it; a container started from its image gets it from
+its init, just before the exec. KSM must be running
+(`/sys/kernel/mm/ksm/run` = 1); without it gcr refuses the annotation.
+
+What it costs, and why it is opt-in:
+
+- Merging happens after the fact. ksmd scans memory in the background
+  (`pages_to_scan`, `sleep_millisecs` set how fast, and what CPU it
+  takes), so forks briefly hold their full size and a scheduler has to
+  admit them at that size.
+- KSM merges across every process that allows it, not per group. Two
+  containers that both opt in can tell, from how long a write takes,
+  whether the other holds a page with given contents: a known side
+  channel. Use it among containers that trust each other, such as the forks
+  of one snapshot (which share a user namespace range anyway), and not
+  across tenants.
+
+The other routes considered: restoring memory as private mappings of the
+image files, shared through the page cache, is immediate but changes what
+the process sees. An `MADV_DONTNEED` on such a mapping reads the file back
+instead of giving zeros, and allocators rely on the zeros. Restoring once
+and fork(2)ing whole containers does not exist in the kernel. KSM keeps
+anonymous memory anonymous, so nothing in the container can tell.
+
+`test/e2e/fork` snapshots a counter and runs ten forks of it at once, and
+measures ten forks' memory with merging on.
 
 ## Live migration
 
