@@ -16,6 +16,28 @@ fork, `makhov/runc`, which adds an init hook for Landlock); no runc binary.
   mounts, and Landlock confining containers to their root (below).
 - Not yet: GPUs, the NVIDIA ioctl proxy.
 
+### Compared with runc
+
+Same host (arm64, Linux 7.0), containerd 2.4.2, runc v1.5.2 (the release
+gcr's libcontainer comes from), both runtimes on their defaults (gcr's
+hardening and Landlock on):
+
+| | gcr | runc |
+| --- | --- | --- |
+| critest | 123 passed, 0 failed | 113 passed, 0 failed |
+| critest NRI tests | 11 of 11 | 11 of 11 |
+| StartContainer, median / p90 | 16.1 / 19.5 ms | 21.9 / 26.7 ms |
+| StopContainer, median / p90 | 16.5 / 21.3 ms | 30.7 / 34.1 ms |
+| CreatePod / StopPod, median | 52.2 / 53.4 ms | 54.8 / 65.2 ms |
+| Shim memory per pod (PSS, 10 pods) | ~6 MiB | ~4 MiB |
+
+runc skips the user namespace tests, which gcr passes; the rest of critest's
+skips (NRI without a socket, benchmarks, an image volume field containerd
+does not report) are the same for both. Latencies are critest's
+benchmarks, 50 sequential runs: gcr runs libcontainer in the shim instead of
+executing a runc binary per operation. gcr's shim is the bigger binary
+(more of it resident, shared between shims).
+
 ## Requirements
 
 - Linux 6.12+ with cgroup v2, run as root
