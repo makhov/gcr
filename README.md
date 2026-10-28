@@ -13,7 +13,8 @@ fork, `makhov/runc`, which adds an init hook for Landlock); no runc binary.
 - User namespaces by default (below).
 - Time travel and live migration (below).
 - Hardening: a denied set of system calls on top of any profile, supervised
-  mounts, and Landlock confining containers to their root (below).
+  mounts, a netlink policy (BPF LSM) and Landlock confining containers to
+  their root (below).
 - Not yet: GPUs, the NVIDIA ioctl proxy.
 
 ### Compared with runc
@@ -223,9 +224,9 @@ gcr's own profile they are guarded rather than refused
   keyring) holds inside as well, and Landlock still refuses a confined
   container any mount.
 
-Other kernel code root in a new network namespace can reach (routing,
-traffic control) stays reachable. `NestedUserNamespaces = 'deny'` refuses
-`CLONE_NEWUSER` instead. A workload's own seccomp profile decides for
+What root in a new network namespace can ask the kernel to create there
+is limited by the netlink policy (next section).
+`NestedUserNamespaces = 'deny'` refuses `CLONE_NEWUSER` instead. A workload's own seccomp profile decides for
 itself; containerd's `RuntimeDefault` refuses it, on runc as well. Ubuntu
 hosts restrict unprivileged user namespaces with AppArmor
 (`kernel.apparmor_restrict_unprivileged_userns`), which takes the
@@ -239,6 +240,36 @@ the policy per runtime handler, in the runtime's options:
 `Hardening = 'standard'` (default), `'always'` (also unconfined pods), or
 `'off'`. A workload cannot weaken it.
 `test/e2e/hardening` probes every refused call.
+
+### Netlink policy
+
+Root in a network namespace, including one a container makes for itself,
+configures it over netlink, and each kind of link, qdisc or filter it may
+create is kernel code of its own (bonding, macvlan, VXLAN, tunnels, the
+teql scheduler, ...). seccomp sees the socket's protocol, not the kind in
+the message, so gcr decides in the kernel: a BPF LSM program on
+`netlink_send` checks every `NETLINK_ROUTE` request from a gcr container
+and allows
+
+- link kinds `veth`, `dummy`, `bridge` and `vlan` (what container
+  networking inside a container needs: Docker-in-Docker makes veth pairs
+  and a bridge);
+- qdisc, class and filter kinds `pfifo_fast`, `pfifo`, `bfifo`, `fq_codel`,
+  `fq`, `codel`, `sfq`, `tbf`, `htb`, `prio`, `mq`, `cake`, `netem`,
+  `ingress`, `clsact`, `u32`, `flower`, `matchall`, `basic`, `fw`.
+
+Other kinds are refused with EPERM; messages that name no kind (addresses,
+routes, neighbours, bringing links up) pass, as do other netlink protocols
+(netfilter is seccomp's business, above). It covers the cgroups of hardened
+containers, nested containers included, and nothing else on the node; the
+program and its maps are pinned under `/sys/fs/bpf/gcr` and shared by all
+shims. Set `NetlinkPolicy = 'off'` per runtime handler to skip it.
+
+**The node needs the BPF LSM enabled:** `bpf` in the kernel's `lsm=` list
+(`CONFIG_BPF_LSM=y` is common, the boot parameter is not; see
+`hack/lima.yaml`). Without it the shim logs once and containers run with
+seccomp alone; CI runners lack it, so `test/e2e/hardening`'s
+`TestNetlinkPolicy` runs in the dev VM.
 
 ### Landlock
 
@@ -367,7 +398,7 @@ CRI, checkpoint/restore, static helper programs to run in containers):
 | `checkpoint` | a counter carries on after checkpoint/restore, in the same user namespace |
 | `timetravel` | a timeline, a rewind; the counter, the filesystem and the recording carry on from the point |
 | `migrate` | live migration between containerd namespaces (pre-copy on x86); a refused one leaves the source running |
-| `hardening` | refused system calls with hardening on and off; supervised mounts, by exact return value |
+| `hardening` | refused system calls with hardening on and off; supervised mounts, by exact return value; nested user namespaces; the netlink policy (BPF LSM) |
 | `landlock` | a leaked host descriptor, with Landlock on and off, across a restore |
 | `dind` | Docker-in-Docker, unprivileged, in a user namespace |
 | `cri` | a pod through CRI: exec, exit codes, logs, updates, stats, user namespace |
@@ -383,6 +414,7 @@ Everything builds and runs in a Linux VM (kernel 6.12+, containerd 2.4, CRIU):
 
 ```sh
 limactl start --name=gcr hack/lima.yaml   # once
+limactl restart gcr                       # once: boots with the BPF LSM (netlink policy)
 make vm T=criu                            # once: build and install the CRIU fork from ../criu
 make vm T=test-e2e                        # build, install, run the end-to-end tests
 ```
