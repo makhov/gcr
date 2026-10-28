@@ -59,9 +59,7 @@ var (
 // them with hardening off, to see what this kernel can do at all (a kind
 // whose module is missing fails either way), then under the policy.
 func TestNetlinkClients(t *testing.T) {
-	if !netpolicy.Available() {
-		t.Skip("the kernel's LSM list has no bpf")
-	}
+	framework.RequireBPFLSM(t, netpolicy.Available())
 	withoutHostUsernsRestriction(t)
 	ns := framework.NewNamespace(t, "gcr-e2e")
 	run := func(t *testing.T, config string) map[string]string {

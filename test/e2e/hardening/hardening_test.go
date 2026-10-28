@@ -177,9 +177,7 @@ func TestNestedUserNamespaces(t *testing.T) {
 // in a user namespace it makes too, but not bonding or macvlan ones; with
 // hardening off, or the policy off, it may. Needs the BPF LSM.
 func TestNetlinkPolicy(t *testing.T) {
-	if !netpolicy.Available() {
-		t.Skip("the kernel's LSM list has no bpf")
-	}
+	framework.RequireBPFLSM(t, netpolicy.Available())
 	withoutHostUsernsRestriction(t)
 	e := setup(t)
 	_, refusedBefore, err := netpolicy.PinnedStats()

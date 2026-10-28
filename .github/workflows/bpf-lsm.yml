@@ -1,0 +1,61 @@
+# The tests a GitHub-hosted runner cannot run: the netlink policy
+# (internal/netpolicy) is a BPF LSM program, and the BPF LSM has to be in
+# the kernel's lsm= list at boot, which a hosted runner cannot change. CI
+# therefore only proves the policy breaks nothing; this workflow proves it
+# refuses what it should. hack/runner-setup.sh prepares the runner.
+#
+# The runner is a dev machine, so this does not gate pull requests: it runs
+# on main, on request, and on a pull request labelled run-bpf. Queued jobs
+# wait for the runner to come up.
+name: bpf-lsm
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [labeled, synchronize]
+  workflow_dispatch:
+
+concurrency:
+  group: bpf-lsm-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  netlink-policy:
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'run-bpf')
+    runs-on: [self-hosted, gcr-bpf]
+    timeout-minutes: 60
+    env:
+      # A skip would make this workflow pointless, so the tests that need
+      # the BPF LSM fail instead when it is missing.
+      GCR_E2E_REQUIRE_BPF: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - name: the kernel has the BPF LSM
+        run: |
+          cat /sys/kernel/security/lsm
+          grep -qw bpf /sys/kernel/security/lsm
+      - name: host set up for the tests
+        run: |
+          # Only what the runner may be missing; the dev VM has the rest
+          # from hack/lima.yaml.
+          command -v criu >/dev/null || sudo ./hack/ci-setup.sh
+          command -v clang >/dev/null || sudo apt-get install -y -qq clang llvm libbpf-dev
+      - run: make build && sudo make install
+      - run: sudo systemctl restart containerd
+      - name: end-to-end tests
+        run: make test-e2e
+      - name: the netlink policy refused something
+        run: |
+          sudo bpftool map dump pinned /sys/fs/bpf/gcr/netlink/stats
+          sudo bpftool map dump pinned /sys/fs/bpf/gcr/netlink/stats |
+            jq -e '[.[] | select(.key == 1) | .value] | add > 0' >/dev/null ||
+            { echo "the policy refused nothing: it is not being applied"; exit 1; }
+      - name: logs
+        if: failure()
+        run: sudo journalctl -u containerd --no-pager | tail -300

@@ -355,6 +355,21 @@ func criuLog(err error) string {
 	return "\nrestore.log:\n" + strings.Join(lines[max(0, len(lines)-25):], "\n")
 }
 
+// RequireBPFLSM skips a test that needs the kernel's BPF LSM, or fails it
+// when GCR_E2E_REQUIRE_BPF is set: a runner meant to exercise the netlink
+// policy must not pass by skipping it.
+func RequireBPFLSM(t testing.TB, available bool) {
+	t.Helper()
+	if available {
+		return
+	}
+	const env = "GCR_E2E_REQUIRE_BPF"
+	if os.Getenv(env) != "" {
+		t.Fatalf("%s is set but the kernel's LSM list has no bpf (lsm=...,bpf on the kernel command line)", env)
+	}
+	t.Skip("the kernel's LSM list has no bpf")
+}
+
 // Eventually polls cond every 100ms until it holds or timeout passes.
 func Eventually(t testing.TB, timeout time.Duration, what string, cond func() bool) {
 	t.Helper()

@@ -4,8 +4,11 @@ package netpolicy
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/cilium/ebpf"
@@ -55,5 +58,27 @@ func TestCgroupID(t *testing.T) {
 	id, err := CgroupID("/sys/fs/cgroup")
 	if err != nil || id == 0 {
 		t.Fatalf("CgroupID = %d, %v", id, err)
+	}
+}
+
+// TestObjectIsCurrent checks the embedded object was built from the
+// source in the tree: `make bpf` records the source's hash beside it,
+// since the object differs between clang versions and comparing it would
+// say nothing.
+func TestObjectIsCurrent(t *testing.T) {
+	recorded, err := os.ReadFile("netlink.bpf.sha256")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _, ok := strings.Cut(strings.TrimSpace(string(recorded)), " ")
+	if !ok {
+		t.Fatalf("netlink.bpf.sha256: %q", recorded)
+	}
+	src, err := os.ReadFile("bpf/netlink.bpf.c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprintf("%x", sha256.Sum256(src)); got != want {
+		t.Fatalf("bpf/netlink.bpf.c changed since the embedded object was built: run make bpf and commit\n got %s\nwant %s", got, want)
 	}
 }

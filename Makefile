@@ -30,6 +30,10 @@ bpf:
 	clang -O2 -g -Wall -target bpf -I/usr/include/$(shell uname -m)-linux-gnu -D__TARGET_ARCH_$(shell uname -m | sed 's/x86_64/x86/;s/aarch64/arm64/') \
 		-c internal/netpolicy/bpf/netlink.bpf.c -o internal/netpolicy/netlink.bpf.o
 	llvm-strip -g internal/netpolicy/netlink.bpf.o
+	# The source the embedded object was built from, so a test can tell
+	# when the two have drifted apart (the object itself differs between
+	# clang versions, which says nothing).
+	cd internal/netpolicy && sha256sum bpf/netlink.bpf.c > netlink.bpf.sha256
 
 test:
 	go test -tags $(TAGS) ./...
