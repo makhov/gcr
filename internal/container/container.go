@@ -618,6 +618,19 @@ func idmapRootfs(mounts []mount.Mount, idmap string, root int) ([]mount.Mount, e
 // delegateCgroup gives the container's cgroup to cgroupOwner, the way
 // cgroup v2 delegation is defined: the directory and the files that move
 // processes and enable controllers.
+// CgroupPath is the container's cgroup directory (cgroup v2).
+func (c *Container) CgroupPath() (string, error) {
+	st, err := c.lc.State()
+	if err != nil {
+		return "", err
+	}
+	dir, ok := st.CgroupPaths[""]
+	if !ok {
+		return "", fmt.Errorf("no unified cgroup: %w", errdefs.ErrNotImplemented)
+	}
+	return dir, nil
+}
+
 func (c *Container) delegateCgroup() error {
 	if c.cgroupOwner == 0 {
 		return nil

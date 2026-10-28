@@ -27,7 +27,14 @@ provision:
       GO_VERSION=1.27.0
 
       apt-get update
-      apt-get install -y build-essential pkg-config libseccomp-dev criu jq
+      apt-get install -y build-essential pkg-config libseccomp-dev criu jq \
+        clang llvm libbpf-dev
+      # The netlink policy (internal/netpolicy) is a BPF LSM program: add bpf
+      # to the kernel's LSM list. Takes effect on the next boot:
+      # `limactl restart gcr` once after the first start.
+      echo 'GRUB_CMDLINE_LINUX_DEFAULT="$GRUB_CMDLINE_LINUX_DEFAULT lsm=lockdown,capability,landlock,yama,apparmor,bpf,ima,evm"' \
+        >/etc/default/grub.d/90-gcr-bpf-lsm.cfg
+      update-grub
 
       if ! command -v containerd >/dev/null; then
         curl -fsSL "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/containerd-${CONTAINERD_VERSION}-linux-${ARCH}.tar.gz" \

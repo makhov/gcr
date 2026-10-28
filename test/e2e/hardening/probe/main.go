@@ -13,12 +13,15 @@
 //
 // "probe nested" starts a child in new user, mount, PID and network
 // namespaces, as Chrome's sandbox does, and the child reports what root
-// there can do.
+// there can do, including which link kinds it can create (gcr's netlink
+// policy).
 package main
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
@@ -222,4 +225,66 @@ func nestedChild() {
 	exact("nested_mount_ramfs", r, errno)
 	r, errno = mount("none", "/mnt", "tmpfs", 0)
 	exact("nested_mount_tmpfs", r, errno)
+
+	// Link kinds, over netlink: what gcr's netlink policy allows (veth,
+	// dummy, bridge) and what it refuses (bonding, macvlan, which has to
+	// sit on another link).
+	for _, k := range []string{"veth", "dummy", "bridge", "bond"} {
+		fmt.Println("link_"+k, newLink("p-"+k, k, 0))
+	}
+	parent, err := net.InterfaceByName("p-dummy")
+	if err != nil {
+		fmt.Println("link_macvlan NOPARENT")
+		return
+	}
+	fmt.Println("link_macvlan", newLink("p-macvlan", "macvlan", parent.Index))
+}
+
+// newLink asks the kernel for a link of kind (RTM_NEWLINK with
+// IFLA_LINKINFO/IFLA_INFO_KIND, on parent if not 0) and reports OK or the
+// errno's name, from sendmsg or the kernel's acknowledgement.
+func newLink(name, kind string, parent int) string {
+	attr := func(typ uint16, payload []byte) []byte {
+		b := make([]byte, 4+len(payload))
+		binary.LittleEndian.PutUint16(b[0:], uint16(4+len(payload)))
+		binary.LittleEndian.PutUint16(b[2:], typ)
+		copy(b[4:], payload)
+		return append(b, make([]byte, (4-len(b)%4)%4)...)
+	}
+	var attrs []byte
+	attrs = append(attrs, attr(unix.IFLA_IFNAME, append([]byte(name), 0))...)
+	if parent != 0 {
+		p := make([]byte, 4)
+		binary.LittleEndian.PutUint32(p, uint32(parent))
+		attrs = append(attrs, attr(unix.IFLA_LINK, p)...)
+	}
+	attrs = append(attrs, attr(unix.IFLA_LINKINFO|unix.NLA_F_NESTED, attr(unix.IFLA_INFO_KIND, append([]byte(kind), 0)))...)
+	msg := make([]byte, unix.NLMSG_HDRLEN+unix.SizeofIfInfomsg, unix.NLMSG_HDRLEN+unix.SizeofIfInfomsg+len(attrs))
+	msg = append(msg, attrs...)
+	h := (*unix.NlMsghdr)(unsafe.Pointer(&msg[0]))
+	h.Len, h.Type, h.Seq = uint32(len(msg)), unix.RTM_NEWLINK, 1
+	h.Flags = unix.NLM_F_REQUEST | unix.NLM_F_ACK | unix.NLM_F_CREATE | unix.NLM_F_EXCL
+
+	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.NETLINK_ROUTE)
+	if err != nil {
+		return "NOSOCKET"
+	}
+	defer unix.Close(fd)
+	if err := unix.Sendto(fd, msg, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
+		return unix.ErrnoName(err.(unix.Errno))
+	}
+	reply := make([]byte, 4096)
+	n, _, err := unix.Recvfrom(fd, reply, 0)
+	if err != nil {
+		return "NOREPLY"
+	}
+	// The acknowledgement: an NLMSG_ERROR whose payload starts with the
+	// error code, 0 for success.
+	if n < unix.NLMSG_HDRLEN+4 || binary.LittleEndian.Uint16(reply[4:]) != unix.NLMSG_ERROR {
+		return "BADREPLY"
+	}
+	if code := int32(binary.LittleEndian.Uint32(reply[unix.NLMSG_HDRLEN:])); code != 0 {
+		return unix.ErrnoName(unix.Errno(-code))
+	}
+	return "OK"
 }

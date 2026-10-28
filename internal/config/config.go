@@ -18,6 +18,7 @@ import (
 
 	"github.com/makhov/gcr/internal/hardening"
 	"github.com/makhov/gcr/internal/landlock"
+	"github.com/makhov/gcr/internal/netpolicy"
 	"github.com/makhov/gcr/internal/userns"
 )
 
@@ -32,6 +33,8 @@ type Config struct {
 	NestedUserNamespaces hardening.NestedUserNamespaces `toml:"NestedUserNamespaces"`
 	// Landlock is "standard" (default) or "off"; see landlock.Level.
 	Landlock landlock.Level `toml:"Landlock"`
+	// NetlinkPolicy is "auto" (default) or "off"; see netpolicy.Mode.
+	NetlinkPolicy netpolicy.Mode `toml:"NetlinkPolicy"`
 
 	// IOUID and IOGID own the container's stdio pipes. containerd sets
 	// them (in runc's options) for Kubernetes user namespace pods, so the
@@ -43,7 +46,8 @@ type Config struct {
 // means the defaults.
 func FromOptions(a *anypb.Any) (Config, error) {
 	c := Config{UserNamespaces: userns.Auto, Hardening: hardening.Standard,
-		NestedUserNamespaces: hardening.Guarded, Landlock: landlock.Standard}
+		NestedUserNamespaces: hardening.Guarded, Landlock: landlock.Standard,
+		NetlinkPolicy: netpolicy.Auto}
 	if a == nil || len(a.GetValue()) == 0 {
 		return c, nil
 	}
@@ -80,6 +84,9 @@ func FromOptions(a *anypb.Any) (Config, error) {
 		return c, err
 	}
 	if err := c.Landlock.Validate(); err != nil {
+		return c, err
+	}
+	if err := c.NetlinkPolicy.Validate(); err != nil {
 		return c, err
 	}
 	return c, nil

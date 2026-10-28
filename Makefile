@@ -6,7 +6,7 @@ VM  := gcr
 # Run a command in the dev VM, in the same directory as here.
 IN_VM = limactl shell --workdir $(CURDIR) $(VM) --
 
-.PHONY: build static install vet test test-e2e test-k8s vm criu
+.PHONY: build static install vet test test-e2e test-k8s vm criu bpf
 
 build:
 	CGO_ENABLED=1 go build -tags $(TAGS) -o $(BIN) ./cmd/containerd-shim-gcr-v2
@@ -23,6 +23,13 @@ install: build
 
 vet:
 	go vet -tags $(TAGS) ./...
+
+# The netlink policy (BPF LSM), compiled with CO-RE so one object fits
+# every kernel with BTF; it is embedded in the shim and checked in.
+bpf:
+	clang -O2 -g -Wall -target bpf -I/usr/include/$(shell uname -m)-linux-gnu -D__TARGET_ARCH_$(shell uname -m | sed 's/x86_64/x86/;s/aarch64/arm64/') \
+		-c internal/netpolicy/bpf/netlink.bpf.c -o internal/netpolicy/netlink.bpf.o
+	llvm-strip -g internal/netpolicy/netlink.bpf.o
 
 test:
 	go test -tags $(TAGS) ./...

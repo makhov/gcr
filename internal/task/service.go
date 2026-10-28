@@ -36,6 +36,7 @@ import (
 	"github.com/makhov/gcr/internal/hardening"
 	"github.com/makhov/gcr/internal/landlock"
 	"github.com/makhov/gcr/internal/migrate"
+	"github.com/makhov/gcr/internal/netpolicy"
 	"github.com/makhov/gcr/internal/supervisor"
 	"github.com/makhov/gcr/internal/timetravel"
 	"github.com/makhov/gcr/internal/userns"
@@ -58,6 +59,24 @@ type service struct {
 	mu         sync.Mutex
 	containers map[string]*container.Container
 	extras     map[string]*extras
+
+	// The node's netlink policy, loaded for the first hardened container.
+	netPolicyOnce sync.Once
+	netPolicy     *netpolicy.Policy
+}
+
+// netlinkPolicy loads the netlink policy once; nil when the kernel cannot
+// apply it, logged once.
+func (s *service) netlinkPolicy(ctx context.Context) *netpolicy.Policy {
+	s.netPolicyOnce.Do(func() {
+		p, err := netpolicy.Load()
+		if err != nil {
+			log.G(ctx).WithError(err).Warn("netlink policy off: containers' network configuration is limited by seccomp alone")
+			return
+		}
+		s.netPolicy = p
+	})
+	return s.netPolicy
 }
 
 // extras is what a container has beyond containerd's task API.
@@ -69,9 +88,15 @@ type extras struct {
 	control    *control.Server
 	stateDir   string
 	id         string
+	// netPolicy covers cgroupID, if not 0.
+	netPolicy *netpolicy.Policy
+	cgroupID  uint64
 }
 
 func (e *extras) Close() {
+	if e.netPolicy != nil && e.cgroupID != 0 {
+		_ = e.netPolicy.Remove(e.cgroupID)
+	}
 	if e.control != nil {
 		e.control.Close()
 	}
@@ -139,6 +164,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		Stderr:     r.Stderr,
 		Checkpoint: r.Checkpoint,
 	}
+	var hardened bool
 	opts.PrepareSpec = func(spec *specs.Spec) (container.Prepared, error) {
 		prep := container.Prepared{IOOwner: cfg.IOUID}
 		ok, why, err := userns.Decide(spec, cfg.UserNamespaces)
@@ -197,7 +223,8 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		hard := hardening.Apply(spec, hardening.Options{
 			Level: cfg.Hardening, NestedUserNamespaces: cfg.NestedUserNamespaces, Landlocked: landlocked,
 		})
-		if hard.Skipped != "" {
+		hardened = hard.Skipped == ""
+		if !hardened {
 			log.G(ctx).WithField("reason", hard.Skipped).Debug("not hardened")
 		}
 		for _, name := range hard.Supervised {
@@ -257,6 +284,13 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 	if err != nil {
 		ex.Close()
 		return nil, errgrpc.ToGRPC(err)
+	}
+	if hardened && cfg.NetlinkPolicy != netpolicy.Off {
+		if p := s.netlinkPolicy(ctx); p != nil {
+			if err := coverCgroup(p, c, ex); err != nil {
+				log.G(ctx).WithError(err).Warn("netlink policy: container not covered")
+			}
+		}
 	}
 
 	h := control.Handlers{
@@ -701,4 +735,21 @@ func (s *service) send(evt any) {
 	if err := s.publisher.Publish(s.ctx, runtime.GetTopic(evt), evt); err != nil {
 		log.G(s.ctx).WithError(err).Errorf("publish %T", evt)
 	}
+}
+
+// coverCgroup puts the container's cgroup under the netlink policy.
+func coverCgroup(p *netpolicy.Policy, c *container.Container, ex *extras) error {
+	dir, err := c.CgroupPath()
+	if err != nil {
+		return err
+	}
+	id, err := netpolicy.CgroupID(dir)
+	if err != nil {
+		return err
+	}
+	if err := p.Add(id); err != nil {
+		return err
+	}
+	ex.netPolicy, ex.cgroupID = p, id
+	return nil
 }
