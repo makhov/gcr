@@ -11,7 +11,8 @@ built in. Containers run in-process through libcontainer; no runc binary.
   updates, checkpoint, restore. Passes the CRI conformance suite (critest).
 - User namespaces by default (below).
 - Time travel and live migration (below).
-- Not yet: GPUs.
+- Hardening: a denied set of system calls on top of any profile (below).
+- Not yet: GPUs, the NVIDIA ioctl proxy, Landlock.
 
 ## Requirements
 
@@ -145,6 +146,41 @@ For gcr's own user namespaces:
   target must be created with the source's range,
   `gcr.dev/userns-base=<first host ID>`; the source refuses otherwise.
 
+## Hardening
+
+Whatever seccomp profile a workload brings (or none, as Kubernetes pods
+default to), gcr refuses calls behind most container escapes and kernel
+exploits reachable from containers:
+
+- with EPERM: `io_uring_*`, `bpf`, `perf_event_open`, `userfaultfd`, the
+  keyring (`add_key`, `keyctl`, `request_key`), the new mount API (`fsopen`,
+  `fsconfig`, `fsmount`, `fspick`, `open_tree`, `move_mount`,
+  `mount_setattr`), module loading and kexec, `open_by_handle_at`;
+- when the container has no profile of its own, also: creating user
+  namespaces (`clone`/`unshare` with `CLONE_NEWUSER`), `AF_PACKET`,
+  `AF_VSOCK`, `AF_KEY` and `AF_ALG` sockets, and raw IP sockets (`ping` uses
+  ICMP datagram sockets, which gcr opens); `clone3` returns ENOSYS so libc
+  falls back to `clone`.
+
+A container that can mount (it has `CAP_SYS_ADMIN` without being
+privileged; in a user namespace that capability only reaches the namespace)
+has `mount(2)` handed to gcr's supervisor. The supervisor allows `proc`,
+`sysfs`, `tmpfs`, `devpts`, `mqueue`, `cgroup2` and `overlay`, and bind
+mounts, remounts and propagation changes; other filesystems the kernel would
+allow in a user namespace (`ramfs`, `fuse`, ...) are refused. It performs the
+mount itself, from the arguments it copied and checked (so another thread
+cannot swap them after the check), in the caller's namespaces and with its
+IDs and capabilities, so the kernel's own checks are the caller's.
+
+Privileged containers are exempt. Kubernetes pods that run explicitly
+`Unconfined` (Kubernetes' default, which a runtime cannot tell from an
+explicit choice) stay unconfined, as conformance requires; pods with a
+profile (`RuntimeDefault`, `Localhost`) get the denied set merged in. Set
+the policy per runtime handler, in the runtime's options:
+`Hardening = 'standard'` (default), `'always'` (also unconfined pods), or
+`'off'`. A workload cannot weaken it.
+`hack/e2e-hardening.sh` probes every refused call.
+
 ## Time travel
 
 A container started with `gcr.dev/time-travel=execve` gets a point on its
@@ -198,6 +234,7 @@ clear text: use a trusted network.
 | `hack/e2e.sh` | checkpoint/restore through containerd | root, containerd, CRIU |
 | `hack/e2e-timetravel.sh` | timeline and rewind | root, containerd, CRIU fork |
 | `hack/e2e-migrate.sh` | live migration (pre-copy on x86) | root, containerd, CRIU fork |
+| `hack/e2e-hardening.sh` | refused system calls, with hardening on and off | root, containerd, cc |
 | `hack/smoke-cri.sh` | a pod through CRI with crictl | root, containerd, CNI |
 | `critest --runtime-handler gcr` | CRI conformance | root, containerd, CNI |
 | `make test-k8s` | Kubernetes (stock k0s via k0da) with a gcr RuntimeClass | docker or podman, k0da >= v0.4.0 |

@@ -15,6 +15,8 @@ import (
 
 	"github.com/containerd/log"
 	"golang.org/x/sys/unix"
+
+	"github.com/makhov/gcr/internal/supervisor"
 )
 
 // Snapshotter is the container side of time travel.
@@ -41,8 +43,6 @@ type Snapshotter interface {
 type Recorder struct {
 	policy   *Policy
 	timeline *Timeline
-	sup      *Supervisor
-	criuConf string
 
 	mu   sync.Mutex
 	snap Snapshotter
@@ -52,38 +52,15 @@ type Recorder struct {
 	seenInit bool
 }
 
-// NewRecorder starts the supervisor. stateDir holds the timeline and the CRIU
-// config; sockDir holds the supervisor sockets (kept short for sun_path).
-func NewRecorder(ctx context.Context, policy *Policy, stateDir, sockDir string) (*Recorder, error) {
+// NewRecorder keeps its timeline in stateDir. Its Handle answers the
+// policy's trigger calls on the container's supervisor.
+func NewRecorder(policy *Policy, stateDir string) (*Recorder, error) {
 	tl, err := NewTimeline(filepath.Join(stateDir, "points"), policy.Keep)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(sockDir, 0o700); err != nil {
-		return nil, err
-	}
-	r := &Recorder{policy: policy, timeline: tl}
-	r.sup, err = NewSupervisor(ctx, filepath.Join(sockDir, "handoff.sock"), filepath.Join(sockDir, "restore.sock"), r.handle)
-	if err != nil {
-		return nil, err
-	}
-	// libcontainer restores through CRIU's RPC, which has no field for our
-	// option; a CRIU config file named by org.criu.config carries it.
-	r.criuConf = filepath.Join(stateDir, "criu.conf")
-	conf := fmt.Sprintf("seccomp-notify-socket %s\n", r.sup.RestorePath)
-	if err := os.WriteFile(r.criuConf, []byte(conf), 0o600); err != nil {
-		r.sup.Close()
-		return nil, err
-	}
-	return r, nil
+	return &Recorder{policy: policy, timeline: tl}, nil
 }
-
-// HandoffPath is the seccomp listener path to put in the container's spec.
-func (r *Recorder) HandoffPath() string { return r.sup.HandoffPath }
-
-// CRIUConfig is the CRIU configuration file for this container's checkpoints
-// and restores.
-func (r *Recorder) CRIUConfig() string { return r.criuConf }
 
 // Attach sets the container once it exists; triggers before that pass.
 func (r *Recorder) Attach(s Snapshotter) {
@@ -93,6 +70,49 @@ func (r *Recorder) Attach(s Snapshotter) {
 }
 
 func (r *Recorder) Points() []Point { return r.timeline.Points() }
+
+// Handle is the supervisor handler for the policy's trigger calls.
+func (r *Recorder) Handle(ctx context.Context, c *supervisor.Call) {
+	t, ok := readTrigger(c)
+	if !ok {
+		return
+	}
+	r.handle(ctx, t, c.Continue)
+}
+
+// Trigger is a held exec that may take a point.
+type Trigger struct {
+	Pid     int
+	Syscall string
+	Path    string
+	Argv    []string
+}
+
+// readTrigger reads execve(path, argv, envp) / execveat(dirfd, path, argv,
+// envp, flags) from the caller.
+func readTrigger(c *supervisor.Call) (Trigger, bool) {
+	t := Trigger{Pid: c.Pid, Syscall: c.Syscall}
+	pathArg, argvArg := c.Args[0], c.Args[1]
+	if c.Syscall == "execveat" {
+		pathArg, argvArg = c.Args[1], c.Args[2]
+	}
+	var err error
+	if t.Path, err = c.ReadString(pathArg, 4096); err != nil {
+		return t, false
+	}
+	for i := uint64(0); i < 32 && argvArg != 0; i++ {
+		p, err := c.ReadUint64(argvArg + i*8)
+		if err != nil || p == 0 {
+			break
+		}
+		a, err := c.ReadString(p, 4096)
+		if err != nil {
+			break
+		}
+		t.Argv = append(t.Argv, a)
+	}
+	return t, c.Valid()
+}
 
 func (r *Recorder) handle(ctx context.Context, t Trigger, allow func()) {
 	r.mu.Lock()
@@ -180,7 +200,6 @@ func (r *Recorder) Rewind(ctx context.Context, id int) error {
 }
 
 func (r *Recorder) Close() error {
-	r.sup.Close()
 	return r.timeline.Remove()
 }
 

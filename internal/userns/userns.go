@@ -17,6 +17,8 @@ import (
 	"github.com/containerd/errdefs"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
+
+	"github.com/makhov/gcr/internal/ocispec"
 )
 
 const (
@@ -122,7 +124,7 @@ func Decide(spec *specs.Spec, mode Mode) (bool, string, error) {
 
 // blocker says why spec cannot run in a gcr user namespace, or "".
 func blocker(spec *specs.Spec) string {
-	if p := spec.Process; p != nil && p.Capabilities != nil && slices.Contains(p.Capabilities.Bounding, "CAP_SYS_ADMIN") {
+	if ocispec.Privileged(spec) {
 		return "privileged container"
 	}
 	// CAP_NET_ADMIN means nothing in a pod's network namespace from inside a

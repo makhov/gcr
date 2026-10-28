@@ -63,9 +63,10 @@ func ParsePolicy(annotations map[string]string) (*Policy, error) {
 }
 
 // AddTrigger makes the spec's seccomp filter hand the trigger system calls to
-// the supervisor listening at listenerPath. Existing rules for those calls are
-// replaced: a notification is the only action left to take on them.
-func (p *Policy) AddTrigger(spec *specs.Spec, listenerPath string) {
+// the container's supervisor. Existing rules for those calls are replaced: a
+// notification is the only action left to take on them. The caller sets the
+// filter's listener.
+func (p *Policy) AddTrigger(spec *specs.Spec) {
 	if spec.Linux == nil {
 		spec.Linux = &specs.Linux{}
 	}
@@ -84,5 +85,4 @@ func (p *Policy) AddTrigger(spec *specs.Spec, listenerPath string) {
 		}
 	}
 	sc.Syscalls = append(rules, specs.LinuxSyscall{Names: p.Syscalls, Action: specs.ActNotify})
-	sc.ListenerPath = listenerPath
 }
