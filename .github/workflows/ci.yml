@@ -54,7 +54,9 @@ jobs:
         run: sudo journalctl -u containerd --no-pager | tail -300
 
   k8s:
-    # Kubernetes (k0s 1.37 via k0da, in Docker) with gcr as a RuntimeClass.
+    # Kubernetes (k0s 1.37 via k0da, in rootful podman) with gcr as a
+    # RuntimeClass. Not Docker: k0da pulls the node image even when it was
+    # built locally.
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -64,4 +66,5 @@ jobs:
           go-version-file: go.mod
       - run: sudo apt-get update && sudo apt-get install -y libseccomp-dev
       - run: go install github.com/makhov/k0da@latest
-      - run: make test-k8s
+      - run: make static
+      - run: sudo env "PATH=$PATH:$(go env GOPATH)/bin" K0DA_RUNTIME=podman ./hack/e2e-k8s.sh
