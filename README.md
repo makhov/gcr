@@ -4,13 +4,91 @@ A containerd runtime (`io.containerd.gcr.v2`) with checkpoint, restore and fork
 built in. Containers run in-process through libcontainer; no runc binary.
 `gcr` is a placeholder name.
 
-Design: https://claude.ai/artifact/MKbmAZNzEyYc9QFnoeoNbA
-
 ## Status
 
 - Task API: create, start, state, kill, wait, delete, pids, pause, resume, checkpoint, restore.
 - Time travel (below).
 - Not yet: exec, terminals, stats, update, user namespaces by default, GPUs.
+
+## Requirements
+
+- Linux 6.12+ with cgroup v2, run as root
+- containerd 2.x
+- libseccomp (runtime and, to build, headers)
+- CRIU for checkpoint/restore; time travel needs the fork with
+  `--seccomp-notify-socket` (see below)
+
+## Install
+
+Build on the Linux host (cgo is required) and install both binaries:
+
+```sh
+make install          # containerd-shim-gcr-v2 and gcr into /usr/local/bin
+make criu             # optional: build and install the CRIU fork from ../criu
+```
+
+containerd finds the shim by name on `PATH`: the runtime type
+`io.containerd.gcr.v2` maps to `containerd-shim-gcr-v2`.
+
+## Running containers
+
+### With ctr
+
+No configuration is needed; name the runtime type directly:
+
+```sh
+ctr image pull docker.io/library/busybox:latest
+ctr run -d --runtime io.containerd.gcr.v2 docker.io/library/busybox:latest demo sleep 3600
+ctr task ls
+ctr task kill -s KILL demo && ctr task rm demo && ctr container rm demo
+```
+
+Checkpoint and restore go through containerd as usual:
+
+```sh
+ctr container checkpoint --task --rw demo localhost/demo-ckpt:1
+ctr task kill -s KILL demo && ctr task rm demo && ctr container rm demo
+ctr container restore --live --rw demo localhost/demo-ckpt:1
+```
+
+### With Kubernetes (CRI)
+
+Register the runtime with containerd's CRI plugin in
+`/etc/containerd/config.toml` and restart containerd:
+
+```toml
+version = 3
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr]
+  runtime_type = 'io.containerd.gcr.v2'
+  # Pass gcr's pod annotations (e.g. time travel) through to the runtime.
+  pod_annotations = ['gcr.dev/*']
+```
+
+Then add a RuntimeClass and select it from pods:
+
+```yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gcr
+handler: gcr
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: demo
+  annotations:
+    gcr.dev/time-travel: execve   # optional, see Time travel
+spec:
+  runtimeClassName: gcr
+  containers:
+    - name: demo
+      image: busybox
+      command: ["sleep", "3600"]
+```
+
+`kubectl exec` and `kubectl attach` need exec and terminals, which are not
+implemented yet.
 
 ## Time travel
 
