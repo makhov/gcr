@@ -147,7 +147,7 @@ func TestDebugContainer(t *testing.T) {
 	}
 	out, code := e.ns.Output(framework.UniqueID("debug"), framework.Spec{
 		Annotations: map[string]string{userns.AnnotationHostUsers: "true"},
-		Args: []string{"sh", "-c", "tr '\\0' '\\n' </proc/1/environ | grep -c PATH="},
+		Args:        []string{"sh", "-c", "tr '\\0' '\\n' </proc/1/environ | grep -c PATH="},
 		SpecOpts: []oci.SpecOpts{oci.WithLinuxNamespace(specs.LinuxNamespace{
 			Type: specs.PIDNamespace, Path: fmt.Sprintf("/proc/%d/ns/pid", app.Task.Pid()),
 		})},
