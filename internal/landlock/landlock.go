@@ -13,7 +13,9 @@
 // started in a running container (exec) are left out: Landlock lets a
 // process trace and inspect (/proc/<pid>/fd, environ, root) only processes
 // in its own or a nested domain, and an exec gets a domain of its own, so
-// debuggers and tools like jcmd would stop working on the container.
+// debuggers and tools like jcmd would stop working on the container. For
+// the same reason containers that join another container's PID namespace
+// (debug containers) are left out.
 package landlock
 
 import (
@@ -71,6 +73,8 @@ func Decide(spec *specs.Spec, level Level) (why string) {
 		return "privileged container"
 	case ocispec.HasCapability(spec, "CAP_SYS_ADMIN"):
 		return "container can mount"
+	case joinsPIDNamespace(spec):
+		return "container joins another's PID namespace"
 	case ABI() < 1:
 		return "kernel without Landlock"
 	}
@@ -79,6 +83,23 @@ func Decide(spec *specs.Spec, level Level) (why string) {
 	}
 	spec.Annotations[Annotation] = confineToRoot
 	return ""
+}
+
+// joinsPIDNamespace reports whether the container joins an existing PID
+// namespace: Kubernetes' ephemeral debug containers (kubectl debug
+// --target) and shareProcessNamespace pods do, to trace and inspect the
+// processes there, which Landlock allows only into the same or a nested
+// domain, never a sibling's.
+func joinsPIDNamespace(spec *specs.Spec) bool {
+	if spec.Linux == nil {
+		return false
+	}
+	for _, ns := range spec.Linux.Namespaces {
+		if ns.Type == specs.PIDNamespace && ns.Path != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // ABI is the kernel's Landlock ABI version, 0 without Landlock.

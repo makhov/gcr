@@ -221,8 +221,11 @@ on internal filesystems Landlock does not restrict.
   The kernel cannot report a process's Landlock domain, so CRIU cannot dump
   it; gcr asks for the same confinement again. With a CRIU without it, gcr
   logs that restored containers are not confined.
-- **Containers sharing a PID namespace** (`shareProcessNamespace`, ephemeral
-  debug containers) are separate domains and cannot trace each other.
+- **Not for containers that join another container's PID namespace**:
+  ephemeral debug containers (`kubectl debug --target`) and
+  `shareProcessNamespace` pods. They join it to trace and inspect the
+  processes there, which a sibling Landlock domain could not. The container
+  they join stays confined.
 
 Set it per runtime handler: `Landlock = 'standard'` (default) or `'off'`.
 Kernels without Landlock run containers unconfined.
