@@ -247,18 +247,27 @@ func (c *Container) ReadFile(path string) (string, error) {
 	return strings.TrimSpace(string(b)), err
 }
 
-// ReadInt reads a number from a file in the container's root filesystem.
+// ReadInt reads a number from a file in the container's root filesystem,
+// waiting briefly for one: the container may be between writes.
 func (c *Container) ReadInt(path string) int {
 	c.ns.t.Helper()
-	s, err := c.ReadFile(path)
-	if err != nil {
-		c.ns.t.Fatal(err)
+	var last string
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s, err := c.ReadFile(path)
+		if err == nil {
+			if n, convErr := strconv.Atoi(s); convErr == nil {
+				return n
+			}
+			last = s
+		} else {
+			last = err.Error()
+		}
+		if time.Now().After(deadline) {
+			c.ns.t.Fatalf("%s: no number after 5s (last %q)", path, last)
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	n, err := strconv.Atoi(s)
-	if err != nil {
-		c.ns.t.Fatalf("%s: %q is not a number", path, s)
-	}
-	return n
 }
 
 // Status is the task's status.
@@ -353,6 +362,21 @@ func criuLog(err error) string {
 	}
 	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
 	return "\nrestore.log:\n" + strings.Join(lines[max(0, len(lines)-25):], "\n")
+}
+
+// RequireBPFLSM skips a test that needs the kernel's BPF LSM, or fails it
+// when GCR_E2E_REQUIRE_BPF is set: a runner meant to exercise the netlink
+// policy must not pass by skipping it.
+func RequireBPFLSM(t testing.TB, available bool) {
+	t.Helper()
+	if available {
+		return
+	}
+	const env = "GCR_E2E_REQUIRE_BPF"
+	if os.Getenv(env) != "" {
+		t.Fatalf("%s is set but the kernel's LSM list has no bpf (lsm=...,bpf on the kernel command line)", env)
+	}
+	t.Skip("the kernel's LSM list has no bpf")
 }
 
 // Eventually polls cond every 100ms until it holds or timeout passes.

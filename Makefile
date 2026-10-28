@@ -30,6 +30,10 @@ bpf:
 	clang -O2 -g -Wall -target bpf -I/usr/include/$(shell uname -m)-linux-gnu -D__TARGET_ARCH_$(shell uname -m | sed 's/x86_64/x86/;s/aarch64/arm64/') \
 		-c internal/netpolicy/bpf/netlink.bpf.c -o internal/netpolicy/netlink.bpf.o
 	llvm-strip -g internal/netpolicy/netlink.bpf.o
+	# The source the embedded object was built from, so a test can tell
+	# when the two have drifted apart (the object itself differs between
+	# clang versions, which says nothing).
+	cd internal/netpolicy && sha256sum bpf/netlink.bpf.c > netlink.bpf.sha256
 
 test:
 	go test -tags $(TAGS) ./...
@@ -44,9 +48,14 @@ criu:
 # End-to-end tests (test/e2e, one directory per test) against the
 # installed runtime, each package's binary run as root, one at a time.
 # Pick tests with E2E, e.g. `make test-e2e E2E='-run Landlock ./test/e2e/landlock'`.
+# The tests run containers, restart nothing but install binaries, and
+# measure time; two runs at once on one machine make each other flaky, and
+# the self-hosted runner shares the dev VM with whoever is using it. A lock
+# makes them wait instead.
 E2E ?= ./test/e2e/...
+E2E_LOCK ?= /tmp/gcr-e2e.lock
 test-e2e: install
-	go test -exec sudo -p 1 -count 1 -timeout 30m -tags "e2e $(TAGS)" -v $(E2E)
+	flock $(E2E_LOCK) go test -exec sudo -p 1 -count 1 -timeout 30m -tags "e2e $(TAGS)" -v $(E2E)
 
 # Kubernetes on gcr: a k0da (k0s in containers) cluster on the stock k0s
 # image, with gcr bind-mounted and registered by a containerd drop-in.

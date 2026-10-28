@@ -18,7 +18,7 @@ func TestMain(m *testing.M) { framework.Main(m) }
 func TestCheckpointRestore(t *testing.T) {
 	ns := framework.NewNamespace(t, "gcr-e2e")
 	c := ns.Run(framework.UniqueID("ckpt"), framework.Spec{
-		Args: []string{"sh", "-c", "i=0; while true; do echo $i > /tmp/count; i=$((i+1)); sleep 0.2; done"},
+		Args: []string{"sh", "-c", "i=0; while true; do echo $i > /tmp/count.new && mv /tmp/count.new /tmp/count; i=$((i+1)); sleep 0.2; done"},
 	})
 	time.Sleep(4 * time.Second)
 	before := c.ReadInt("/tmp/count")

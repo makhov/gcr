@@ -268,8 +268,11 @@ shims. Set `NetlinkPolicy = 'off'` per runtime handler to skip it.
 **The node needs the BPF LSM enabled:** `bpf` in the kernel's `lsm=` list
 (`CONFIG_BPF_LSM=y` is common, the boot parameter is not; see
 `hack/lima.yaml`). Without it the shim logs once and containers run with
-seccomp alone; CI runners lack it, so `test/e2e/hardening`'s
-`TestNetlinkPolicy` runs in the dev VM.
+seccomp alone. A GitHub-hosted runner cannot change its kernel command
+line, so the tests that check the policy's refusals run on a self-hosted
+runner instead (`hack/runner-setup.sh`, the `bpf-lsm` workflow); they skip
+elsewhere, unless `GCR_E2E_REQUIRE_BPF` is set, which turns the skip into
+a failure.
 
 ### Landlock
 
@@ -403,10 +406,27 @@ CRI, checkpoint/restore, static helper programs to run in containers):
 | `dind` | Docker-in-Docker, unprivileged, in a user namespace |
 | `cri` | a pod through CRI: exec, exit codes, logs, updates, stats, user namespace |
 
+`sudo hack/clean-e2e.sh` removes what a failed run left behind (a leaked
+counter container keeps writing, which slows the next run down). Runs
+take a lock (`/tmp/gcr-e2e.lock`), so a run started while another is in
+progress waits rather than competing with it for the machine.
 `make test-e2e` runs them all, each package's test binary as root, one
 package at a time; `make test-e2e E2E='-run Landlock ./test/e2e/landlock'`
 picks some. `sudo hack/ci-setup.sh` prepares a host for them (containerd,
-CNI, cri-tools, the CRIU fork). CI runs everything on every pull request.
+CNI, cri-tools, the CRIU fork). CI runs everything on every pull request,
+except the netlink policy's own tests: they need the BPF LSM in the
+kernel's `lsm=` list, which a GitHub-hosted runner cannot have, so the
+`bpf-lsm` workflow runs them on a self-hosted runner (on main, on request,
+and on a pull request labelled `run-bpf`). To set one up:
+
+```sh
+REPO=makhov/gcr TOKEN=$(gh api -X POST \
+  repos/makhov/gcr/actions/runners/registration-token -q .token) \
+  sudo -E ./hack/runner-setup.sh      # adds bpf to lsm=, registers a service
+```
+
+It is a host the repository's workflows execute code on, so use one you
+are willing to give everyone with write access.
 
 ## Develop
 

@@ -23,7 +23,7 @@ func TestMain(m *testing.M) { framework.Main(m) }
 
 const addr = "127.0.0.1:7781"
 
-var counter = []string{"sh", "-c", "i=0; while true; do i=$((i+1)); echo $i > /tmp/count; sleep 0.1; done"}
+var counter = []string{"sh", "-c", "i=0; while true; do i=$((i+1)); echo $i > /tmp/count.new && mv /tmp/count.new /tmp/count; sleep 0.1; done"}
 
 // pair starts the same container in a source and a target namespace; the
 // target waits for a migration. annotations go to both.
