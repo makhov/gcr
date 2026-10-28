@@ -39,11 +39,12 @@ test:
 	go test -tags $(TAGS) ./...
 
 # Builds and installs our CRIU fork (seccomp listener restore) as `criu`,
-# from a checkout next to this repo.
+# with its CUDA plugin, from a checkout next to this repo.
 CRIU_SRC ?= ../criu
 criu:
-	$(MAKE) -C $(CRIU_SRC) criu
+	$(MAKE) -C $(CRIU_SRC) criu cuda_plugin
 	sudo install -m 0755 $(CRIU_SRC)/criu/criu /usr/local/sbin/criu
+	sudo install -D -m 0755 $(CRIU_SRC)/plugins/cuda/cuda_plugin.so /usr/lib/criu/cuda_plugin.so
 
 # End-to-end tests (test/e2e, one directory per test) against the
 # installed runtime, each package's binary run as root, one at a time.
