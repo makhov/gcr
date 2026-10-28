@@ -41,11 +41,32 @@ provision:
       fi
       ln -sf /usr/local/go/bin/go /usr/local/bin/go
 
+      CNI_VERSION=v1.9.1
+      CRI_TOOLS_VERSION=v1.37.0
+      if [ ! -x /opt/cni/bin/bridge ]; then
+        mkdir -p /opt/cni/bin /etc/cni/net.d
+        curl -fsSL "https://github.com/containernetworking/plugins/releases/download/${CNI_VERSION}/cni-plugins-linux-${ARCH}-${CNI_VERSION}.tgz" \
+          | tar -xz -C /opt/cni/bin
+        cat > /etc/cni/net.d/10-bridge.conflist <<'EOF'
+      {"cniVersion": "1.0.0", "name": "bridge", "plugins": [
+        {"type": "bridge", "bridge": "cni0", "isGateway": true, "ipMasq": true,
+         "ipam": {"type": "host-local", "ranges": [[{"subnet": "10.88.0.0/16"}]], "routes": [{"dst": "0.0.0.0/0"}]}},
+        {"type": "portmap", "capabilities": {"portMappings": true}},
+        {"type": "loopback"}]}
+      EOF
+      fi
+      for t in crictl critest; do
+        command -v $t >/dev/null || curl -fsSL "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRI_TOOLS_VERSION}/$t-${CRI_TOOLS_VERSION}-linux-${ARCH}.tar.gz" \
+          | tar -xz -C /usr/local/bin
+      done
+      printf 'runtime-endpoint: unix:///run/containerd/containerd.sock\nimage-endpoint: unix:///run/containerd/containerd.sock\n' > /etc/crictl.yaml
+
       mkdir -p /etc/containerd
       cat > /etc/containerd/config.toml <<'EOF'
       version = 3
       [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr]
         runtime_type = 'io.containerd.gcr.v2'
+        pod_annotations = ['gcr.dev/*']
       EOF
       systemctl daemon-reload
       systemctl enable --now containerd

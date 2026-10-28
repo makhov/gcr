@@ -26,6 +26,7 @@ sleep 4
 ctr task ls | grep "$ID"
 before=$(cat "$COUNT")
 echo "counter before checkpoint: $before"
+map_before=$(ctr task exec --exec-id m1 "$ID" cat /proc/self/uid_map | tr -s ' ')
 
 echo "== checkpoint"
 ctr container checkpoint --task --rw "$ID" "$CKPT"
@@ -42,6 +43,13 @@ sleep 2
 ctr task ls | grep "$ID"
 after=$(cat "$COUNT")
 echo "counter 2s after restore: $after"
+
+# Same user namespace range after restore, and image files still root's.
+map_after=$(ctr task exec --exec-id m2 "$ID" cat /proc/self/uid_map | tr -s ' ')
+owner=$(ctr task exec --exec-id m3 "$ID" stat -c %u /bin/sh)
+echo "uid_map before:$map_before after:$map_after; /bin/sh owner inside: $owner"
+[ "$map_before" = "$map_after" ] || { echo "FAIL: user namespace mapping changed"; exit 1; }
+[ "$owner" = 0 ] || { echo "FAIL: image files not root-owned inside after restore"; exit 1; }
 
 # A fresh start would be at ~10 now; a restore continues past $before.
 if [ "$after" -gt "$before" ]; then

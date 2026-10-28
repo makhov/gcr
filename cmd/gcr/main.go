@@ -4,6 +4,7 @@
 //
 //	gcr [-n namespace] timeline ID
 //	gcr [-n namespace] rewind ID POINT
+//	gcr [-n namespace] migrate [-token TOKEN] ID TARGET-URL
 package main
 
 import (
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/makhov/gcr/internal/control"
 )
@@ -21,7 +23,9 @@ import (
 func main() {
 	ns := flag.String("n", "default", "containerd namespace")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: gcr [-n namespace] timeline ID\n       gcr [-n namespace] rewind ID POINT\n")
+		fmt.Fprintf(os.Stderr, "usage: gcr [-n namespace] timeline ID\n"+
+			"       gcr [-n namespace] rewind ID POINT\n"+
+			"       gcr [-n namespace] migrate [-token TOKEN] ID TARGET-URL\n")
 	}
 	flag.Parse()
 	args := flag.Args()
@@ -55,6 +59,25 @@ func run(ctx context.Context, ns string, args []string) error {
 			return fmt.Errorf("bad point %q", args[2])
 		}
 		return control.NewClient(ns, args[1]).Rewind(ctx, point)
+	case len(args) >= 1 && args[0] == "migrate":
+		fs := flag.NewFlagSet("migrate", flag.ExitOnError)
+		token := fs.String("token", os.Getenv("GCR_MIGRATE_TOKEN"), "token the target expects (default $GCR_MIGRATE_TOKEN)")
+		_ = fs.Parse(args[1:])
+		if fs.NArg() != 2 {
+			flag.Usage()
+			os.Exit(2)
+		}
+		res, err := control.NewClient(ns, fs.Arg(0)).Migrate(ctx, fs.Arg(1), *token)
+		if err != nil {
+			return err
+		}
+		if res.MemoryTracking {
+			fmt.Printf("pre-copy rounds: %d (pages %v)\n", len(res.PreCopyPages), res.PreCopyPages)
+		} else {
+			fmt.Println("stop-and-copy (kernel cannot track dirty memory)")
+		}
+		fmt.Printf("downtime: %s\n", res.Downtime.Round(time.Millisecond))
+		return nil
 	default:
 		flag.Usage()
 		os.Exit(2)
