@@ -73,6 +73,9 @@ type Prepared struct {
 	// writable layer to the mapped root (IDMapRoot).
 	IDMap     string
 	IDMapRoot int
+	// IOOwner, if not 0, owns the stdio pipes when the container has a user
+	// namespace gcr did not make (Kubernetes hostUsers: false).
+	IOOwner int
 }
 
 type CheckpointOpts struct {
@@ -88,9 +91,9 @@ type Container struct {
 	ID     string
 	Bundle string
 
-	namespace  string
-	cfg        *configs.Config
-	rootfs     []mount.Mount
+	namespace      string
+	cfg            *configs.Config
+	rootfs         []mount.Mount
 	spec           *specs.Spec
 	checkpoint     string
 	checkpointFrom func(context.Context) (string, error)
@@ -117,7 +120,9 @@ type Container struct {
 	migrating bool
 	// idBase is the first host ID of the user namespace range, 0 if none.
 	idBase uint32
-	execs     map[string]*Exec
+	// ioOwner owns the container's ends of the stdio pipes, 0 for root.
+	ioOwner int
+	execs   map[string]*Exec
 }
 
 // Root returns the libcontainer state directory for a containerd namespace.
@@ -219,21 +224,22 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	}()
 
 	c := &Container{
-		ID:         o.ID,
-		Bundle:     o.Bundle,
-		namespace:  o.Namespace,
-		cfg:        cfg,
-		rootfs:     o.Rootfs,
-		lc:         lc,
-		spec:       spec,
+		ID:             o.ID,
+		Bundle:         o.Bundle,
+		namespace:      o.Namespace,
+		cfg:            cfg,
+		rootfs:         o.Rootfs,
+		lc:             lc,
+		spec:           spec,
 		checkpoint:     o.Checkpoint,
 		checkpointFrom: prep.CheckpointFrom,
 		io:             io,
 		tty:            tty,
 		idBase:         uint32(prep.IDMapRoot),
-		status:     Created,
-		exited:     make(chan struct{}),
-		onExit:     onExit,
+		ioOwner:        max(prep.IDMapRoot, prep.IOOwner),
+		status:         Created,
+		exited:         make(chan struct{}),
+		onExit:         onExit,
 	}
 	if o.Checkpoint != "" || prep.CheckpointFrom != nil {
 		// Restore happens in Start, the way containerd expects.
@@ -758,7 +764,7 @@ func (c *Container) initProcess() (*libcontainer.Process, error) {
 		c.tty.setup(proc, c.spec.Process.ConsoleSize)
 		return proc, nil
 	}
-	if proc.Stdin, proc.Stdout, proc.Stderr, err = c.io.attach(int(c.idBase)); err != nil {
+	if proc.Stdin, proc.Stdout, proc.Stderr, err = c.io.attach(c.ioOwner); err != nil {
 		return nil, err
 	}
 	return proc, nil

@@ -110,6 +110,22 @@ the better path: the pod's network namespace is created inside the user
 namespace), enforced cluster-wide by policy if wanted, or opt a pod into
 gcr's with the annotation `gcr.dev/host-users: "false"`.
 
+To enforce user namespaces regardless of Kubernetes, set the policy on a
+runtime handler (here a second handler, so a RuntimeClass picks it):
+
+```toml
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr-userns]
+  runtime_type = 'io.containerd.gcr.v2'
+  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr-userns.options]
+    UserNamespaces = 'always'   # 'auto' (default) | 'always' | 'never'
+```
+
+`always` ignores `hostUsers` and the opt-out annotation; a container that
+cannot run in a user namespace (privileged, host network/PID/IPC,
+`CAP_NET_ADMIN` in a pod network) is refused rather than run as host root.
+`never` turns gcr's user namespaces off. The options can also live in a
+file: `ConfigPath = '/etc/gcr/gcr.toml'`.
+
 For gcr's own user namespaces:
 
 - Image layers are mounted idmapped, so files look root-owned inside; files
@@ -173,6 +189,21 @@ the checkpoint and the writable layer, and the target restores. The source
 stays frozen until the target runs and is thawed if anything fails before;
 afterwards it is killed. Open TCP connections reset. The token is sent in
 clear text: use a trusted network.
+
+## Tests
+
+| | What | Needs |
+| --- | --- | --- |
+| `make test` | unit tests | Linux, libseccomp |
+| `hack/e2e.sh` | checkpoint/restore through containerd | root, containerd, CRIU |
+| `hack/e2e-timetravel.sh` | timeline and rewind | root, containerd, CRIU fork |
+| `hack/e2e-migrate.sh` | live migration (pre-copy on x86) | root, containerd, CRIU fork |
+| `hack/smoke-cri.sh` | a pod through CRI with crictl | root, containerd, CNI |
+| `critest --runtime-handler gcr` | CRI conformance | root, containerd, CNI |
+| `make test-k8s` | Kubernetes (stock k0s via k0da) with a gcr RuntimeClass | docker or podman, k0da >= v0.4.0 |
+
+`sudo hack/ci-setup.sh` prepares a host for the root tests (containerd,
+CNI, cri-tools, the CRIU fork). CI runs all of them on every pull request.
 
 ## Develop
 

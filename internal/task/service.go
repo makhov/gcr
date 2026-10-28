@@ -30,6 +30,7 @@ import (
 	"github.com/containerd/typeurl/v2"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 
+	"github.com/makhov/gcr/internal/config"
 	"github.com/makhov/gcr/internal/container"
 	"github.com/makhov/gcr/internal/control"
 	"github.com/makhov/gcr/internal/migrate"
@@ -115,6 +116,10 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		rootfs = append(rootfs, mount.Mount{Type: m.Type, Source: m.Source, Target: m.Target, Options: m.Options})
 	}
 
+	cfg, err := config.FromOptions(r.Options)
+	if err != nil {
+		return nil, errgrpc.ToGRPC(err)
+	}
 	ex := &extras{stateDir: filepath.Join(stateRoot, ns, r.ID), id: r.ID}
 	var c *container.Container
 	opts := container.CreateOpts{
@@ -128,8 +133,12 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		Checkpoint: r.Checkpoint,
 	}
 	opts.PrepareSpec = func(spec *specs.Spec) (container.Prepared, error) {
-		var prep container.Prepared
-		if ok, why := userns.Wanted(spec); ok {
+		prep := container.Prepared{IOOwner: cfg.IOUID}
+		ok, why, err := userns.Decide(spec, cfg.UserNamespaces)
+		if err != nil {
+			return prep, err
+		}
+		if ok {
 			var (
 				want uint32
 				err  error
