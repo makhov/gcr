@@ -33,6 +33,7 @@ import (
 	"github.com/makhov/gcr/internal/config"
 	"github.com/makhov/gcr/internal/container"
 	"github.com/makhov/gcr/internal/control"
+	"github.com/makhov/gcr/internal/gpu"
 	"github.com/makhov/gcr/internal/hardening"
 	"github.com/makhov/gcr/internal/landlock"
 	"github.com/makhov/gcr/internal/migrate"
@@ -214,11 +215,25 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		} else {
 			log.G(ctx).Warn("CRIU cannot restore Landlock (no --landlock-fs): restored containers will not be confined")
 		}
+		var restoreOpts []string
+		if minors := gpu.Minors(spec); len(minors) > 0 {
+			prep.GPU, prep.GPUError = gpu.Probe("/", minors)
+			if prep.GPUError != nil {
+				log.G(ctx).WithError(prep.GPUError).Warn("GPUs not described: checkpoints refused")
+			} else {
+				restoreOpts = gpu.RestoreCRIUOptions
+			}
+		}
 		policy, err := timetravel.ParsePolicy(spec.Annotations)
 		if err != nil {
 			return prep, err
 		}
 		if policy != nil {
+			if len(gpu.Minors(spec)) > 0 {
+				// Each point would copy GPU memory, and CRIU's CUDA plugin
+				// cannot take incremental dumps.
+				return prep, fmt.Errorf("time travel for containers with GPUs: %w", errdefs.ErrNotImplemented)
+			}
 			if spec.Process.Terminal {
 				return prep, fmt.Errorf("time travel needs a container without a terminal: %w", errdefs.ErrNotImplemented)
 			}
@@ -242,13 +257,11 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			// Restores hand the restored listeners back to this supervisor.
 			criuOpts = append(criuOpts, sup.CRIUOption())
 		}
-		if len(criuOpts) > 0 {
-			prep.CRIUConfig = filepath.Join(ex.stateDir, "criu.conf")
-			if err := os.MkdirAll(ex.stateDir, 0o700); err != nil {
-				return prep, err
-			}
-			if err := os.WriteFile(prep.CRIUConfig, []byte(strings.Join(criuOpts, "\n")+"\n"), 0o600); err != nil {
-				return prep, fmt.Errorf("CRIU config: %w", err)
+		if len(criuOpts) > 0 || len(restoreOpts) > 0 {
+			prep.CRIU = container.CRIUConfig{
+				Path:           filepath.Join(ex.stateDir, "criu.conf"),
+				Options:        criuOpts,
+				RestoreOptions: restoreOpts,
 			}
 		}
 		return prep, nil

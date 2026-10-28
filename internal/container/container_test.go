@@ -69,3 +69,22 @@ func TestCRIUErrors(t *testing.T) {
 		t.Fatalf("missing log: %q", got)
 	}
 }
+
+func TestCRIUConfig(t *testing.T) {
+	cc := CRIUConfig{Path: filepath.Join(t.TempDir(), "criu.conf"), Options: []string{"a 1"}, RestoreOptions: []string{"b 2"}}
+	if err := cc.write(false); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(cc.Path); string(b) != "a 1\n" {
+		t.Fatalf("checkpoint config %q", b)
+	}
+	if err := cc.write(true); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(cc.Path); string(b) != "a 1\nb 2\n" {
+		t.Fatalf("restore config %q", b)
+	}
+	if err := (CRIUConfig{}).write(true); err != nil {
+		t.Fatal("writing without a path:", err)
+	}
+}

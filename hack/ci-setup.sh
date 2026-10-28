@@ -57,8 +57,10 @@ printf 'runtime-endpoint: unix:///run/containerd/containerd.sock\nimage-endpoint
 
 src=$(mktemp -d)
 git clone --depth 1 --branch "$CRIU_REF" "$CRIU_REPO" "$src"
-make -C "$src" -j"$(nproc)" criu
+make -C "$src" -j"$(nproc)" criu cuda_plugin
 install -m 0755 "$src/criu/criu" /usr/local/sbin/criu
+# CRIU loads plugins from here; the CUDA plugin stays idle without a GPU.
+install -D -m 0755 "$src/plugins/cuda/cuda_plugin.so" /usr/lib/criu/cuda_plugin.so
 criu check || true
 
 systemctl daemon-reload

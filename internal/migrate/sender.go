@@ -28,6 +28,9 @@ const (
 type Source interface {
 	// PreDump sends dirty memory to a page server while the container runs.
 	PreDump(ctx context.Context, dir, parent, host string, port int) error
+	// CanPreDump is false for containers CRIU cannot pre-dump (with GPUs):
+	// they migrate stop-and-copy.
+	CanPreDump() bool
 	// FreezeDump freezes the container and dumps it; it stays frozen.
 	FreezeDump(ctx context.Context, dir, parent, host string, port int) error
 	// Thaw lets a frozen container continue (the migration failed).
@@ -69,7 +72,7 @@ func Send(ctx context.Context, src Source, target, token, work string) (res Resu
 
 	res.MemoryTracking = memoryTracking()
 	parent := ""
-	if res.MemoryTracking {
+	if res.MemoryTracking && src.CanPreDump() {
 		for i := 0; i < maxPreCopyRounds; i++ {
 			round, port, err := c.startRound(ctx)
 			if err != nil {

@@ -307,20 +307,32 @@ func (c *Container) Exec(args ...string) (string, int) {
 	return out.String(), int(st.ExitCode())
 }
 
+// Checkpoint checkpoints the running container with its read-write
+// layer, as ctr container checkpoint --task --rw does, and leaves it
+// running. The checkpoint image is removed when the test ends.
+func (c *Container) Checkpoint() (containerd.Image, error) {
+	ctx := c.ns.Ctx
+	ref := "localhost/gcr-e2e-checkpoint/" + c.ID + ":latest"
+	img, err := c.C.Checkpoint(ctx, ref,
+		containerd.WithCheckpointRuntime, containerd.WithCheckpointImage,
+		containerd.WithCheckpointRW, containerd.WithCheckpointTask)
+	if err != nil {
+		return nil, err
+	}
+	c.ns.t.Cleanup(func() { _ = c.ns.Client.ImageService().Delete(context.WithoutCancel(ctx), ref) })
+	return img, nil
+}
+
 // CheckpointRestore checkpoints the running container (with its
 // read-write layer), kills it, and restores it from the checkpoint, as
 // ctr container checkpoint --task --rw and restore --live --rw do.
 func (c *Container) CheckpointRestore() {
 	t, ctx := c.ns.t, c.ns.Ctx
 	t.Helper()
-	ref := "localhost/gcr-e2e-checkpoint/" + c.ID + ":latest"
-	img, err := c.C.Checkpoint(ctx, ref,
-		containerd.WithCheckpointRuntime, containerd.WithCheckpointImage,
-		containerd.WithCheckpointRW, containerd.WithCheckpointTask)
+	img, err := c.Checkpoint()
 	if err != nil {
 		t.Fatalf("checkpoint %s: %v", c.ID, err)
 	}
-	t.Cleanup(func() { _ = c.ns.Client.ImageService().Delete(context.WithoutCancel(ctx), ref) })
 	c.Remove()
 	restored, err := c.ns.Client.Restore(ctx, c.ID, img,
 		containerd.WithRestoreImage, containerd.WithRestoreSpec,
