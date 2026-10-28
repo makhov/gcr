@@ -43,6 +43,10 @@ cat >/etc/cni/net.d/10-bridge.conflist <<'EOF'
   {"type": "portmap", "capabilities": {"portMappings": true}},
   {"type": "loopback"}]}
 EOF
+# Docker leaves the FORWARD policy at DROP, which cuts pods off from the
+# outside (the Docker-in-Docker test pulls images from a pod).
+iptables -P FORWARD ACCEPT
+ip6tables -P FORWARD ACCEPT 2>/dev/null || true
 
 for t in crictl critest; do
 	curl -fsSL "https://github.com/kubernetes-sigs/cri-tools/releases/download/${CRI_TOOLS_VERSION}/$t-${CRI_TOOLS_VERSION}-linux-${ARCH}.tar.gz" |

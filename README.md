@@ -153,9 +153,12 @@ default to), gcr refuses calls behind most container escapes and kernel
 exploits reachable from containers:
 
 - with EPERM: `io_uring_*`, `bpf`, `perf_event_open`, `userfaultfd`, the
-  keyring (`add_key`, `keyctl`, `request_key`), the new mount API (`fsopen`,
-  `fsconfig`, `fsmount`, `fspick`, `open_tree`, `move_mount`,
-  `mount_setattr`), module loading and kexec, `open_by_handle_at`;
+  new mount API (`fsopen`, `fsconfig`, `fsmount`, `fspick`, `open_tree`,
+  `move_mount`, `mount_setattr`), module loading and kexec,
+  `open_by_handle_at`;
+- with ENOSYS, as if the kernel lacked it: the keyring (`add_key`,
+  `keyctl`, `request_key`), which is not namespaced (runc and other callers
+  carry on without a session keyring then);
 - when the container has no profile of its own, also: creating user
   namespaces (`clone`/`unshare` with `CLONE_NEWUSER`), `AF_PACKET`,
   `AF_VSOCK`, `AF_KEY` and `AF_ALG` sockets, and raw IP sockets (`ping` uses
@@ -170,7 +173,16 @@ mounts, remounts and propagation changes; other filesystems the kernel would
 allow in a user namespace (`ramfs`, `fuse`, ...) are refused. It performs the
 mount itself, from the arguments it copied and checked (so another thread
 cannot swap them after the check), in the caller's namespaces and with its
-IDs and capabilities, so the kernel's own checks are the caller's.
+IDs and capabilities, so the kernel's own checks are the caller's. In a
+user namespace the supervisor also sees `setns(2)`: joining the network
+namespace a process is already in is a no-op that gcr answers itself
+(dockerd does it, and the kernel would want rights over a pod network
+namespace's owner); all other calls run as made. The filter is inherited,
+so all of this holds for nested containers too, whatever profile they ask
+for.
+
+Privileged means `CAP_SYS_ADMIN` and access to all devices (what
+`--privileged` gives); `CAP_SYS_ADMIN` alone is not.
 
 Privileged containers are exempt. Kubernetes pods that run explicitly
 `Unconfined` (Kubernetes' default, which a runtime cannot tell from an
@@ -180,6 +192,34 @@ the policy per runtime handler, in the runtime's options:
 `Hardening = 'standard'` (default), `'always'` (also unconfined pods), or
 `'off'`. A workload cannot weaken it.
 `hack/e2e-hardening.sh` probes every refused call.
+
+### Docker-in-Docker
+
+dockerd runs in a gcr pod with a user namespace without being privileged:
+
+- **User namespace from Kubernetes** (`hostUsers: false`, or CRI's
+  `userns_options`). containerd then creates the pod's network namespace
+  inside it, and dockerd can configure it. A pod in gcr's own user
+  namespace (`gcr.dev/host-users: "false"`, `UserNamespaces = 'always'`)
+  has a network namespace the host owns, which dockerd cannot manage.
+- **Capabilities `SYS_ADMIN` and `NET_ADMIN`.** In the user namespace they
+  reach only the pod's own namespaces. Mounts go through the supervisor
+  (above), and `pivot_root`, which default profiles leave out, is allowed.
+- **A delegated cgroup.** gcr gives a container in a user namespace with
+  `CAP_SYS_ADMIN` its cgroup (the directory, `cgroup.procs`,
+  `cgroup.threads`, `cgroup.subtree_control`) and a writable
+  `/sys/fs/cgroup`; its cgroup namespace keeps it inside that subtree.
+- **seccomp `RuntimeDefault`.** The hardening and supervision above are
+  merged into it.
+- **AppArmor `Unconfined` on AppArmor hosts**, as for privileged DinD. Under
+  the default CRI profile the nested runtime's processes end up with labels
+  that profile does not let signal each other.
+- **dockerd flags `--iptables=false --bridge=none`.** Nested containers
+  share the pod's network (`--network host`).
+
+Nested `docker run` and `docker build` work. Nested `--privileged` does not:
+the pod's `/sys` is read-only, and the kernel refuses a new read-write
+sysfs under it. `hack/e2e-dind.sh` runs it all with crictl.
 
 ## Time travel
 
@@ -234,7 +274,8 @@ clear text: use a trusted network.
 | `hack/e2e.sh` | checkpoint/restore through containerd | root, containerd, CRIU |
 | `hack/e2e-timetravel.sh` | timeline and rewind | root, containerd, CRIU fork |
 | `hack/e2e-migrate.sh` | live migration (pre-copy on x86) | root, containerd, CRIU fork |
-| `hack/e2e-hardening.sh` | refused system calls, with hardening on and off | root, containerd, cc |
+| `hack/e2e-hardening.sh` | refused system calls, with hardening on and off; supervised mounts | root, containerd, cc |
+| `hack/e2e-dind.sh` | Docker-in-Docker, unprivileged, in a user namespace | root, containerd, CNI, network |
 | `hack/smoke-cri.sh` | a pod through CRI with crictl | root, containerd, CNI |
 | `critest --runtime-handler gcr` | CRI conformance | root, containerd, CNI |
 | `make test-k8s` | Kubernetes (stock k0s via k0da) with a gcr RuntimeClass | docker or podman, k0da >= v0.4.0 |

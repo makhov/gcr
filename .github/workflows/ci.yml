@@ -48,6 +48,8 @@ jobs:
         run: sudo ./hack/e2e-migrate.sh
       - name: hardening
         run: sudo ./hack/e2e-hardening.sh
+      - name: Docker-in-Docker
+        run: sudo ./hack/e2e-dind.sh
       - name: CRI smoke
         run: sudo ./hack/smoke-cri.sh
       - name: CRI conformance (critest)

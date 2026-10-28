@@ -312,6 +312,32 @@ func Apply(spec *specs.Spec, r Range) {
 	}
 }
 
+// DelegateCgroup makes the container's cgroup mount writable, for a
+// container in a user namespace that manages nested containers
+// (CAP_SYS_ADMIN there), and returns the host UID of its root, which the
+// runtime gives the container's cgroup to; its cgroup namespace keeps it
+// inside that subtree. 0: no delegation.
+func DelegateCgroup(spec *specs.Spec) int {
+	if spec.Linux == nil || !ocispec.HasCapability(spec, "CAP_SYS_ADMIN") {
+		return 0
+	}
+	root := -1
+	for _, m := range spec.Linux.UIDMappings {
+		if m.ContainerID == 0 && m.Size > 0 {
+			root = int(m.HostID)
+		}
+	}
+	if root <= 0 {
+		return 0
+	}
+	for i, m := range spec.Mounts {
+		if m.Destination == "/sys/fs/cgroup" {
+			spec.Mounts[i].Options = slices.DeleteFunc(slices.Clone(m.Options), func(o string) bool { return o == "ro" })
+		}
+	}
+	return root
+}
+
 // podProcess finds the pod sandbox's process from the /proc/<pid>/ns paths
 // CRI gives a pod's containers, if it is in a user namespace mapped to r.
 func podProcess(spec *specs.Spec, r Range) int {

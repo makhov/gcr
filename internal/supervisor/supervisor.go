@@ -46,7 +46,8 @@ func (c *Call) Continue() {
 // Reply answers the call without running it: val on success, or errno.
 func (c *Call) Reply(val uint64, errno syscall.Errno) {
 	if errno != 0 {
-		c.respond(&libseccomp.ScmpNotifResp{ID: c.id, Error: -int32(errno)})
+		// Positive: the binding negates it, as the kernel expects.
+		c.respond(&libseccomp.ScmpNotifResp{ID: c.id, Error: int32(errno)})
 		return
 	}
 	c.respond(&libseccomp.ScmpNotifResp{ID: c.id, Val: val})

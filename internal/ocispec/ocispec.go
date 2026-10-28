@@ -15,10 +15,25 @@ func HasCapability(spec *specs.Spec, cap string) bool {
 	return p != nil && p.Capabilities != nil && slices.Contains(p.Capabilities.Bounding, cap)
 }
 
-// Privileged reports a privileged container (docker --privileged,
-// Kubernetes privileged: true): CAP_SYS_ADMIN and no masked /proc paths.
-// A container that only adds CAP_SYS_ADMIN keeps its masked paths; in a
-// user namespace that capability is scoped to the namespace.
+// Privileged reports a privileged container (docker or ctr --privileged,
+// Kubernetes privileged: true): CAP_SYS_ADMIN and access to all devices,
+// which containerd grants only to privileged containers. A container that
+// only adds CAP_SYS_ADMIN is not privileged; in a user namespace that
+// capability only reaches the namespace.
 func Privileged(spec *specs.Spec) bool {
-	return HasCapability(spec, "CAP_SYS_ADMIN") && (spec.Linux == nil || len(spec.Linux.MaskedPaths) == 0)
+	return HasCapability(spec, "CAP_SYS_ADMIN") && allDevicesAllowed(spec)
+}
+
+// allDevicesAllowed reports a device cgroup rule allowing every device: no
+// type (or "a") and no major or minor number.
+func allDevicesAllowed(spec *specs.Spec) bool {
+	if spec.Linux == nil || spec.Linux.Resources == nil {
+		return false
+	}
+	for _, d := range spec.Linux.Resources.Devices {
+		if d.Allow && (d.Type == "" || d.Type == "a") && d.Major == nil && d.Minor == nil {
+			return true
+		}
+	}
+	return false
 }

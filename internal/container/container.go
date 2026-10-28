@@ -76,6 +76,9 @@ type Prepared struct {
 	// IOOwner, if not 0, owns the stdio pipes when the container has a user
 	// namespace gcr did not make (Kubernetes hostUsers: false).
 	IOOwner int
+	// CgroupOwner, if not 0, is given the container's cgroup (the host UID
+	// of its root), so it can manage nested containers' cgroups.
+	CgroupOwner int
 }
 
 type CheckpointOpts struct {
@@ -122,7 +125,9 @@ type Container struct {
 	idBase uint32
 	// ioOwner owns the container's ends of the stdio pipes, 0 for root.
 	ioOwner int
-	execs   map[string]*Exec
+	// cgroupOwner, if not 0, is given the container's cgroup.
+	cgroupOwner int
+	execs       map[string]*Exec
 }
 
 // Root returns the libcontainer state directory for a containerd namespace.
@@ -237,6 +242,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		tty:            tty,
 		idBase:         uint32(prep.IDMapRoot),
 		ioOwner:        max(prep.IDMapRoot, prep.IOOwner),
+		cgroupOwner:    prep.CgroupOwner,
 		status:         Created,
 		exited:         make(chan struct{}),
 		onExit:         onExit,
@@ -257,6 +263,9 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		if err := tty.started(); err != nil {
 			return nil, err
 		}
+	}
+	if err := c.delegateCgroup(); err != nil {
+		return nil, err
 	}
 	if err := c.track(proc); err != nil {
 		return nil, err
@@ -314,6 +323,9 @@ func (c *Container) restore(images string) error {
 		return fmt.Errorf("reload restored container: %w", err)
 	}
 	c.lc = lc
+	if err := c.delegateCgroup(); err != nil {
+		return err
+	}
 	return c.track(proc)
 }
 
@@ -601,6 +613,29 @@ func idmapRootfs(mounts []mount.Mount, idmap string, root int) ([]mount.Mount, e
 		out[i].Options = append(slices.Clone(m.Options), "uidmap="+idmap, "gidmap="+idmap)
 	}
 	return out, nil
+}
+
+// delegateCgroup gives the container's cgroup to cgroupOwner, the way
+// cgroup v2 delegation is defined: the directory and the files that move
+// processes and enable controllers.
+func (c *Container) delegateCgroup() error {
+	if c.cgroupOwner == 0 {
+		return nil
+	}
+	st, err := c.lc.State()
+	if err != nil {
+		return err
+	}
+	dir, ok := st.CgroupPaths[""]
+	if !ok {
+		return fmt.Errorf("cgroup delegation needs cgroup v2: %w", errdefs.ErrNotImplemented)
+	}
+	for _, p := range []string{dir, filepath.Join(dir, "cgroup.procs"), filepath.Join(dir, "cgroup.threads"), filepath.Join(dir, "cgroup.subtree_control")} {
+		if err := os.Lchown(p, c.cgroupOwner, c.cgroupOwner); err != nil {
+			return fmt.Errorf("delegate cgroup: %w", err)
+		}
+	}
+	return nil
 }
 
 // UpperDir returns the writable layer of an overlay rootfs.

@@ -174,6 +174,8 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		} else {
 			log.G(ctx).WithField("reason", why).Debug("no user namespace")
 		}
+		// gcr's user namespace or one Kubernetes asked for.
+		prep.CgroupOwner = userns.DelegateCgroup(spec)
 		if addr, ok := spec.Annotations[migrate.AnnotationIn]; ok {
 			recv, err := migrate.NewReceiver(s.ctx, addr, spec.Annotations[migrate.AnnotationToken],
 				filepath.Join(ex.stateDir, "migrate-in"),
@@ -192,9 +194,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			log.G(ctx).WithField("reason", hard.Skipped).Debug("not hardened")
 		}
 		for _, name := range hard.Supervised {
-			if name == "mount" {
-				handlers[name] = hardening.HandleMount
-			}
+			handlers[name] = hardening.Handlers[name]
 		}
 		policy, err := timetravel.ParsePolicy(spec.Annotations)
 		if err != nil {

@@ -2,13 +2,21 @@
 // each, plus control calls that must keep working. Without the filter the
 // denied calls fail with other errors (EINVAL, EFAULT, EBADF...), so EPERM
 // (ENOSYS for clone3) means the filter refused them.
+//
+// "probe mount" (run with CAP_SYS_ADMIN) instead checks mounts gcr performs
+// for the container, by their exact return value: a refusal must be -1
+// with errno set, and paths through /proc/self must mean the caller.
 // Build: cc -static -O2 -o probe probe.c
 #define _GNU_SOURCE
 #include <errno.h>
 #include <sched.h>
 #include <stdio.h>
 #include <string.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <sys/mount.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <netinet/in.h>
@@ -24,7 +32,53 @@ static void report(const char *name, long ret) {
 	printf("%s %s\n", name, ret < 0 ? strerrorname_np(errno) : "OK");
 }
 
-int main(void) {
+// report_exact is report for calls that must return exactly 0 or -1.
+static void report_exact(const char *name, long ret) {
+	if (ret != 0 && ret != -1)
+		printf("%s BADRET(%ld)\n", name, ret);
+	else
+		report(name, ret);
+}
+
+// same_file reports whether two paths name the same inode.
+static const char *same_file(const char *a, const char *b) {
+	struct stat x, y;
+	if (stat(a, &x) < 0 || stat(b, &y) < 0)
+		return "MISSING";
+	return x.st_dev == y.st_dev && x.st_ino == y.st_ino ? "OK" : "DIFFERENT";
+}
+
+static int mounts(void) {
+	char path[64];
+	int fd;
+
+	mkdir("/mnt", 0755);
+	report_exact("mount_ramfs", mount("none", "/mnt", "ramfs", 0, NULL));
+	report_exact("mount_tmpfs", mount("none", "/mnt", "tmpfs", 0, NULL));
+
+	// dockerd keeps network namespaces by bind-mounting them so.
+	close(open("/mnt/netns", O_CREAT | O_WRONLY, 0644));
+	snprintf(path, sizeof(path), "/proc/self/task/%ld/ns/net", syscall(SYS_gettid));
+	report_exact("mount_self_task_ns", mount(path, "/mnt/netns", NULL, MS_BIND, NULL));
+	printf("mount_self_task_ns_same %s\n", same_file("/mnt/netns", "/proc/self/ns/net"));
+	close(open("/mnt/netns2", O_CREAT | O_WRONLY, 0644));
+	report_exact("mount_thread_self_ns", mount("/proc/thread-self/ns/net", "/mnt/netns2", NULL, MS_BIND, NULL));
+	printf("mount_thread_self_ns_same %s\n", same_file("/mnt/netns2", "/proc/self/ns/net"));
+
+	// runc names mount sources and targets by file descriptor.
+	mkdir("/mnt/src", 0755);
+	mkdir("/mnt/dst", 0755);
+	close(open("/mnt/src/marker", O_CREAT | O_WRONLY, 0644));
+	fd = open("/mnt/dst", O_PATH | O_DIRECTORY);
+	snprintf(path, sizeof(path), "/proc/self/fd/%d", fd);
+	report_exact("mount_fd_target", mount("/mnt/src", path, NULL, MS_BIND, NULL));
+	printf("mount_fd_target_same %s\n", same_file("/mnt/dst/marker", "/mnt/src/marker"));
+	return 0;
+}
+
+int main(int argc, char **argv) {
+	if (argc > 1 && strcmp(argv[1], "mount") == 0)
+		return mounts();
 	report("io_uring_setup", syscall(SYS_io_uring_setup, 0, NULL));
 	report("bpf", syscall(SYS_bpf, -1, NULL, 0));
 	report("perf_event_open", syscall(SYS_perf_event_open, NULL, 0, -1, -1, 0));

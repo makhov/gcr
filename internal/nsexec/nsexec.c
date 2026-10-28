@@ -24,14 +24,21 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#ifndef PIDFD_THREAD
+#define PIDFD_THREAD O_EXCL
+#endif
+
 #define FAIL(e) _exit((e) ? (e) : EPERM)
 
+// The user namespace comes last: joining it gives up our host
+// capabilities, and some of the others (a pod's network namespace) belong
+// to the host's user namespace.
 static const struct {
 	const char *name;
 	int type;
 } namespaces[] = {
-	{"user", CLONE_NEWUSER}, {"mnt", CLONE_NEWNS},	 {"pid", CLONE_NEWPID},	      {"net", CLONE_NEWNET},
-	{"ipc", CLONE_NEWIPC},	 {"uts", CLONE_NEWUTS}, {"cgroup", CLONE_NEWCGROUP},
+	{"mnt", CLONE_NEWNS},	 {"pid", CLONE_NEWPID},		{"net", CLONE_NEWNET},	{"ipc", CLONE_NEWIPC},
+	{"uts", CLONE_NEWUTS}, {"cgroup", CLONE_NEWCGROUP}, {"user", CLONE_NEWUSER},
 };
 #define NNS (sizeof(namespaces) / sizeof(namespaces[0]))
 
@@ -69,19 +76,20 @@ struct creds {
 	gid_t groups[64];
 	int ngroups;
 	unsigned long long capeff;
-	int nspid; // the caller's pid in its own pid namespace
 };
 
-// read_creds reads the caller's credentials as seen from our current user
-// namespace (so after joining the caller's, in the container's terms).
-static int read_creds(int pid, struct creds *c)
+// read_creds reads the caller's credentials. Called once we are in its
+// user namespace: /proc reports IDs in the terms of whoever opens the file.
+static int read_creds(int procfd, struct creds *c)
 {
-	char path[64], line[512];
+	char line[512];
 	FILE *f;
-	int found = 0;
+	int fd, found = 0;
 
-	snprintf(path, sizeof(path), "/proc/%d/status", pid);
-	f = fopen(path, "re");
+	fd = openat(procfd, "status", O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	f = fdopen(fd, "re");
 	if (!f)
 		return -1;
 	while (fgets(line, sizeof(line), f)) {
@@ -91,17 +99,6 @@ static int read_creds(int pid, struct creds *c)
 			found |= 2;
 		else if (sscanf(line, "CapEff:\t%llx", &c->capeff) == 1)
 			found |= 4;
-		else if (strncmp(line, "NSpid:", 6) == 0) {
-			char *p = line + 6, *end;
-			for (;;) { // the last value is the innermost namespace's
-				long v = strtol(p, &end, 10);
-				if (end == p)
-					break;
-				c->nspid = v;
-				p = end;
-			}
-			found |= 8;
-		}
 		else if (strncmp(line, "Groups:", 7) == 0) {
 			char *p = line + 7, *end;
 			c->ngroups = 0;
@@ -115,7 +112,75 @@ static int read_creds(int pid, struct creds *c)
 		}
 	}
 	fclose(f);
-	return found == 15 ? 0 : -1;
+	return found == 7 ? 0 : -1;
+}
+
+#define MAXLEVELS 32
+
+// ns_ids reads a status field listing an ID at each PID namespace level,
+// outermost first (NSpid, NStgid). Returns the number of levels.
+static int ns_ids(int dirfd, const char *file, const char *field, int ids[MAXLEVELS])
+{
+	char line[512];
+	size_t n = strlen(field);
+	int fd, levels = -1;
+	FILE *f;
+
+	fd = openat(dirfd, file, O_RDONLY | O_CLOEXEC);
+	if (fd < 0 || !(f = fdopen(fd, "re")))
+		return -1;
+	while (levels < 0 && fgets(line, sizeof(line), f)) {
+		if (strncmp(line, field, n) != 0 || line[n] != ':')
+			continue;
+		char *p = line + n + 1, *end;
+		levels = 0;
+		while (levels < MAXLEVELS) {
+			long v = strtol(p, &end, 10);
+			if (end == p)
+				break;
+			ids[levels++] = v;
+			p = end;
+		}
+	}
+	fclose(f);
+	return levels;
+}
+
+// The caller's process and thread IDs at each PID namespace level.
+struct ids {
+	int tgid[MAXLEVELS], tid[MAXLEVELS], levels;
+};
+
+// self_path rewrites /proc/self and /proc/thread-self to the caller's
+// directories in the /proc we can see, which may belong to any of its
+// PID namespaces: our own ID in that /proc tells which (we are a child in
+// the caller's PID namespace, so our levels line up with its).
+static const char *self_path(const char *path, int hostproc, const struct ids *caller, char *buf, size_t size)
+{
+	int self[MAXLEVELS], levels, level = -1, visible;
+	char link[32];
+	ssize_t n;
+
+	if (!path || (strncmp(path, "/proc/self/", 11) != 0 && strncmp(path, "/proc/thread-self/", 18) != 0))
+		return path;
+	n = readlink("/proc/self", link, sizeof(link) - 1);
+	if (n < 0)
+		return path;
+	link[n] = '\0';
+	visible = atoi(link);
+	levels = ns_ids(hostproc, "self/status", "NSpid", self);
+	if (levels != caller->levels)
+		return path;
+	for (int i = 0; i < levels; i++)
+		if (self[i] == visible)
+			level = i;
+	if (level < 0)
+		return path;
+	if (path[6] == 's')
+		snprintf(buf, size, "/proc/%d/%s", caller->tgid[level], path + 11);
+	else
+		snprintf(buf, size, "/proc/%d/task/%d/%s", caller->tgid[level], caller->tid[level], path + 18);
+	return buf;
 }
 
 static int become(struct creds *c)
@@ -144,11 +209,40 @@ static const char *arg(const char *name)
 	return v && v[0] == '+' ? v + 1 : NULL; // "+value" set, absent: NULL
 }
 
+// fd_path rewrites a path through one of the caller's file descriptors
+// (/proc/self/fd/N, /proc/thread-self/fd/N: how runc names mount sources
+// and targets) to a copy of that descriptor in this process.
+static const char *fd_path(const char *path, int pidfd, char *buf, size_t size)
+{
+	static const char *const prefixes[] = {"/proc/self/fd/", "/proc/thread-self/fd/"};
+	char *end;
+
+	if (!path)
+		return NULL;
+	for (size_t i = 0; i < 2; i++) {
+		size_t n = strlen(prefixes[i]);
+		if (strncmp(path, prefixes[i], n) != 0)
+			continue;
+		long fd = strtol(path + n, &end, 10);
+		if (end == path + n || (*end != '\0' && *end != '/'))
+			return path;
+		int copy = syscall(SYS_pidfd_getfd, pidfd, (int)fd, 0);
+		if (copy < 0)
+			FAIL(errno);
+		snprintf(buf, size, "/proc/self/fd/%d%s", copy, end);
+		return buf;
+	}
+	return path;
+}
+
 static void do_mount(void)
 {
 	const char *pidstr = getenv("_GCR_PID");
-	int pid, rootfd, cwdfd, status;
+	const char *source, *target;
+	char path[64], sbuf[4200], tbuf[4200];
+	int pid, hostproc, procfd, pidfd, rootfd, cwdfd, status;
 	struct creds c = {0};
+	struct ids caller;
 	unsigned long flags;
 	pid_t child;
 
@@ -157,40 +251,53 @@ static void do_mount(void)
 	pid = atoi(pidstr);
 	flags = strtoul(getenv("_GCR_FLAGS") ? getenv("_GCR_FLAGS") : "0", NULL, 10);
 
+	// The caller is a thread, named by its ID on the host. Everything about
+	// it comes through the host's /proc and a pidfd taken now: its own
+	// /proc, if it can see one, may belong to an outer PID namespace.
+	snprintf(path, sizeof(path), "/proc/%d", pid);
+	hostproc = open("/proc", O_PATH | O_DIRECTORY | O_CLOEXEC);
+	procfd = open(path, O_PATH | O_DIRECTORY | O_CLOEXEC);
+	pidfd = syscall(SYS_pidfd_open, pid, PIDFD_THREAD);
+	if (hostproc < 0 || procfd < 0 || pidfd < 0)
+		FAIL(errno);
+	caller.levels = ns_ids(procfd, "status", "NStgid", caller.tgid);
+	if (caller.levels < 1 || ns_ids(procfd, "status", "NSpid", caller.tid) != caller.levels)
+		FAIL(errno);
+	source = fd_path(arg("_GCR_SOURCE"), pidfd, sbuf, sizeof(sbuf));
+	target = fd_path(arg("_GCR_TARGET"), pidfd, tbuf, sizeof(tbuf));
+
 	int fds[NNS];
 	if (open_namespaces(pid, fds) < 0)
 		FAIL(errno);
-	// The user namespace first: then the IDs in /proc (still the host's)
-	// read in the container's terms, and the other joins are checked
-	// against it.
-	if (join(fds, 0) < 0)
-		FAIL(errno);
-	if (read_creds(pid, &c) < 0)
-		FAIL(errno);
-	for (size_t i = 1; i < NNS; i++)
+	for (size_t i = 0; i < NNS; i++)
 		if (join(fds, i) < 0)
 			FAIL(errno);
-	// Root and working directory as the caller sees them. Opened from
-	// inside: the host's view of the container's root is a mount in the
-	// host's mount namespace, which the kernel will not mount onto.
-	char root[64], cwd[64];
-	snprintf(root, sizeof(root), "/proc/%d/root", c.nspid);
-	snprintf(cwd, sizeof(cwd), "/proc/%d/cwd", c.nspid);
-	rootfd = open(root, O_PATH | O_DIRECTORY | O_CLOEXEC);
-	cwdfd = open(cwd, O_PATH | O_DIRECTORY | O_CLOEXEC);
+	if (read_creds(procfd, &c) < 0)
+		FAIL(errno);
+	// Root and working directory as the caller sees them, opened once in
+	// its mount namespace (the kernel will not mount onto a path taken
+	// from another one).
+	rootfd = openat(procfd, "root", O_PATH | O_DIRECTORY | O_CLOEXEC);
+	cwdfd = openat(procfd, "cwd", O_PATH | O_DIRECTORY | O_CLOEXEC);
 	if (rootfd < 0 || cwdfd < 0)
 		FAIL(errno);
 	if (fchdir(rootfd) < 0 || chroot(".") < 0 || fchdir(cwdfd) < 0)
 		FAIL(errno);
 
-	// A new PID namespace applies to children: proc mounts must come from one.
+	// A new PID namespace applies to children: proc mounts must come from
+	// one, and /proc/self/fd paths resolve in one.
 	child = fork();
 	if (child < 0)
 		FAIL(errno);
 	if (child == 0) {
+		// Paths through the caller's descriptors are copies already.
+		if (source == arg("_GCR_SOURCE"))
+			source = self_path(source, hostproc, &caller, sbuf, sizeof(sbuf));
+		if (target == arg("_GCR_TARGET"))
+			target = self_path(target, hostproc, &caller, tbuf, sizeof(tbuf));
 		if (become(&c) < 0)
 			_exit(errno ? errno : EPERM);
-		if (mount(arg("_GCR_SOURCE"), arg("_GCR_TARGET"), arg("_GCR_FSTYPE"), flags, arg("_GCR_DATA")) < 0)
+		if (mount(source, target, arg("_GCR_FSTYPE"), flags, arg("_GCR_DATA")) < 0)
 			_exit(errno ? errno : EPERM);
 		_exit(0);
 	}
