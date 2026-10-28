@@ -12,7 +12,7 @@ import (
 
 func TestApplyWithoutProfile(t *testing.T) {
 	s := &specs.Spec{Process: &specs.Process{}}
-	if r := Apply(s, Standard); r.Skipped != "" || len(r.Supervised) != 0 {
+	if r := Apply(s, Options{Level: Standard, NestedUserNamespaces: Deny, Landlocked: true}); r.Skipped != "" || len(r.Supervised) != 0 {
 		t.Fatalf("Apply = %+v", r)
 	}
 	sc := s.Linux.Seccomp
@@ -50,7 +50,7 @@ func TestApplyMergesIntoProfile(t *testing.T) {
 			{Names: []string{"clone"}, Action: specs.ActAllow, Args: []specs.LinuxSeccompArg{{Index: 0, Value: 1, Op: specs.OpMaskedEqual}}},
 		},
 	}}}
-	Apply(s, Standard)
+	Apply(s, Options{Level: Standard})
 	rules := s.Linux.Seccomp.Syscalls
 	if len(rules) != 4 {
 		t.Fatalf("rules %+v", rules)
@@ -74,20 +74,20 @@ func TestApplySkips(t *testing.T) {
 		Process: &specs.Process{Capabilities: &specs.LinuxCapabilities{Bounding: []string{"CAP_SYS_ADMIN"}}},
 		Linux:   &specs.Linux{Resources: &specs.LinuxResources{Devices: []specs.LinuxDeviceCgroup{{Allow: true, Access: "rwm"}}}},
 	}
-	if r := Apply(priv, Standard); r.Skipped == "" || priv.Linux.Seccomp != nil {
+	if r := Apply(priv, Options{Level: Standard}); r.Skipped == "" || priv.Linux.Seccomp != nil {
 		t.Fatal("privileged container hardened")
 	}
 	unconfinedPod := func() *specs.Spec {
 		return &specs.Spec{Process: &specs.Process{}, Annotations: map[string]string{containerTypeAnnotation: "container"}}
 	}
-	if s := unconfinedPod(); Apply(s, Standard).Skipped == "" || s.Linux.Seccomp != nil {
+	if s := unconfinedPod(); Apply(s, Options{Level: Standard}).Skipped == "" || s.Linux.Seccomp != nil {
 		t.Fatal("standard: unconfined Kubernetes pod got a filter")
 	}
-	if s := unconfinedPod(); Apply(s, Always).Skipped != "" || s.Linux.Seccomp == nil {
+	if s := unconfinedPod(); Apply(s, Options{Level: Always}).Skipped != "" || s.Linux.Seccomp == nil {
 		t.Fatal("always: unconfined Kubernetes pod not hardened")
 	}
 	off := &specs.Spec{Process: &specs.Process{}}
-	if r := Apply(off, Off); r.Skipped == "" || off.Linux != nil {
+	if r := Apply(off, Options{Level: Off}); r.Skipped == "" || off.Linux != nil {
 		t.Fatal("Hardening = off applied a profile")
 	}
 	if err := Level("paranoid").Validate(); err == nil {
@@ -101,7 +101,7 @@ func TestApplySupervisesMountWithSysAdmin(t *testing.T) {
 		Process: &specs.Process{Capabilities: &specs.LinuxCapabilities{Bounding: []string{"CAP_SYS_ADMIN"}}},
 		Linux:   &specs.Linux{MaskedPaths: []string{"/proc/kcore"}},
 	}
-	r := Apply(s, Standard)
+	r := Apply(s, Options{Level: Standard})
 	if r.Skipped != "" || !slices.Equal(r.Supervised, []string{"mount"}) {
 		t.Fatalf("Apply = %+v", r)
 	}
@@ -118,7 +118,7 @@ func TestApplySupervisesMountWithSysAdmin(t *testing.T) {
 			Syscalls:      []specs.LinuxSyscall{{Names: []string{"mount", "read"}, Action: specs.ActAllow}},
 		}},
 	}
-	Apply(s, Standard)
+	Apply(s, Options{Level: Standard})
 	for _, rule := range s.Linux.Seccomp.Syscalls {
 		if slices.Contains(rule.Names, "mount") && rule.Action != specs.ActNotify {
 			t.Fatalf("mount still allowed by %+v", rule)
@@ -131,14 +131,14 @@ func TestApplySupervisesSetnsInUserNamespace(t *testing.T) {
 		Process: &specs.Process{Capabilities: &specs.LinuxCapabilities{Bounding: []string{"CAP_SYS_ADMIN"}}},
 		Linux:   &specs.Linux{Namespaces: []specs.LinuxNamespace{{Type: specs.UserNamespace}}},
 	}
-	r := Apply(s, Standard)
+	r := Apply(s, Options{Level: Standard})
 	if !slices.Equal(r.Supervised, []string{"mount", "setns"}) {
 		t.Fatalf("Apply = %+v", r)
 	}
 
 	// A default-deny profile gets pivot_root for runtimes inside.
 	s.Linux.Seccomp = &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}
-	Apply(s, Standard)
+	Apply(s, Options{Level: Standard})
 	last := s.Linux.Seccomp.Syscalls[len(s.Linux.Seccomp.Syscalls)-1]
 	if !slices.Equal(last.Names, []string{"pivot_root"}) || last.Action != specs.ActAllow {
 		t.Fatalf("pivot_root rule %+v", last)
@@ -169,5 +169,51 @@ func TestCheckMount(t *testing.T) {
 		if got := checkMount(tc.fstype, tc.flags) == 0; got != tc.ok {
 			t.Errorf("checkMount(%q, %#x) allowed=%v, want %v", tc.fstype, tc.flags, got, tc.ok)
 		}
+	}
+}
+
+// rule finds a rule for name whose first argument condition is on index
+// with value.
+func rule(rules []specs.LinuxSyscall, name string, index uint, value uint64) *specs.LinuxSyscall {
+	for i, r := range rules {
+		if slices.Contains(r.Names, name) && len(r.Args) > 0 && r.Args[0].Index == index && r.Args[0].Value == value {
+			return &rules[i]
+		}
+	}
+	return nil
+}
+
+func TestNestedUserNamespacesGuarded(t *testing.T) {
+	plain := func(caps ...string) *specs.Spec {
+		return &specs.Spec{Process: &specs.Process{Capabilities: &specs.LinuxCapabilities{Bounding: caps}}}
+	}
+	s := plain()
+	r := Apply(s, Options{Level: Standard})
+	rules := s.Linux.Seccomp.Syscalls
+	if rule(rules, "unshare", 0, unix.CLONE_NEWUSER) != nil {
+		t.Fatal("CLONE_NEWUSER refused in guarded mode")
+	}
+	if rule(rules, "socket", 0, unix.AF_NETLINK) == nil {
+		t.Fatal("netfilter not refused")
+	}
+	if !slices.Equal(r.Supervised, []string{"mount"}) {
+		t.Fatalf("mount not supervised: %+v", r)
+	}
+
+	// Landlock refuses a confined container any mount; no supervision.
+	if r := Apply(plain(), Options{Level: Standard, Landlocked: true}); len(r.Supervised) != 0 {
+		t.Fatalf("landlocked container supervised: %+v", r)
+	}
+	// CAP_NET_ADMIN: netfilter is the container's to use already.
+	s = plain("CAP_NET_ADMIN")
+	Apply(s, Options{Level: Standard})
+	if rule(s.Linux.Seccomp.Syscalls, "socket", 0, unix.AF_NETLINK) != nil {
+		t.Fatal("netfilter refused to a container with CAP_NET_ADMIN")
+	}
+	// Deny refuses CLONE_NEWUSER.
+	s = plain()
+	Apply(s, Options{Level: Standard, NestedUserNamespaces: Deny})
+	if rule(s.Linux.Seccomp.Syscalls, "unshare", 0, unix.CLONE_NEWUSER) == nil {
+		t.Fatal("CLONE_NEWUSER allowed with NestedUserNamespaces = deny")
 	}
 }

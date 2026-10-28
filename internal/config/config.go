@@ -27,6 +27,9 @@ type Config struct {
 	UserNamespaces userns.Mode `toml:"UserNamespaces"`
 	// Hardening is "standard" (default) or "off"; see hardening.Level.
 	Hardening hardening.Level `toml:"Hardening"`
+	// NestedUserNamespaces is "guarded" (default) or "deny"; see
+	// hardening.NestedUserNamespaces.
+	NestedUserNamespaces hardening.NestedUserNamespaces `toml:"NestedUserNamespaces"`
 	// Landlock is "standard" (default) or "off"; see landlock.Level.
 	Landlock landlock.Level `toml:"Landlock"`
 
@@ -39,7 +42,8 @@ type Config struct {
 // FromOptions decodes the runtime options of a create request. No options
 // means the defaults.
 func FromOptions(a *anypb.Any) (Config, error) {
-	c := Config{UserNamespaces: userns.Auto, Hardening: hardening.Standard, Landlock: landlock.Standard}
+	c := Config{UserNamespaces: userns.Auto, Hardening: hardening.Standard,
+		NestedUserNamespaces: hardening.Guarded, Landlock: landlock.Standard}
 	if a == nil || len(a.GetValue()) == 0 {
 		return c, nil
 	}
@@ -70,6 +74,9 @@ func FromOptions(a *anypb.Any) (Config, error) {
 		return c, err
 	}
 	if err := c.Hardening.Validate(); err != nil {
+		return c, err
+	}
+	if err := c.NestedUserNamespaces.Validate(); err != nil {
 		return c, err
 	}
 	if err := c.Landlock.Validate(); err != nil {

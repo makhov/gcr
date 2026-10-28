@@ -190,7 +190,13 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		}
 		// Calls the container's seccomp filter hands to its supervisor.
 		handlers := map[string]supervisor.Handler{}
-		hard := hardening.Apply(spec, cfg.Hardening)
+		// Landlock first: hardening must know it (a confined container
+		// may not mount).
+		whyNotLandlocked := landlock.Decide(spec, cfg.Landlock)
+		landlocked := whyNotLandlocked == ""
+		hard := hardening.Apply(spec, hardening.Options{
+			Level: cfg.Hardening, NestedUserNamespaces: cfg.NestedUserNamespaces, Landlocked: landlocked,
+		})
 		if hard.Skipped != "" {
 			log.G(ctx).WithField("reason", hard.Skipped).Debug("not hardened")
 		}
@@ -201,8 +207,8 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		// through CRIU's RPC, which has no fields for them; a config file
 		// that org.criu.config names does.
 		var criuOpts []string
-		if why := landlock.Decide(spec, cfg.Landlock); why != "" {
-			log.G(ctx).WithField("reason", why).Debug("no Landlock")
+		if !landlocked {
+			log.G(ctx).WithField("reason", whyNotLandlocked).Debug("no Landlock")
 		} else if opt, ok := landlock.CRIUOption(); ok {
 			criuOpts = append(criuOpts, opt)
 		} else {

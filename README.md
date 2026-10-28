@@ -162,11 +162,11 @@ exploits reachable from containers:
 - with ENOSYS, as if the kernel lacked it: the keyring (`add_key`,
   `keyctl`, `request_key`), which is not namespaced (runc and other callers
   carry on without a session keyring then);
-- when the container has no profile of its own, also: creating user
-  namespaces (`clone`/`unshare` with `CLONE_NEWUSER`), `AF_PACKET`,
+- when the container has no profile of its own, also: `AF_PACKET`,
   `AF_VSOCK`, `AF_KEY` and `AF_ALG` sockets, and raw IP sockets (`ping` uses
   ICMP datagram sockets, which gcr opens); `clone3` returns ENOSYS so libc
-  falls back to `clone`.
+  falls back to `clone`, whose flags the filter can see. User namespaces
+  the container makes itself are guarded (below).
 
 A container that can mount (it has `CAP_SYS_ADMIN` without being
 privileged; in a user namespace that capability only reaches the namespace)
@@ -186,6 +186,28 @@ for.
 
 Privileged means `CAP_SYS_ADMIN` and access to all devices (what
 `--privileged` gives); `CAP_SYS_ADMIN` alone is not.
+
+**Nested user namespaces.** Chrome's sandbox (Puppeteer, Playwright),
+bubblewrap and rootless podman/buildah make user namespaces of their own.
+Root in one can reach kernel code an unprivileged process cannot, so in
+gcr's own profile they are guarded rather than refused
+(`NestedUserNamespaces = 'guarded'`, the default):
+
+- mounts go through the supervisor's filesystem allowlist, also in nested
+  namespaces;
+- netfilter (`NETLINK_NETFILTER` sockets) is refused to containers without
+  `CAP_NET_ADMIN`; nf_tables is where most exploits reached this way go;
+- the rest of the filter (raw and packet sockets, `io_uring`, `bpf`, the
+  keyring) holds inside as well, and Landlock still refuses a confined
+  container any mount.
+
+Other kernel code root in a new network namespace can reach (routing,
+traffic control) stays reachable. `NestedUserNamespaces = 'deny'` refuses
+`CLONE_NEWUSER` instead. A workload's own seccomp profile decides for
+itself; containerd's `RuntimeDefault` refuses it, on runc as well. Ubuntu
+hosts restrict unprivileged user namespaces with AppArmor
+(`kernel.apparmor_restrict_unprivileged_userns`), which takes the
+capabilities away inside unless a profile allows it, as with runc.
 
 Privileged containers are exempt. Kubernetes pods that run explicitly
 `Unconfined` (Kubernetes' default, which a runtime cannot tell from an
