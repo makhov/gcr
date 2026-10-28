@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -50,6 +51,10 @@ type CreateOpts struct {
 	// Checkpoint is a directory of CRIU images; when set, Start restores
 	// from it instead of running the spec's process.
 	Checkpoint string
+	// PrepareSpec may change the spec before it is converted. It returns a
+	// CRIU configuration file to use for this container's checkpoints and
+	// restores, or "" for libcontainer's default.
+	PrepareSpec func(*specs.Spec) (criuConfig string, err error)
 }
 
 type CheckpointOpts struct {
@@ -65,10 +70,17 @@ type Container struct {
 	ID     string
 	Bundle string
 
-	lc         *libcontainer.Container
+	namespace  string
+	cfg        *configs.Config
+	rootfs     []mount.Mount
 	spec       *specs.Spec
 	checkpoint string
 	io         *stdio
+
+	// op serializes operations that replace or freeze the processes
+	// (snapshot, rewind) against each other and against delete.
+	op sync.Mutex
+	lc *libcontainer.Container
 
 	mu         sync.Mutex
 	status     Status
@@ -77,6 +89,10 @@ type Container struct {
 	exitedAt   time.Time
 	exited     chan struct{}
 	onExit     func(*Container)
+	// replacing is set while a rewind kills the processes; their exit
+	// is then reported on replaced instead of to containerd.
+	replacing bool
+	replaced  chan struct{}
 }
 
 // Root returns the libcontainer state directory for a containerd namespace.
@@ -96,6 +112,12 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	}
 	if spec.Process.Terminal {
 		return nil, fmt.Errorf("terminal: %w", errdefs.ErrNotImplemented)
+	}
+	criuConfig := ""
+	if o.PrepareSpec != nil {
+		if criuConfig, err = o.PrepareSpec(spec); err != nil {
+			return nil, err
+		}
 	}
 
 	rootfs := filepath.Join(o.Bundle, "rootfs")
@@ -123,6 +145,9 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	if err != nil {
 		return nil, fmt.Errorf("convert spec: %w", err)
 	}
+	if criuConfig != "" {
+		cfg.Labels = append(cfg.Labels, "org.criu.config="+criuConfig)
+	}
 	lc, err := libcontainer.Create(Root(o.Namespace), o.ID, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("create container: %w", err)
@@ -146,6 +171,9 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	c := &Container{
 		ID:         o.ID,
 		Bundle:     o.Bundle,
+		namespace:  o.Namespace,
+		cfg:        cfg,
+		rootfs:     o.Rootfs,
 		lc:         lc,
 		spec:       spec,
 		checkpoint: o.Checkpoint,
@@ -181,7 +209,15 @@ func (c *Container) Start(ctx context.Context) error {
 		c.setStatus(Running)
 		return nil
 	}
+	if err := c.restore(c.checkpoint); err != nil {
+		return err
+	}
+	c.setStatus(Running)
+	return nil
+}
 
+// restore starts a new incarnation from CRIU images.
+func (c *Container) restore(images string) error {
 	proc, err := c.initProcess()
 	if err != nil {
 		return err
@@ -191,21 +227,29 @@ func (c *Container) Start(ctx context.Context) error {
 		return err
 	}
 	err = c.lc.Restore(proc, &libcontainer.CriuOpts{
-		ImagesDirectory: c.checkpoint,
+		ImagesDirectory: images,
 		WorkDirectory:   work,
 	})
 	if err != nil {
+		c.io.detach()
 		return fmt.Errorf("restore (criu log in %s): %w", work, err)
 	}
-	if err := c.track(proc); err != nil {
-		return err
+	_ = os.RemoveAll(work)
+	// libcontainer leaves a restored container in a state that refuses
+	// pause and checkpoint; loading it from disk gives the running state,
+	// as a later runc command would see it.
+	lc, err := libcontainer.Load(Root(c.namespace), c.ID)
+	if err != nil {
+		return fmt.Errorf("reload restored container: %w", err)
 	}
-	c.setStatus(Running)
-	return nil
+	c.lc = lc
+	return c.track(proc)
 }
 
 // Checkpoint dumps the container with CRIU into opts.ImagePath.
 func (c *Container) Checkpoint(ctx context.Context, opts CheckpointOpts) error {
+	c.op.Lock()
+	defer c.op.Unlock()
 	work := opts.WorkPath
 	if work == "" {
 		var err error
@@ -227,10 +271,138 @@ func (c *Container) Checkpoint(ctx context.Context, opts CheckpointOpts) error {
 	return nil
 }
 
+// Running reports whether the container's processes have started.
+func (c *Container) Running() bool {
+	return c.Status() == Running
+}
+
+// Snapshot freezes the container, copies its writable layer to dir/upper and
+// dumps its processes to dir/images, then lets it continue. Freezing first
+// keeps the files and the memory image consistent with each other.
+func (c *Container) Snapshot(ctx context.Context, dir string) (retErr error) {
+	c.op.Lock()
+	defer c.op.Unlock()
+	if !c.Running() {
+		return fmt.Errorf("container is not running: %w", errdefs.ErrFailedPrecondition)
+	}
+	upper, err := c.upperDir()
+	if err != nil {
+		return err
+	}
+	if err := c.lc.Pause(); err != nil {
+		return fmt.Errorf("freeze: %w", err)
+	}
+	defer func() {
+		if err := c.lc.Resume(); err != nil && retErr == nil {
+			retErr = fmt.Errorf("thaw: %w", err)
+		}
+	}()
+	if err := copyTree(upper, filepath.Join(dir, "upper")); err != nil {
+		return fmt.Errorf("copy writable layer: %w", err)
+	}
+	work := filepath.Join(dir, "work")
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		return err
+	}
+	err = c.lc.Checkpoint(&libcontainer.CriuOpts{
+		ImagesDirectory: filepath.Join(dir, "images"),
+		WorkDirectory:   work,
+		LeaveRunning:    true,
+	})
+	if err != nil {
+		return fmt.Errorf("checkpoint (criu log in %s): %w", work, err)
+	}
+	return nil
+}
+
+// Rewind replaces the running processes and writable layer with the ones in
+// dir (written by Snapshot). containerd keeps seeing one running task.
+func (c *Container) Rewind(ctx context.Context, dir string) error {
+	c.op.Lock()
+	defer c.op.Unlock()
+	if !c.Running() {
+		return fmt.Errorf("container is not running: %w", errdefs.ErrFailedPrecondition)
+	}
+	upper, err := c.upperDir()
+	if err != nil {
+		return err
+	}
+
+	replaced := make(chan struct{})
+	c.mu.Lock()
+	c.replacing = true
+	c.replaced = replaced
+	c.mu.Unlock()
+	if err := c.lc.Signal(unix.SIGKILL); err != nil && !errors.Is(err, libcontainer.ErrNotRunning) {
+		c.mu.Lock()
+		c.replacing = false
+		c.mu.Unlock()
+		return fmt.Errorf("stop processes: %w", err)
+	}
+	<-replaced
+
+	// From here on the old processes are gone; a failure leaves the task
+	// stopped, and containerd is told it exited.
+	if err := c.replace(upper, dir); err != nil {
+		c.mu.Lock()
+		c.replacing = false
+		c.mu.Unlock()
+		c.markExited(nil)
+		return err
+	}
+	c.mu.Lock()
+	c.replacing = false
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Container) replace(upper, dir string) error {
+	if err := c.lc.Destroy(); err != nil {
+		return fmt.Errorf("destroy old container: %w", err)
+	}
+	rootfs := filepath.Join(c.Bundle, "rootfs")
+	if err := mount.UnmountRecursive(rootfs, 0); err != nil {
+		return fmt.Errorf("unmount rootfs: %w", err)
+	}
+	if err := emptyDir(upper); err != nil {
+		return fmt.Errorf("clear writable layer: %w", err)
+	}
+	if err := copyTree(filepath.Join(dir, "upper"), upper); err != nil {
+		return fmt.Errorf("restore writable layer: %w", err)
+	}
+	if err := mount.All(c.rootfs, rootfs); err != nil {
+		return fmt.Errorf("mount rootfs: %w", err)
+	}
+	lc, err := libcontainer.Create(Root(c.namespace), c.ID, c.cfg)
+	if err != nil {
+		return fmt.Errorf("create container: %w", err)
+	}
+	c.lc = lc
+	return c.restore(filepath.Join(dir, "images"))
+}
+
+// upperDir returns the writable layer of an overlay rootfs.
+func (c *Container) upperDir() (string, error) {
+	for _, m := range c.rootfs {
+		if m.Type != "overlay" {
+			continue
+		}
+		for _, o := range m.Options {
+			if after, ok := strings.CutPrefix(o, "upperdir="); ok {
+				return after, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("time travel needs an overlay rootfs with a writable layer: %w", errdefs.ErrNotImplemented)
+}
+
 // Kill signals the init process, or every process in the container.
 func (c *Container) Kill(sig syscall.Signal, all bool) error {
+	c.op.Lock()
+	lc := c.lc
+	c.op.Unlock()
 	if !all {
-		if err := c.lc.Signal(sig); err != nil {
+		if err := lc.Signal(sig); err != nil {
 			if errors.Is(err, libcontainer.ErrNotRunning) {
 				return fmt.Errorf("container not running: %w", errdefs.ErrNotFound)
 			}
@@ -238,7 +410,7 @@ func (c *Container) Kill(sig syscall.Signal, all bool) error {
 		}
 		return nil
 	}
-	pids, err := c.lc.Processes()
+	pids, err := lc.Processes()
 	if err != nil {
 		return err
 	}
@@ -252,10 +424,12 @@ func (c *Container) Kill(sig syscall.Signal, all bool) error {
 
 // Delete removes a stopped container: libcontainer state, rootfs mounts, stdio.
 func (c *Container) Delete(ctx context.Context) error {
-	if c.Status() == Running {
+	c.op.Lock()
+	defer c.op.Unlock()
+	if s := c.Status(); s == Running || s == Paused {
 		return fmt.Errorf("container is running: %w", errdefs.ErrFailedPrecondition)
 	}
-	if c.Status() == Created && c.pid != 0 {
+	if c.Status() == Created && c.Pid() != 0 {
 		// Created but never started: the init is parked before exec.
 		_ = c.lc.Signal(unix.SIGKILL)
 		<-c.exited
@@ -273,6 +447,8 @@ func (c *Container) Delete(ctx context.Context) error {
 
 // Pause freezes every process in the container's cgroup.
 func (c *Container) Pause() error {
+	c.op.Lock()
+	defer c.op.Unlock()
 	if err := c.lc.Pause(); err != nil {
 		return err
 	}
@@ -281,6 +457,8 @@ func (c *Container) Pause() error {
 }
 
 func (c *Container) Resume() error {
+	c.op.Lock()
+	defer c.op.Unlock()
 	if err := c.lc.Resume(); err != nil {
 		return err
 	}
@@ -289,6 +467,8 @@ func (c *Container) Resume() error {
 }
 
 func (c *Container) Pids() ([]int, error) {
+	c.op.Lock()
+	defer c.op.Unlock()
 	return c.lc.Processes()
 }
 
@@ -330,11 +510,14 @@ func (c *Container) initProcess() (*libcontainer.Process, error) {
 		return nil, err
 	}
 	proc.Init = true
-	proc.Stdin, proc.Stdout, proc.Stderr = c.io.containerSide()
+	if proc.Stdin, proc.Stdout, proc.Stderr, err = c.io.attach(); err != nil {
+		return nil, err
+	}
 	return proc, nil
 }
 
-// track records the init pid and waits for it to exit in the background.
+// track records the init pid of a new incarnation and waits for it to exit
+// in the background.
 func (c *Container) track(proc *libcontainer.Process) error {
 	pid, err := proc.Pid()
 	if err != nil {
@@ -343,22 +526,40 @@ func (c *Container) track(proc *libcontainer.Process) error {
 	c.mu.Lock()
 	c.pid = pid
 	c.mu.Unlock()
-	c.io.closeContainerSide()
+	c.io.detach()
 
 	go func() {
 		st, _ := proc.Wait()
 		c.mu.Lock()
-		c.status = Stopped
-		c.exitStatus = exitStatus(st)
-		c.exitedAt = time.Now()
+		if c.replacing {
+			// A rewind killed this incarnation; it is not an exit.
+			ch := c.replaced
+			c.mu.Unlock()
+			close(ch)
+			return
+		}
 		c.mu.Unlock()
 		c.io.wait()
-		close(c.exited)
-		if c.onExit != nil {
-			c.onExit(c)
-		}
+		c.markExited(st)
 	}()
 	return nil
+}
+
+// markExited records the init's exit and tells containerd.
+func (c *Container) markExited(st *os.ProcessState) {
+	c.mu.Lock()
+	if c.status == Stopped {
+		c.mu.Unlock()
+		return
+	}
+	c.status = Stopped
+	c.exitStatus = exitStatus(st)
+	c.exitedAt = time.Now()
+	c.mu.Unlock()
+	close(c.exited)
+	if c.onExit != nil {
+		c.onExit(c)
+	}
 }
 
 func exitStatus(st *os.ProcessState) uint32 {

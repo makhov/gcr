@@ -15,6 +15,7 @@ require (
 	github.com/opencontainers/cgroups v0.1.0
 	github.com/opencontainers/runc v1.5.2
 	github.com/opencontainers/runtime-spec v1.3.0
+	github.com/seccomp/libseccomp-golang v0.12.0
 	golang.org/x/sys v0.48.0
 )
 
@@ -47,7 +48,6 @@ require (
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/opencontainers/selinux v1.15.1 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/seccomp/libseccomp-golang v0.12.0 // indirect
 	github.com/sirupsen/logrus v1.10.2 // indirect
 	github.com/vishvananda/netlink v1.3.1 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect

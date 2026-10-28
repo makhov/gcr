@@ -5,7 +5,10 @@ package task
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -25,9 +28,15 @@ import (
 	"github.com/containerd/log"
 	"github.com/containerd/ttrpc"
 	"github.com/containerd/typeurl/v2"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/makhov/gcr/internal/container"
+	"github.com/makhov/gcr/internal/control"
+	"github.com/makhov/gcr/internal/timetravel"
 )
+
+// timeTravelState holds time-travel timelines, per namespace and container.
+const timeTravelState = "/var/lib/gcr"
 
 var (
 	_     = shim.TTRPCService(&service{})
@@ -41,6 +50,20 @@ type service struct {
 
 	mu         sync.Mutex
 	containers map[string]*container.Container
+	timeTravel map[string]*timeTravel
+}
+
+// timeTravel is the time-travel state of one container.
+type timeTravel struct {
+	recorder *timetravel.Recorder
+	control  *control.Server
+}
+
+func (t *timeTravel) Close() {
+	if t.control != nil {
+		t.control.Close()
+	}
+	_ = t.recorder.Close()
 }
 
 func NewTaskService(ctx context.Context, publisher shim.Publisher, sd shutdown.Service) (taskAPI.TTRPCTaskService, error) {
@@ -49,6 +72,7 @@ func NewTaskService(ctx context.Context, publisher shim.Publisher, sd shutdown.S
 		publisher:  publisher,
 		shutdown:   sd,
 		containers: make(map[string]*container.Container),
+		timeTravel: make(map[string]*timeTravel),
 	}
 	sd.RegisterCallback(func(context.Context) error {
 		publisher.Close()
@@ -75,6 +99,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		rootfs = append(rootfs, mount.Mount{Type: m.Type, Source: m.Source, Target: m.Target, Options: m.Options})
 	}
 
+	var tt *timeTravel
 	c, err := container.Create(ctx, container.CreateOpts{
 		ID:         r.ID,
 		Namespace:  ns,
@@ -84,13 +109,40 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		Stdout:     r.Stdout,
 		Stderr:     r.Stderr,
 		Checkpoint: r.Checkpoint,
+		PrepareSpec: func(spec *specs.Spec) (string, error) {
+			policy, err := timetravel.ParsePolicy(spec.Annotations)
+			if err != nil || policy == nil {
+				return "", err
+			}
+			rec, err := timetravel.NewRecorder(s.ctx, policy,
+				filepath.Join(timeTravelState, ns, r.ID),
+				strings.TrimSuffix(control.SocketPath(ns, r.ID), ".sock")+".tt")
+			if err != nil {
+				return "", fmt.Errorf("time travel: %w", err)
+			}
+			tt = &timeTravel{recorder: rec}
+			policy.AddTrigger(spec, rec.HandoffPath())
+			return rec.CRIUConfig(), nil
+		},
 	}, s.handleExit)
 	if err != nil {
+		if tt != nil {
+			tt.Close()
+		}
 		return nil, errgrpc.ToGRPC(err)
+	}
+	if tt != nil {
+		tt.recorder.Attach(c)
+		if tt.control, err = control.Serve(s.ctx, ns, r.ID, tt.recorder); err != nil {
+			log.G(ctx).WithError(err).Error("time travel: control socket")
+		}
 	}
 
 	s.mu.Lock()
 	s.containers[r.ID] = c
+	if tt != nil {
+		s.timeTravel[r.ID] = tt
+	}
 	s.mu.Unlock()
 
 	s.send(&eventstypes.TaskCreate{
@@ -126,7 +178,12 @@ func (s *service) Delete(ctx context.Context, r *taskAPI.DeleteRequest) (*taskAP
 	}
 	s.mu.Lock()
 	delete(s.containers, r.ID)
+	tt := s.timeTravel[r.ID]
+	delete(s.timeTravel, r.ID)
 	s.mu.Unlock()
+	if tt != nil {
+		tt.Close()
+	}
 
 	status, at := c.Exit()
 	s.send(&eventstypes.TaskDelete{
