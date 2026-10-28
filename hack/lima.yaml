@@ -7,6 +7,9 @@ disk: 40GiB
 mounts:
   - location: "~/www/gcr"
     writable: true
+  # Our CRIU fork (seccomp listener restore), built in the VM.
+  - location: "~/www/criu"
+    writable: true
   # Keep the template's read-only home mount from shadowing the repo.
   - location: "~"
     mountPoint: "/mnt/home"

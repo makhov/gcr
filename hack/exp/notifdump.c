@@ -10,6 +10,8 @@
 #include <fcntl.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
+#include <poll.h>
+#include <signal.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +21,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 static void writef(const char *path, long v) {
@@ -85,38 +88,83 @@ static void child(int sock) {
 	}
 }
 
+// Answers one notification on lfd; returns -1 when the listener is dead.
+static int serve_one(int lfd) {
+	static char reqbuf[512], respbuf[512];
+	struct seccomp_notif *req = (void *)reqbuf;
+	struct seccomp_notif_resp *resp = (void *)respbuf;
+
+	memset(req, 0, sizeof(reqbuf));
+	if (ioctl(lfd, SECCOMP_IOCTL_NOTIF_RECV, req) < 0)
+		return errno == EINTR ? 0 : -1;
+	// Hold the call only when asked to (/tmp/nd/hold exists).
+	if (access("/tmp/nd/hold", F_OK) == 0) {
+		writef("/tmp/nd/held", req->pid);
+		while (access("/tmp/nd/go", F_OK) != 0)
+			usleep(50000);
+		unlink("/tmp/nd/go");
+		unlink("/tmp/nd/hold");
+		unlink("/tmp/nd/held");
+	}
+	memset(resp, 0, sizeof(respbuf));
+	resp->id = req->id;
+	resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE;
+	if (ioctl(lfd, SECCOMP_IOCTL_NOTIF_SEND, resp) < 0)
+		printf("notif send: %s\n", strerror(errno));
+	return 0;
+}
+
 int main(void) {
 	mkdir("/tmp/nd", 0755);
+	// Reap the child when criu dump kills it, so restore can reuse its pid.
+	signal(SIGCHLD, SIG_IGN);
+
+	// Restored listeners arrive here from criu --seccomp-notify-socket.
+	int lsk = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	strcpy(addr.sun_path, "/tmp/nd/notify.sock");
+	unlink(addr.sun_path);
+	if (bind(lsk, (void *)&addr, sizeof(addr)) || listen(lsk, 8)) {
+		perror("notify socket");
+		return 1;
+	}
+
 	int sv[2];
 	socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
 	pid_t pid = fork();
-	if (pid == 0) { close(sv[0]); child(sv[1]); }
+	if (pid == 0) { close(sv[0]); close(lsk); child(sv[1]); }
 	close(sv[1]);
-	int lfd = recv_fd(sv[0]);
-	printf("child=%d listener=%d\n", pid, lfd);
+	printf("child=%d\n", pid);
 	fflush(stdout);
 
-	struct seccomp_notif *req = calloc(1, 512);
-	struct seccomp_notif_resp *resp = calloc(1, 512);
+	// fds[0] is the notify socket; the rest are connections and listeners.
+	struct pollfd fds[64] = { { .fd = lsk, .events = POLLIN } };
+	int kind[64] = { 0 }; // 0 socket, 1 connection, 2 listener
+	int n = 1;
+	fds[n].fd = recv_fd(sv[0]); fds[n].events = POLLIN; kind[n++] = 2;
+
 	for (;;) {
-		memset(req, 0, 512);
-		if (ioctl(lfd, SECCOMP_IOCTL_NOTIF_RECV, req) < 0) {
-			perror("notif recv");
-			return 0;
+		if (poll(fds, n, -1) < 0)
+			continue;
+		for (int i = 0; i < n; i++) {
+			if (!fds[i].revents)
+				continue;
+			if (kind[i] == 0) {
+				int c = accept(lsk, NULL, NULL);
+				fds[n].fd = c; fds[n].events = POLLIN; kind[n++] = 1;
+			} else if (kind[i] == 1) {
+				int l = recv_fd(fds[i].fd);
+				if (l < 0) { close(fds[i].fd); fds[i].fd = -1; continue; }
+				printf("got restored listener fd=%d\n", l);
+				fflush(stdout);
+				fds[n].fd = l; fds[n].events = POLLIN; kind[n++] = 2;
+			} else if ((fds[i].revents & POLLIN) && serve_one(fds[i].fd) == 0) {
+				continue;
+			} else {
+				// The task behind this listener is gone.
+				close(fds[i].fd);
+				fds[i].fd = -1;
+			}
 		}
-		// Hold the call only when asked to (/tmp/nd/hold exists).
-		if (access("/tmp/nd/hold", F_OK) == 0) {
-			writef("/tmp/nd/held", req->pid);
-			while (access("/tmp/nd/go", F_OK) != 0)
-				usleep(50000);
-			unlink("/tmp/nd/go");
-			unlink("/tmp/nd/hold");
-			unlink("/tmp/nd/held");
-		}
-		memset(resp, 0, 512);
-		resp->id = req->id;
-		resp->flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE;
-		if (ioctl(lfd, SECCOMP_IOCTL_NOTIF_SEND, resp) < 0)
-			printf("notif send: %s\n", strerror(errno));
 	}
 }

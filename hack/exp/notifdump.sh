@@ -3,7 +3,7 @@
 set -u
 cd "$(dirname "$0")"
 gcc -O1 -o /tmp/notifdump notifdump.c || exit 1
-pkill -f /tmp/notifdump; rm -rf /tmp/nd /tmp/nd-img; mkdir -p /tmp/nd-img
+pkill -f /tmp/notifdump; sleep 0.2; rm -rf /tmp/nd /tmp/nd-img; mkdir -p /tmp/nd-img
 
 /tmp/notifdump > /tmp/nd-super.log 2>&1 &
 sleep 1.5
@@ -16,14 +16,18 @@ for _ in $(seq 50); do [ -f /tmp/nd/held ] && break; sleep 0.1; done
 echo "held pid=$(cat /tmp/nd/held) count=$(cat /tmp/nd/count)"
 
 echo "== criu dump while held"
-criu dump -t "$child" -D /tmp/nd-img -o dump.log -v4 --shell-job
+CRIU=${CRIU:-criu}
+$CRIU dump -t "$child" -D /tmp/nd-img -o dump.log -v4 --shell-job
 echo "dump exit=$?"; grep -iE "error|seccomp|notif" /tmp/nd-img/dump.log | tail -15
 
 echo "== release supervisor and restore"
 touch /tmp/nd/go
 sleep 0.5
-criu restore -D /tmp/nd-img -o restore.log -v4 --shell-job -d
+$CRIU restore -D /tmp/nd-img -o restore.log -v4 --shell-job -d \
+	${NOTIFY:+--seccomp-notify-socket /tmp/nd/notify.sock}
 echo "restore exit=$?"; grep -iE "error|seccomp|notif" /tmp/nd-img/restore.log | tail -15
 sleep 1.5
+echo "== supervisor:"; cat /tmp/nd-super.log
 echo "== log after restore:"; tail -6 /tmp/nd/child.log
+echo "== seccomp listeners left in restored task: $(ls -l /proc/$child/fd | grep -c seccomp)"
 pkill -f /tmp/notifdump
