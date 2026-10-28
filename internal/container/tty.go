@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/containerd/console"
 	"github.com/containerd/fifo"
@@ -24,8 +25,9 @@ type ttyIO struct {
 	parent, child *os.File // console socket pair
 	recv          chan error
 
-	stdin  io.ReadCloser // fifo, nil if no stdin
-	stdout io.Writer     // fifo, nil if no stdout
+	stdin       io.ReadCloser // fifo, nil if no stdin
+	stdout      io.Writer     // fifo, nil if no stdout
+	stdinCopied chan struct{} // closed when the stdin copy reaches EOF
 
 	mu      sync.Mutex
 	console console.Console
@@ -89,7 +91,14 @@ func (t *ttyIO) receive() error {
 	t.closers = append(t.closers, cons)
 	t.mu.Unlock()
 	if t.stdin != nil {
-		go func() { _, _ = io.Copy(cons, t.stdin) }()
+		copied := make(chan struct{})
+		t.mu.Lock()
+		t.stdinCopied = copied
+		t.mu.Unlock()
+		go func() {
+			_, _ = io.Copy(cons, t.stdin)
+			close(copied)
+		}()
 	}
 	t.copies.Add(1)
 	go func() {
@@ -128,10 +137,23 @@ func (t *ttyIO) resize(width, height uint32) error {
 	return t.console.Resize(console.WinSize{Width: uint16(width), Height: uint16(height)})
 }
 
+// closeStdin stops copying stdin once the copy has drained (see
+// stdio.closeStdin).
 func (t *ttyIO) closeStdin() {
-	if t.stdin != nil {
-		t.stdin.Close()
+	if t.stdin == nil {
+		return
 	}
+	t.mu.Lock()
+	copied := t.stdinCopied
+	t.mu.Unlock()
+	if copied != nil {
+		select {
+		case <-copied:
+			return
+		case <-time.After(stdinDrainTimeout):
+		}
+	}
+	t.stdin.Close()
 }
 
 func (t *ttyIO) wait() { t.copies.Wait() }

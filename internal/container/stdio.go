@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/containerd/fifo"
 )
@@ -22,6 +23,8 @@ type stdio struct {
 	// stdin pipe: the read end is handed to every incarnation.
 	inR, inW  *os.File
 	stdinFifo io.Closer
+	// stdinCopied is closed when the stdin copy has reached EOF.
+	stdinCopied chan struct{}
 	// fifos that output pipes are copied to; nil when not requested.
 	stdout, stderr io.Writer
 
@@ -54,9 +57,11 @@ func openStdio(ctx context.Context, stdin, stdout, stderr string) (_ *stdio, ret
 		}
 		s.closers = append(s.closers, f)
 		s.stdinFifo = f
+		s.stdinCopied = make(chan struct{})
 		go func() {
 			_, _ = io.Copy(w, f)
 			w.Close()
+			close(s.stdinCopied)
 		}()
 	}
 
@@ -157,15 +162,24 @@ func (s *stdio) detach() {
 	s.out, s.errw = nil, nil
 }
 
-// closeStdin gives the process EOF on stdin (CloseIO).
+// closeStdin gives the process EOF on stdin (CloseIO). containerd has
+// closed its end of the fifo by then, so the copy is about to reach EOF;
+// closing under it would drop what it has not copied yet.
 func (s *stdio) closeStdin() {
-	if s.stdinFifo != nil {
-		s.stdinFifo.Close()
+	if s.stdinCopied == nil {
+		return
 	}
-	if s.inW != nil {
+	select {
+	case <-s.stdinCopied:
+	case <-time.After(stdinDrainTimeout):
+		s.stdinFifo.Close()
 		s.inW.Close()
 	}
 }
+
+// stdinDrainTimeout bounds closeStdin's wait for a writer that never
+// closes its end of the stdin fifo.
+const stdinDrainTimeout = 5 * time.Second
 
 // wait blocks until all container output has been copied to the fifos.
 func (s *stdio) wait() {
