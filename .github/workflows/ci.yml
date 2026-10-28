@@ -65,6 +65,13 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
+      # The runner's disk is nearly full of preinstalled SDKs; k0s, the node
+      # image and its containerd images push it into kubelet's disk pressure
+      # eviction, and pods stay unscheduled.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
       - run: sudo apt-get update && sudo apt-get install -y libseccomp-dev
       - run: go install github.com/makhov/k0da@latest
       - run: make static
