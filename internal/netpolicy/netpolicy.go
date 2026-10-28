@@ -197,6 +197,21 @@ func (p *Policy) Close() {
 	p.stats.Close()
 }
 
+// PinnedStats reads the loaded policy's counters (checked, refused
+// messages) from its pinned map; zero when no shim has loaded it yet.
+func PinnedStats() (checked, refused uint64, err error) {
+	m, err := ebpf.LoadPinnedMap(filepath.Join(PinDir, "stats"), nil)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, err
+	}
+	defer m.Close()
+	p := &Policy{stats: m}
+	return p.Stats()
+}
+
 // CgroupID is the ID of the cgroup at path (cgroup v2: the directory's
 // inode number), as bpf_get_current_cgroup_id reports it.
 func CgroupID(path string) (uint64, error) {

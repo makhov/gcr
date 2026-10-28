@@ -238,6 +238,11 @@ func nestedChild() {
 		return
 	}
 	fmt.Println("link_macvlan", newLink("p-macvlan", "macvlan", parent.Index))
+	// A refused request must have made nothing.
+	for _, k := range []string{"bond", "macvlan"} {
+		_, err := net.InterfaceByName("p-" + k)
+		fmt.Println("link_"+k+"_exists", map[bool]string{true: "YES", false: "NO"}[err == nil])
+	}
 }
 
 // newLink asks the kernel for a link of kind (RTM_NEWLINK with
