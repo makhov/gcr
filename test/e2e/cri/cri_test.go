@@ -7,6 +7,10 @@
 package cri
 
 import (
+	"fmt"
+	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -74,6 +78,26 @@ func TestPod(t *testing.T) {
 			t.Fatalf("empty stats: %v", s)
 		}
 	})
+	t.Run("shim memory", func(t *testing.T) {
+		// One shim per pod, so its memory is the runtime's cost per pod.
+		// Without a single malloc arena, glibc gave each thread of it one
+		// (a 2 MiB huge page apiece): ~25 MiB instead of ~4.
+		shim := shimPID(t, pod.ID)
+		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/smaps_rollup", shim))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var anon int
+		for _, line := range strings.Split(string(b), "\n") {
+			if f := strings.Fields(line); len(f) >= 2 && f[0] == "Anonymous:" {
+				anon, _ = strconv.Atoi(f[1])
+			}
+		}
+		t.Logf("shim %d: %d KiB anonymous memory", shim, anon)
+		if anon == 0 || anon > 12<<10 {
+			t.Fatalf("shim anonymous memory %d KiB, want under 12 MiB", anon)
+		}
+	})
 	t.Run("user namespace", func(t *testing.T) {
 		f := strings.Fields(run(t, "cat", "/proc/self/uid_map"))
 		if len(f) != 3 || f[0] != "0" || !strings.HasPrefix(f[1], "1073") || f[2] != "65536" {
@@ -85,4 +109,23 @@ func TestPod(t *testing.T) {
 		run(t, "sh", "-c", "echo ok > /written && chown 1000 /written")
 		run(t, "sh", "-c", `nc -l -p 80 -w 1 </dev/null & sleep 0.3; netstat -ltn | grep -q ":80 "`)
 	})
+}
+
+// shimPID finds the gcr shim that serves a pod.
+func shimPID(t *testing.T, podID string) int {
+	t.Helper()
+	dirs, _ := os.ReadDir("/proc")
+	for _, d := range dirs {
+		pid, err := strconv.Atoi(d.Name())
+		if err != nil {
+			continue
+		}
+		cmdline, _ := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+		args := strings.Split(string(cmdline), "\x00")
+		if strings.HasSuffix(args[0], "containerd-shim-gcr-v2") && slices.Contains(args, podID) {
+			return pid
+		}
+	}
+	t.Fatalf("no shim for pod %s", podID)
+	return 0
 }
