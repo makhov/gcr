@@ -50,15 +50,17 @@ func TestDockerInDocker(t *testing.T) {
 			NamespaceOptions: &cri.NamespaceOption{UsernsOptions: usernsOptions()},
 		}},
 	})
-	// --iptables=false and --bridge=none: nested containers share the
-	// pod's network (--network host). AppArmor unconfined, as for
-	// privileged DinD: the nested runtime's processes otherwise end up
-	// under labels the default profile does not let signal each other.
+	// --iptables=false: no NAT, so nested containers that need the outside
+	// use --network host; Docker's default bridge (docker0 and a veth pair
+	// per container, link kinds gcr's netlink policy allows) still joins
+	// them to each other. AppArmor unconfined, as for privileged DinD: the
+	// nested runtime's processes otherwise end up under labels the default
+	// profile does not let signal each other.
 	dockerd := &cri.ContainerConfig{
 		Metadata: &cri.ContainerMetadata{Name: "dockerd"},
 		Image:    &cri.ImageSpec{Image: "docker.io/library/docker:dind"},
 		Command:  []string{"dockerd-entrypoint.sh"},
-		Args:     []string{"dockerd", "--iptables=false", "--ip6tables=false", "--bridge=none", "--host=unix:///var/run/docker.sock"},
+		Args:     []string{"dockerd", "--iptables=false", "--ip6tables=false", "--host=unix:///var/run/docker.sock"},
 		Envs:     []*cri.KeyValue{{Key: "DOCKER_TLS_CERTDIR", Value: []byte{}}},
 		Mounts:   []*cri.Mount{{ContainerPath: "/var/lib/docker", HostPath: state}},
 		LogPath:  "dockerd.log",
@@ -106,6 +108,17 @@ func TestDockerInDocker(t *testing.T) {
 		if code != 0 || lastLine(out) != "built inside" {
 			t.Fatalf("docker build (exit %d): %s", code, out)
 		}
+	})
+	// Docker's bridge network: dockerd made docker0 and makes a veth pair
+	// per container, and two containers on it reach each other.
+	t.Run("bridge network", func(t *testing.T) {
+		out, code := sh(`docker run -d --name srv busybox sh -c "nc -l -p 8080 -e echo hi" >/dev/null &&
+			ip=$(docker inspect -f "{{.NetworkSettings.Networks.bridge.IPAddress}}" srv) && echo "srv $ip" &&
+			docker run --rm busybox nc -w 3 $ip 8080; rc=$?; docker rm -f srv >/dev/null 2>&1; exit $rc`)
+		if code != 0 || lastLine(out) != "hi" {
+			t.Fatalf("over the bridge (exit %d): %s", code, out)
+		}
+		t.Logf("%s", strings.TrimSpace(out))
 	})
 	// gcr's filter holds for nested containers without one of their own.
 	t.Run("nested filter", func(t *testing.T) {

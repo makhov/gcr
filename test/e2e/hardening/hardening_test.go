@@ -13,6 +13,7 @@ import (
 
 	"github.com/containerd/containerd/v2/pkg/oci"
 
+	"github.com/makhov/gcr/internal/netpolicy"
 	"github.com/makhov/gcr/internal/userns"
 	"github.com/makhov/gcr/test/e2e/framework"
 )
@@ -170,4 +171,35 @@ func TestNestedUserNamespaces(t *testing.T) {
 		got := e.run(t, framework.Spec{RuntimeConfig: `NestedUserNamespaces = "deny"`}, "nested")
 		expect(t, got, "EPERM", "nested_userns")
 	})
+}
+
+// TestNetlinkPolicy: a container may create veth, dummy and bridge links,
+// in a user namespace it makes too, but not bonding or macvlan ones; with
+// hardening off, or the policy off, it may. Needs the BPF LSM.
+func TestNetlinkPolicy(t *testing.T) {
+	if !netpolicy.Available() {
+		t.Skip("the kernel's LSM list has no bpf")
+	}
+	withoutHostUsernsRestriction(t)
+	e := setup(t)
+	_, refusedBefore, err := netpolicy.PinnedStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := e.run(t, framework.Spec{}, "nested")
+	expect(t, got, "OK", "nested_userns", "link_veth", "link_dummy", "link_bridge")
+	expect(t, got, "EPERM", "link_bond", "link_macvlan")
+	expect(t, got, "NO", "link_bond_exists", "link_macvlan_exists")
+	// The refusals were the policy's: its counter moved.
+	_, refusedAfter, err := netpolicy.PinnedStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refusedAfter < refusedBefore+2 {
+		t.Errorf("policy refused counter went %d -> %d, want at least +2", refusedBefore, refusedAfter)
+	}
+	for _, control := range []string{`Hardening = "off"`, `NetlinkPolicy = "off"`} {
+		got := e.run(t, framework.Spec{RuntimeConfig: control}, "nested")
+		expect(t, got, "OK", "link_veth", "link_bond", "link_macvlan")
+	}
 }

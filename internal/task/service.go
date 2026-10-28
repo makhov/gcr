@@ -38,6 +38,7 @@ import (
 	"github.com/makhov/gcr/internal/hardening"
 	"github.com/makhov/gcr/internal/landlock"
 	"github.com/makhov/gcr/internal/migrate"
+	"github.com/makhov/gcr/internal/netpolicy"
 	"github.com/makhov/gcr/internal/supervisor"
 	"github.com/makhov/gcr/internal/timetravel"
 	"github.com/makhov/gcr/internal/userns"
@@ -60,6 +61,24 @@ type service struct {
 	mu         sync.Mutex
 	containers map[string]*container.Container
 	extras     map[string]*extras
+
+	// The node's netlink policy, loaded for the first hardened container.
+	netPolicyOnce sync.Once
+	netPolicy     *netpolicy.Policy
+}
+
+// netlinkPolicy loads the netlink policy once; nil when the kernel cannot
+// apply it, logged once.
+func (s *service) netlinkPolicy(ctx context.Context) *netpolicy.Policy {
+	s.netPolicyOnce.Do(func() {
+		p, err := netpolicy.Load()
+		if err != nil {
+			log.G(ctx).WithError(err).Warn("netlink policy off: containers' network configuration is limited by seccomp alone")
+			return
+		}
+		s.netPolicy = p
+	})
+	return s.netPolicy
 }
 
 // extras is what a container has beyond containerd's task API.
@@ -71,9 +90,15 @@ type extras struct {
 	control    *control.Server
 	stateDir   string
 	id         string
+	// netPolicy covers cgroupID, if not 0.
+	netPolicy *netpolicy.Policy
+	cgroupID  uint64
 }
 
 func (e *extras) Close() {
+	if e.netPolicy != nil && e.cgroupID != 0 {
+		_ = e.netPolicy.Remove(e.cgroupID)
+	}
 	if e.control != nil {
 		e.control.Close()
 	}
@@ -141,6 +166,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		Stderr:     r.Stderr,
 		Checkpoint: r.Checkpoint,
 	}
+	var hardened bool
 	opts.PrepareSpec = func(spec *specs.Spec) (container.Prepared, error) {
 		prep := container.Prepared{IOOwner: cfg.IOUID}
 		ok, why, err := userns.Decide(spec, cfg.UserNamespaces)
@@ -199,7 +225,8 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		hard := hardening.Apply(spec, hardening.Options{
 			Level: cfg.Hardening, NestedUserNamespaces: cfg.NestedUserNamespaces, Landlocked: landlocked,
 		})
-		if hard.Skipped != "" {
+		hardened = hard.Skipped == ""
+		if !hardened {
 			log.G(ctx).WithField("reason", hard.Skipped).Debug("not hardened")
 		}
 		for _, name := range hard.Supervised {
@@ -271,6 +298,13 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		ex.Close()
 		return nil, errgrpc.ToGRPC(err)
 	}
+	if hardened && cfg.NetlinkPolicy != netpolicy.Off {
+		ex.netPolicy = s.netlinkPolicy(ctx)
+		// A restore has no cgroup before Start; Start covers it then.
+		if err := ex.coverCgroup(c); err != nil {
+			log.G(ctx).WithError(err).Debug("netlink policy: covering the container at start instead")
+		}
+	}
 
 	h := control.Handlers{
 		Migrate: func(ctx context.Context, target, token string) (migrate.Result, error) {
@@ -328,6 +362,11 @@ func (s *service) Start(ctx context.Context, r *taskAPI.StartRequest) (*taskAPI.
 	}
 	if err != nil {
 		return nil, errgrpc.ToGRPC(err)
+	}
+	if ex != nil {
+		if err := ex.coverCgroup(c); err != nil {
+			log.G(ctx).WithError(err).Warn("netlink policy: container not covered")
+		}
 	}
 	s.send(&eventstypes.TaskStart{ContainerID: c.ID, Pid: uint32(c.Pid())})
 	return &taskAPI.StartResponse{Pid: uint32(c.Pid())}, nil
@@ -722,3 +761,26 @@ var waitKillable = sync.OnceValue(func() bool {
 	major, minor, _ := seccomp.Version()
 	return major > 2 || (major == 2 && minor >= 6)
 })
+
+// coverCgroup puts the container's cgroup under the netlink policy, if it
+// has one and the policy is loaded. It is called at create and again at
+// start, since a restored container's cgroup appears only then; covering
+// an already covered one does nothing.
+func (e *extras) coverCgroup(c *container.Container) error {
+	if e.netPolicy == nil || e.cgroupID != 0 {
+		return nil
+	}
+	dir, err := c.CgroupPath()
+	if err != nil {
+		return err
+	}
+	id, err := netpolicy.CgroupID(dir)
+	if err != nil {
+		return fmt.Errorf("cgroup %s: %w", dir, err)
+	}
+	if err := e.netPolicy.Add(id); err != nil {
+		return err
+	}
+	e.cgroupID = id
+	return nil
+}
