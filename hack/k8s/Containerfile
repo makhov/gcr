@@ -1,5 +1,5 @@
 # k0s node image with gcr registered as the "gcr" runtime handler.
 ARG K0S_IMAGE=quay.io/k0sproject/k0s:v1.37.1-k0s.0
 FROM ${K0S_IMAGE}
-COPY bin/static/containerd-shim-gcr-v2 bin/static/gcr /usr/local/bin/
+COPY bin/static/containerd-shim-gcr-v2 bin/static/gcr /opt/gcr/bin/
 COPY hack/k8s/gcr-containerd.toml /etc/k0s/containerd.d/gcr.toml

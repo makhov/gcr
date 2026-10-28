@@ -2,13 +2,13 @@
 version = 3
 [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr]
   runtime_type = 'io.containerd.gcr.v2'
-  runtime_path = '/usr/local/bin/containerd-shim-gcr-v2'
+  runtime_path = '/opt/gcr/bin/containerd-shim-gcr-v2'
   pod_annotations = ['gcr.dev/*']
 
 # Same runtime, user namespaces enforced for every pod.
 [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr-userns]
   runtime_type = 'io.containerd.gcr.v2'
-  runtime_path = '/usr/local/bin/containerd-shim-gcr-v2'
+  runtime_path = '/opt/gcr/bin/containerd-shim-gcr-v2'
   pod_annotations = ['gcr.dev/*']
   [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr-userns.options]
     UserNamespaces = 'always'

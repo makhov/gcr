@@ -10,6 +10,10 @@ cd "$(dirname "$0")/.."
 
 CLUSTER=${CLUSTER:-gcr-e2e}
 IMAGE=localhost/k0s-gcr:e2e
+# image: a node image with gcr baked in. dropins: the stock k0s image with
+# gcr's containerd drop-in and bind-mounted binaries (needs a k0da with
+# spec.k0s.containerd).
+K8S_NODE=${K8S_NODE:-image}
 ENGINE=${K0DA_RUNTIME:-$(command -v docker >/dev/null && echo docker || echo podman)}
 
 fail() {
@@ -25,15 +29,20 @@ kc() { node k0s kubectl "$@"; }
 cleanup() { [ -n "${KEEP:-}" ] || k0da delete "$CLUSTER" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-echo "== node image"
-"$ENGINE" build -q -f hack/k8s/Containerfile -t "$IMAGE" . >/dev/null
-
-echo "== cluster"
+echo "== cluster ($K8S_NODE)"
 k0da delete "$CLUSTER" >/dev/null 2>&1 || true
-# The node image goes in the cluster config: k0da create --image keeps only
-# the k0s version from it.
-k0da create "$CLUSTER" -c hack/k8s/cluster.yaml --timeout 300s
-[ "$("$ENGINE" inspect "$CLUSTER" --format '{{.Config.Image}}')" = "$IMAGE" ] || fail "node is not running $IMAGE"
+case "$K8S_NODE" in
+image)
+	"$ENGINE" build -q -f hack/k8s/Containerfile -t "$IMAGE" . >/dev/null
+	# The node image goes in the cluster config: released k0da ignores
+	# create --image for the first node.
+	k0da create "$CLUSTER" -c hack/k8s/cluster.yaml --timeout 300s
+	;;
+dropins)
+	k0da create "$CLUSTER" -c hack/k8s/cluster-dropins.yaml --timeout 300s
+	;;
+*) fail "K8S_NODE=$K8S_NODE: want image or dropins" ;;
+esac
 for _ in $(seq 60); do kc get nodes 2>/dev/null | grep -q " Ready" && break; sleep 5; done
 kc get nodes
 
