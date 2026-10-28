@@ -11,8 +11,14 @@
 // Policy: an RTM_NEWLINK with a kind (IFLA_LINKINFO/IFLA_INFO_KIND) must
 // name an allowed link kind, and RTM_NEWQDISC/TCLASS/TFILTER/CHAIN must
 // name an allowed TCA_KIND; messages without a kind, other messages and
-// other netlink protocols pass. A message the program cannot inspect
-// (more batched messages than it reads, malformed) is refused.
+// other netlink protocols pass.
+//
+// The messages are walked as netlink_rcv_skb walks them, so the program
+// judges what the kernel will act on and nothing else: a buffer holds
+// one or more messages and often trailing room the sender did not use
+// (iproute2 sends a 24-byte dump request in a 152-byte buffer), and the
+// kernel stops at the first header that is not a whole message. Only a
+// valid message the program has no budget left to inspect is refused.
 //
 // Build: make bpf (clang -target bpf, CO-RE); the object, next to the Go
 // package, is embedded in the shim.
@@ -56,7 +62,7 @@ struct sk_buff {
 #define EPERM 1
 
 #define MAX_CGROUP_LEVELS 16
-#define MAX_MESSAGES 8
+#define MAX_MESSAGES 32
 #define MAX_ATTRS 48
 #define KIND_LEN 16
 
@@ -153,17 +159,30 @@ static __always_inline int find_attr(const unsigned char *data, __u32 off, __u32
 	return -1;
 }
 
-// kind_allowed says whether the NUL-terminated kind at [off, end) is in
-// map.
+// kind_allowed says whether the kind in the attribute payload [off, end)
+// is in map. The payload is a string of that length, with a trailing NUL
+// only sometimes: iproute2 sends "veth" in four bytes, the kernel's own
+// nla_strcmp compares what the length says. Reading to a NUL instead
+// would run into the next attribute, so the length bounds the read.
 static __always_inline int kind_allowed(const unsigned char *data, __u32 off, __u32 end, void *map)
 {
 	struct kind k;
+	__u32 n = end - off;
 
 	__builtin_memset(&k, 0, sizeof(k));
-	if (off >= end)
-		return 0;
-	if (bpf_probe_read_kernel_str(k.name, KIND_LEN, data + off) < 0)
-		return 0;
+	if (off >= end || n >= KIND_LEN)
+		return 0; // empty, or longer than any kind we allow
+	for (__u32 i = 0; i < KIND_LEN - 1; i++) {
+		char c;
+
+		if (i >= n)
+			break;
+		if (bpf_probe_read_kernel(&c, sizeof(c), data + off + i))
+			return 0;
+		if (!c)
+			break; // a payload that does carry its NUL
+		k.name[i] = c;
+	}
 	return bpf_map_lookup_elem(map, &k) != NULL;
 }
 
@@ -224,17 +243,23 @@ int BPF_PROG(gcr_netlink_send, struct sock *sk, struct sk_buff *skb)
 	data = BPF_CORE_READ(skb, data);
 	for (int i = 0; i < MAX_MESSAGES; i++) {
 		if (off + NLMSG_HDRLEN > len)
-			return 0;
+			return 0; // no room for another header: the kernel stops too
 		if (bpf_probe_read_kernel(&h, sizeof(h), data + off))
 			goto refuse;
 		if (h.nlmsg_len < NLMSG_HDRLEN || off + h.nlmsg_len > len)
-			goto refuse;
+			return 0; // not a whole message: the kernel ignores the rest
 		if (check_message(data, off, h.nlmsg_len, h.nlmsg_type))
 			goto refuse;
 		off += (h.nlmsg_len + 3) & ~3u;
 	}
-	if (off + NLMSG_HDRLEN <= len)
-		goto refuse; // more messages than we inspect
+	// Out of budget: refuse only if what follows is a message the kernel
+	// would act on.
+	if (off + NLMSG_HDRLEN <= len) {
+		if (bpf_probe_read_kernel(&h, sizeof(h), data + off))
+			goto refuse;
+		if (h.nlmsg_len >= NLMSG_HDRLEN && off + h.nlmsg_len <= len)
+			goto refuse;
+	}
 	return 0;
 
 refuse:

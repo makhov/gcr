@@ -286,10 +286,10 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		return nil, errgrpc.ToGRPC(err)
 	}
 	if hardened && cfg.NetlinkPolicy != netpolicy.Off {
-		if p := s.netlinkPolicy(ctx); p != nil {
-			if err := coverCgroup(p, c, ex); err != nil {
-				log.G(ctx).WithError(err).Warn("netlink policy: container not covered")
-			}
+		ex.netPolicy = s.netlinkPolicy(ctx)
+		// A restore has no cgroup before Start; Start covers it then.
+		if err := ex.coverCgroup(c); err != nil {
+			log.G(ctx).WithError(err).Debug("netlink policy: covering the container at start instead")
 		}
 	}
 
@@ -349,6 +349,11 @@ func (s *service) Start(ctx context.Context, r *taskAPI.StartRequest) (*taskAPI.
 	}
 	if err != nil {
 		return nil, errgrpc.ToGRPC(err)
+	}
+	if ex != nil {
+		if err := ex.coverCgroup(c); err != nil {
+			log.G(ctx).WithError(err).Warn("netlink policy: container not covered")
+		}
 	}
 	s.send(&eventstypes.TaskStart{ContainerID: c.ID, Pid: uint32(c.Pid())})
 	return &taskAPI.StartResponse{Pid: uint32(c.Pid())}, nil
@@ -737,19 +742,25 @@ func (s *service) send(evt any) {
 	}
 }
 
-// coverCgroup puts the container's cgroup under the netlink policy.
-func coverCgroup(p *netpolicy.Policy, c *container.Container, ex *extras) error {
+// coverCgroup puts the container's cgroup under the netlink policy, if it
+// has one and the policy is loaded. It is called at create and again at
+// start, since a restored container's cgroup appears only then; covering
+// an already covered one does nothing.
+func (e *extras) coverCgroup(c *container.Container) error {
+	if e.netPolicy == nil || e.cgroupID != 0 {
+		return nil
+	}
 	dir, err := c.CgroupPath()
 	if err != nil {
 		return err
 	}
 	id, err := netpolicy.CgroupID(dir)
 	if err != nil {
+		return fmt.Errorf("cgroup %s: %w", dir, err)
+	}
+	if err := e.netPolicy.Add(id); err != nil {
 		return err
 	}
-	if err := p.Add(id); err != nil {
-		return err
-	}
-	ex.netPolicy, ex.cgroupID = p, id
+	e.cgroupID = id
 	return nil
 }

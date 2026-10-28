@@ -128,7 +128,13 @@ func Load() (*Policy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("netlink policy object: %w", err)
 	}
-	for _, m := range spec.Maps {
+	// Only our own maps are shared between shims; the compiler's (.rodata
+	// and friends) belong to each loaded program.
+	for _, name := range []string{"cgroups", "link_kinds", "tc_kinds", "stats"} {
+		m, ok := spec.Maps[name]
+		if !ok {
+			return nil, fmt.Errorf("netlink policy object has no map %s", name)
+		}
 		m.Pinning = ebpf.PinByName
 	}
 	var objs objects

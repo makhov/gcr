@@ -113,7 +113,7 @@ func TestDockerInDocker(t *testing.T) {
 	// per container, and two containers on it reach each other.
 	t.Run("bridge network", func(t *testing.T) {
 		out, code := sh(`docker run -d --name srv busybox sh -c "nc -l -p 8080 -e echo hi" >/dev/null &&
-			ip=$(docker inspect -f "{{.NetworkSettings.IPAddress}}" srv) && echo "srv $ip" &&
+			ip=$(docker inspect -f "{{.NetworkSettings.Networks.bridge.IPAddress}}" srv) && echo "srv $ip" &&
 			docker run --rm busybox nc -w 3 $ip 8080; rc=$?; docker rm -f srv >/dev/null 2>&1; exit $rc`)
 		if code != 0 || lastLine(out) != "hi" {
 			t.Fatalf("over the bridge (exit %d): %s", code, out)
