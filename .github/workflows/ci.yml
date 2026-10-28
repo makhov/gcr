@@ -46,6 +46,8 @@ jobs:
         run: sudo ./hack/e2e-timetravel.sh
       - name: live migration
         run: sudo ./hack/e2e-migrate.sh
+      - name: hardening
+        run: sudo ./hack/e2e-hardening.sh
       - name: CRI smoke
         run: sudo ./hack/smoke-cri.sh
       - name: CRI conformance (critest)

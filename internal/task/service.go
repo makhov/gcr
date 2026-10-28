@@ -33,6 +33,7 @@ import (
 	"github.com/makhov/gcr/internal/config"
 	"github.com/makhov/gcr/internal/container"
 	"github.com/makhov/gcr/internal/control"
+	"github.com/makhov/gcr/internal/hardening"
 	"github.com/makhov/gcr/internal/migrate"
 	"github.com/makhov/gcr/internal/timetravel"
 	"github.com/makhov/gcr/internal/userns"
@@ -178,6 +179,9 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			}
 			ex.receiver = recv
 			prep.CheckpointFrom = recv.Wait
+		}
+		if why := hardening.Apply(spec, cfg.Hardening); why != "" {
+			log.G(ctx).WithField("reason", why).Debug("not hardened")
 		}
 		policy, err := timetravel.ParsePolicy(spec.Annotations)
 		if err != nil || policy == nil {
