@@ -34,10 +34,12 @@ criu:
 	$(MAKE) -C $(CRIU_SRC) criu
 	sudo install -m 0755 $(CRIU_SRC)/criu/criu /usr/local/sbin/criu
 
+# End-to-end tests (test/e2e, one directory per test) against the
+# installed runtime, each package's binary run as root, one at a time.
+# Pick tests with E2E, e.g. `make test-e2e E2E='-run Landlock ./test/e2e/landlock'`.
+E2E ?= ./test/e2e/...
 test-e2e: install
-	sudo ./hack/e2e.sh
-	sudo ./hack/e2e-timetravel.sh
-	sudo ./hack/e2e-migrate.sh
+	go test -exec sudo -p 1 -count 1 -timeout 30m -tags "e2e $(TAGS)" -v $(E2E)
 
 # Kubernetes on gcr: a k0da (k0s in containers) cluster on the stock k0s
 # image, with gcr bind-mounted and registered by a containerd drop-in.
