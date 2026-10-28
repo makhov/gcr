@@ -1,0 +1,48 @@
+# Dev VM for gcr: Linux >= 6.12, containerd 2.4, CRIU, Go.
+# Usage: limactl start --name=gcr hack/lima.yaml
+base: template:ubuntu
+cpus: 4
+memory: 8GiB
+disk: 40GiB
+mounts:
+  - location: "~/www/gcr"
+    writable: true
+  # Keep the template's read-only home mount from shadowing the repo.
+  - location: "~"
+    mountPoint: "/mnt/home"
+containerd:
+  system: false
+  user: false
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      ARCH=$(dpkg --print-architecture)
+      CONTAINERD_VERSION=2.4.2
+      GO_VERSION=1.27.0
+
+      apt-get update
+      apt-get install -y build-essential pkg-config libseccomp-dev criu jq
+
+      if ! command -v containerd >/dev/null; then
+        curl -fsSL "https://github.com/containerd/containerd/releases/download/v${CONTAINERD_VERSION}/containerd-${CONTAINERD_VERSION}-linux-${ARCH}.tar.gz" \
+          | tar -xz -C /usr/local
+        curl -fsSL -o /etc/systemd/system/containerd.service \
+          https://raw.githubusercontent.com/containerd/containerd/v${CONTAINERD_VERSION}/containerd.service
+      fi
+
+      if [ ! -x /usr/local/go/bin/go ]; then
+        curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" | tar -xz -C /usr/local
+      fi
+      ln -sf /usr/local/go/bin/go /usr/local/bin/go
+
+      mkdir -p /etc/containerd
+      cat > /etc/containerd/config.toml <<'EOF'
+      version = 3
+      [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr]
+        runtime_type = 'io.containerd.gcr.v2'
+      EOF
+      systemctl daemon-reload
+      systemctl enable --now containerd
