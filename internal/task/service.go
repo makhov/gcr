@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -239,6 +240,15 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			}
 			ex.supervisor = sup
 			spec.Linux.Seccomp.ListenerPath = sup.HandoffPath
+			// Once the supervisor has taken a call, the caller waits for
+			// the answer without being interrupted by signals (short of
+			// being killed). Otherwise a signal (Go's preemption SIGURG,
+			// in a nested runc) makes the kernel restart the call after
+			// the supervisor already performed it: a mount done twice,
+			// the second failing with EBUSY.
+			if !slices.Contains(spec.Linux.Seccomp.Flags, specs.LinuxSeccompFlagWaitKillableRecv) {
+				spec.Linux.Seccomp.Flags = append(spec.Linux.Seccomp.Flags, specs.LinuxSeccompFlagWaitKillableRecv)
+			}
 			// Restores hand the restored listeners back to this supervisor.
 			criuOpts = append(criuOpts, sup.CRIUOption())
 		}
