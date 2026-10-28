@@ -34,7 +34,7 @@ kc get nodes
 echo "== workloads"
 "$ENGINE" cp hack/k8s/workloads.yaml "$CLUSTER":/tmp/workloads.yaml
 kc apply -f /tmp/workloads.yaml
-kc wait --for=condition=Ready pod --all --timeout=300s || fail "pods not ready"
+kc wait --for=condition=Ready pod plain hostusers-false gcr-userns enforced --timeout=300s || fail "pods not ready"
 kc get pods -o wide
 
 echo "== exec, exit code, stdin"
@@ -70,5 +70,17 @@ case "$k8s" in " 0 0 "*) fail "hostUsers: false pod has no user namespace";; esa
 case "$own" in " 0 1073"*" 65536") ;; *) fail "gcr.dev/host-users=false pod not in a gcr range";; esac
 [ "$own" = "$side" ] || fail "pod containers have different ranges"
 [ "$(kc exec gcr-userns -c app -- stat -c %u /bin/sh)" = 0 ] || fail "image files not root-owned inside"
+
+echo "== UserNamespaces = always (gcr-userns handler)"
+enforced=$(kc exec enforced -- cat /proc/self/uid_map | tr -s ' ')
+echo "enforced:$enforced"
+case "$enforced" in " 0 1073"*" 65536") ;; *) fail "handler did not enforce a user namespace";; esac
+for _ in $(seq 30); do
+	reason=$(kc get pod enforced-privileged -o jsonpath='{.status.containerStatuses[0].state.waiting.message}')
+	[ -n "$reason" ] && break
+	sleep 2
+done
+echo "privileged on gcr-userns: ${reason:0:160}"
+echo "$reason" | grep -q "cannot run in a user namespace" || fail "privileged pod was not refused"
 
 echo PASS

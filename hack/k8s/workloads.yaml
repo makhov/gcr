@@ -48,3 +48,35 @@ spec:
     - name: sidecar
       image: busybox:1.37
       command: ["sleep", "3600"]
+---
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gcr-userns
+handler: gcr-userns
+---
+# Kubernetes default (host users), overridden by the handler.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: enforced
+spec:
+  runtimeClassName: gcr-userns
+  containers:
+    - name: app
+      image: busybox:1.37
+      command: ["sleep", "3600"]
+---
+# Cannot run in a user namespace: refused, not run as host root.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: enforced-privileged
+spec:
+  runtimeClassName: gcr-userns
+  containers:
+    - name: app
+      image: busybox:1.37
+      command: ["sleep", "3600"]
+      securityContext:
+        privileged: true

@@ -110,6 +110,22 @@ the better path: the pod's network namespace is created inside the user
 namespace), enforced cluster-wide by policy if wanted, or opt a pod into
 gcr's with the annotation `gcr.dev/host-users: "false"`.
 
+To enforce user namespaces regardless of Kubernetes, set the policy on a
+runtime handler (here a second handler, so a RuntimeClass picks it):
+
+```toml
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr-userns]
+  runtime_type = 'io.containerd.gcr.v2'
+  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr-userns.options]
+    UserNamespaces = 'always'   # 'auto' (default) | 'always' | 'never'
+```
+
+`always` ignores `hostUsers` and the opt-out annotation; a container that
+cannot run in a user namespace (privileged, host network/PID/IPC,
+`CAP_NET_ADMIN` in a pod network) is refused rather than run as host root.
+`never` turns gcr's user namespaces off. The options can also live in a
+file: `ConfigPath = '/etc/gcr/gcr.toml'`.
+
 For gcr's own user namespaces:
 
 - Image layers are mounted idmapped, so files look root-owned inside; files

@@ -40,8 +40,8 @@ func TestWanted(t *testing.T) {
 			specs.LinuxNamespace{Type: specs.PIDNamespace}, specs.LinuxNamespace{Type: specs.IPCNamespace}), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, why := Wanted(tc.spec)
-			if got != tc.want {
+			got, why, err := Decide(tc.spec, Auto)
+			if err != nil || got != tc.want {
 				t.Fatalf("Wanted = %v (%s), want %v", got, why, tc.want)
 			}
 		})
@@ -50,7 +50,7 @@ func TestWanted(t *testing.T) {
 	t.Run("privileged", func(t *testing.T) {
 		s := podSpec(nil, ownNamespaces...)
 		s.Process.Capabilities.Bounding = append(s.Process.Capabilities.Bounding, "CAP_SYS_ADMIN")
-		if ok, _ := Wanted(s); ok {
+		if ok, _, _ := Decide(s, Auto); ok {
 			t.Fatal("privileged container got a user namespace")
 		}
 	})
@@ -59,10 +59,32 @@ func TestWanted(t *testing.T) {
 		ns[0].Path = "/var/run/netns/pod"
 		s := podSpec(nil, ns...)
 		s.Process.Capabilities.Bounding = append(s.Process.Capabilities.Bounding, "CAP_NET_ADMIN")
-		if ok, _ := Wanted(s); ok {
+		if ok, _, _ := Decide(s, Auto); ok {
 			t.Fatal("NET_ADMIN container in a pod network got a user namespace")
 		}
 	})
+}
+
+func TestDecideModes(t *testing.T) {
+	pod := podSpec(map[string]string{containerTypeAnnotation: "container", AnnotationHostUsers: "true"}, ownNamespaces...)
+	if ok, _, err := Decide(pod, Always); !ok || err != nil {
+		t.Fatalf("always: pod with opt-out annotation: %v, %v; want a user namespace", ok, err)
+	}
+	if ok, _, _ := Decide(podSpec(nil, ownNamespaces...), Never); ok {
+		t.Fatal("never: got a user namespace")
+	}
+	priv := podSpec(nil, ownNamespaces...)
+	priv.Process.Capabilities.Bounding = append(priv.Process.Capabilities.Bounding, "CAP_SYS_ADMIN")
+	if _, _, err := Decide(priv, Always); !errdefs.IsFailedPrecondition(err) {
+		t.Fatalf("always: privileged container: %v, want refused", err)
+	}
+	own := podSpec(nil, append(slices.Clone(ownNamespaces), specs.LinuxNamespace{Type: specs.UserNamespace})...)
+	if ok, _, err := Decide(own, Always); ok || err != nil {
+		t.Fatalf("always: spec with its own user namespace: %v, %v; want left alone", ok, err)
+	}
+	if err := Mode("sometimes").Validate(); err == nil {
+		t.Fatal("bad mode accepted")
+	}
 }
 
 func TestAllocate(t *testing.T) {

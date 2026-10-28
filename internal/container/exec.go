@@ -83,7 +83,7 @@ func (e *Exec) Start(ctx context.Context) error {
 	}
 	if e.tty != nil {
 		e.tty.setup(proc, e.spec.ConsoleSize)
-	} else if proc.Stdin, proc.Stdout, proc.Stderr, err = e.pipes.attach(int(e.c.idBase)); err != nil {
+	} else if proc.Stdin, proc.Stdout, proc.Stderr, err = e.pipes.attach(e.c.ioOwner); err != nil {
 		return err
 	}
 

@@ -59,37 +59,78 @@ func (r Range) IDMapOption() string {
 	return fmt.Sprintf("0:%d:%d", r.Base, Size)
 }
 
-// Wanted reports whether gcr should add a user namespace to spec, and why
-// not if it should not.
-func Wanted(spec *specs.Spec) (bool, string) {
-	if spec.Annotations[AnnotationHostUsers] == "true" {
-		return false, AnnotationHostUsers + "=true"
+// Mode is the runtime handler's user namespace policy.
+type Mode string
+
+const (
+	// Auto: on by default; Kubernetes pods follow hostUsers unless they
+	// opt in with gcr.dev/host-users=false; any container can opt out
+	// with gcr.dev/host-users=true.
+	Auto Mode = "auto"
+	// Always: every container, whatever Kubernetes or annotations say. A
+	// container that cannot run in one is refused, not run as host root.
+	Always Mode = "always"
+	// Never: gcr adds none (Kubernetes hostUsers: false still works).
+	Never Mode = "never"
+)
+
+func (m Mode) Validate() error {
+	switch m {
+	case Auto, Always, Never:
+		return nil
 	}
-	// Kubernetes decides for pods: hostUsers defaults to true and kubelet
-	// sends it like an explicit true, so gcr cannot override it. Pods get a
-	// user namespace from hostUsers: false (containerd's own), or from gcr
-	// with gcr.dev/host-users=false.
-	if spec.Annotations[containerTypeAnnotation] != "" && spec.Annotations[AnnotationHostUsers] != "false" {
-		return false, "Kubernetes pod without hostUsers: false or " + AnnotationHostUsers + "=false"
+	return fmt.Errorf("UserNamespaces = %q, want auto, always or never: %w", m, errdefs.ErrInvalidArgument)
+}
+
+// Decide reports whether gcr should add a user namespace to spec under
+// mode, and why not if it should not. It fails when mode is Always and the
+// container cannot have one.
+func Decide(spec *specs.Spec, mode Mode) (bool, string, error) {
+	if mode == Never {
+		return false, "UserNamespaces = never", nil
 	}
 	if spec.Linux == nil {
-		return false, "no linux config"
+		return false, "no linux config", nil
 	}
 	for _, ns := range spec.Linux.Namespaces {
 		if ns.Type == specs.UserNamespace {
 			// Kubernetes hostUsers: false, or a caller's own mapping.
-			return false, "spec already has a user namespace"
+			return false, "spec already has a user namespace", nil
 		}
 	}
+	if why := blocker(spec); why != "" {
+		if mode == Always {
+			return false, why, fmt.Errorf("UserNamespaces = always, but the container cannot run in a user namespace: %s: %w", why, errdefs.ErrFailedPrecondition)
+		}
+		return false, why, nil
+	}
+	if mode == Always {
+		return true, "", nil
+	}
+	if spec.Annotations[AnnotationHostUsers] == "true" {
+		return false, AnnotationHostUsers + "=true", nil
+	}
+	// Kubernetes decides for pods: hostUsers defaults to true and kubelet
+	// sends it like an explicit true, so gcr does not override it unless
+	// configured to (Always). Pods get a user namespace from hostUsers:
+	// false (containerd's own), or from gcr with gcr.dev/host-users=false.
+	if spec.Annotations[containerTypeAnnotation] != "" && spec.Annotations[AnnotationHostUsers] != "false" {
+		return false, "Kubernetes pod without hostUsers: false or " + AnnotationHostUsers + "=false", nil
+	}
+	return true, "", nil
+}
+
+// blocker says why spec cannot run in a gcr user namespace, or "".
+func blocker(spec *specs.Spec) string {
 	if p := spec.Process; p != nil && p.Capabilities != nil && slices.Contains(p.Capabilities.Bounding, "CAP_SYS_ADMIN") {
-		return false, "privileged container"
+		return "privileged container"
 	}
 	// CAP_NET_ADMIN means nothing in a pod's network namespace from inside a
-	// user namespace (CRI creates it outside); keep host users for it.
+	// user namespace (CRI creates it outside).
 	if p := spec.Process; p != nil && p.Capabilities != nil && slices.Contains(p.Capabilities.Bounding, "CAP_NET_ADMIN") {
 		for _, ns := range spec.Linux.Namespaces {
 			if ns.Type == specs.NetworkNamespace && ns.Path != "" {
-				return false, "needs CAP_NET_ADMIN in a pod network namespace"
+				return "needs CAP_NET_ADMIN in a pod network namespace"
 			}
 		}
 	}
@@ -97,10 +138,10 @@ func Wanted(spec *specs.Spec) (bool, string) {
 	// IPC namespace: OpenNetwork would otherwise change the host's sysctls.
 	for _, t := range []specs.LinuxNamespaceType{specs.NetworkNamespace, specs.PIDNamespace, specs.IPCNamespace} {
 		if hostNamespace(spec, t) {
-			return false, "shares the host's " + string(t) + " namespace"
+			return "shares the host's " + string(t) + " namespace"
 		}
 	}
-	return true, ""
+	return ""
 }
 
 // hostNamespace reports whether spec uses the host's namespace of type t:
