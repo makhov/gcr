@@ -227,7 +227,7 @@ clear text: use a trusted network.
 | `hack/e2e-hardening.sh` | refused system calls, with hardening on and off | root, containerd, cc |
 | `hack/smoke-cri.sh` | a pod through CRI with crictl | root, containerd, CNI |
 | `critest --runtime-handler gcr` | CRI conformance | root, containerd, CNI |
-| `make test-k8s` | Kubernetes (k0s via k0da) with a gcr RuntimeClass | docker or podman, k0da |
+| `make test-k8s` | Kubernetes (stock k0s via k0da) with a gcr RuntimeClass | docker or podman, k0da >= v0.4.0 |
 
 `sudo hack/ci-setup.sh` prepares a host for the root tests (containerd,
 CNI, cri-tools, the CRIU fork). CI runs all of them on every pull request.

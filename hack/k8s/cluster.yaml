@@ -1,6 +1,16 @@
+# gcr on the stock k0s image: the containerd drop-in registers the runtime
+# and the static binaries are bind-mounted. They go in a directory of their
+# own: libcontainer seals its binary by overlay-mounting the binary's
+# directory, and a file bind-mounted into /usr/local/bin shows up there as
+# the image's empty placeholder.
 apiVersion: k0da.k0sproject.io/v1alpha1
 kind: Cluster
 spec:
+  k0s:
+    version: v1.37.1-k0s.0
+    containerd:
+      - gcr-containerd.toml
   nodes:
     - role: controller
-      image: localhost/k0s-gcr:e2e
+      mounts:
+        - {type: bind, source: ../../bin/static, target: /opt/gcr/bin, options: [ro]}

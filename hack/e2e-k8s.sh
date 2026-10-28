@@ -1,19 +1,15 @@
 #!/bin/bash
-# Kubernetes on gcr: a one-node k0da (k0s in a container) cluster whose node
-# image carries gcr. Checks what kubelet does through it: pods start, exec,
-# logs, stats, and both kinds of user namespaces.
+# Kubernetes on gcr: a one-node k0da (k0s in a container) cluster on the
+# stock k0s image, with gcr's containerd drop-in and its static binaries
+# bind-mounted (hack/k8s/cluster.yaml). Checks what kubelet does through it:
+# pods start, exec, logs, stats, and both kinds of user namespaces.
 #
-# Needs: docker or podman, k0da, and `make static` done. K0DA_RUNTIME picks
-# the engine (default: whatever k0da detects).
+# Needs: docker or podman, k0da >= v0.4.0, and `make static` done.
+# K0DA_RUNTIME picks the engine (default: whatever k0da detects).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CLUSTER=${CLUSTER:-gcr-e2e}
-IMAGE=localhost/k0s-gcr:e2e
-# image: a node image with gcr baked in. dropins: the stock k0s image with
-# gcr's containerd drop-in and bind-mounted binaries (needs a k0da with
-# spec.k0s.containerd).
-K8S_NODE=${K8S_NODE:-image}
 ENGINE=${K0DA_RUNTIME:-$(command -v docker >/dev/null && echo docker || echo podman)}
 
 fail() {
@@ -29,20 +25,9 @@ kc() { node k0s kubectl "$@"; }
 cleanup() { [ -n "${KEEP:-}" ] || k0da delete "$CLUSTER" >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
-echo "== cluster ($K8S_NODE)"
+echo "== cluster"
 k0da delete "$CLUSTER" >/dev/null 2>&1 || true
-case "$K8S_NODE" in
-image)
-	"$ENGINE" build -q -f hack/k8s/Containerfile -t "$IMAGE" . >/dev/null
-	# The node image goes in the cluster config: released k0da ignores
-	# create --image for the first node.
-	k0da create "$CLUSTER" -c hack/k8s/cluster.yaml --timeout 300s
-	;;
-dropins)
-	k0da create "$CLUSTER" -c hack/k8s/cluster-dropins.yaml --timeout 300s
-	;;
-*) fail "K8S_NODE=$K8S_NODE: want image or dropins" ;;
-esac
+k0da create "$CLUSTER" -c hack/k8s/cluster.yaml --timeout 300s
 for _ in $(seq 60); do kc get nodes 2>/dev/null | grep -q " Ready" && break; sleep 5; done
 kc get nodes
 
