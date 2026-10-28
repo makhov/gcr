@@ -34,6 +34,41 @@ const (
 	Off Level = "off"
 )
 
+// NestedUserNamespaces is a runtime handler's policy for user namespaces
+// that containers create themselves (Chrome's sandbox, bubblewrap,
+// rootless podman), in gcr's own profile; a workload's profile decides for
+// itself.
+type NestedUserNamespaces string
+
+const (
+	// Guarded lets containers create user namespaces, and keeps what root
+	// in one reaches small: mounts go through the supervisor's filesystem
+	// allowlist, netfilter (nf_tables, the main source of exploits reached
+	// this way) is refused to containers without CAP_NET_ADMIN, and the
+	// rest of the profile (raw and packet sockets, io_uring, bpf, ...)
+	// holds inside too.
+	Guarded NestedUserNamespaces = "guarded"
+	// Deny refuses CLONE_NEWUSER.
+	Deny NestedUserNamespaces = "deny"
+)
+
+func (n NestedUserNamespaces) Validate() error {
+	switch n {
+	case Guarded, Deny:
+		return nil
+	}
+	return fmt.Errorf("NestedUserNamespaces = %q, want guarded or deny: %w", n, errdefs.ErrInvalidArgument)
+}
+
+// Options is how Apply hardens a container.
+type Options struct {
+	Level                Level
+	NestedUserNamespaces NestedUserNamespaces
+	// Landlocked says the container will be confined with Landlock, which
+	// refuses it any mount: the supervisor must not mount for it either.
+	Landlocked bool
+}
+
 // containerTypeAnnotation is set by CRI on every pod container.
 const containerTypeAnnotation = "io.kubernetes.cri.container-type"
 
@@ -82,7 +117,7 @@ func denyRules() []specs.LinuxSyscall {
 
 // argumentRules deny by argument; they only go into gcr's own profile
 // (see Apply).
-func argumentRules() []specs.LinuxSyscall {
+func argumentRules(nested NestedUserNamespaces, netAdmin bool) []specs.LinuxSyscall {
 	errno := func(names []string, args ...specs.LinuxSeccompArg) specs.LinuxSyscall {
 		return specs.LinuxSyscall{Names: names, Action: specs.ActErrno, ErrnoRet: ptr(eperm), Args: args}
 	}
@@ -93,13 +128,20 @@ func argumentRules() []specs.LinuxSyscall {
 		return specs.LinuxSeccompArg{Index: index, Value: value, Op: specs.OpEqualTo}
 	}
 	rules := []specs.LinuxSyscall{
+		// clone3 passes its flags in memory seccomp cannot read; ENOSYS
+		// makes libc fall back to clone, whose flags it can.
+		{Names: []string{"clone3"}, Action: specs.ActErrno, ErrnoRet: ptr(uint(unix.ENOSYS))},
+	}
+	switch {
+	case nested == Deny:
 		// New user namespaces: the doorway to most of the kernel's
 		// "unprivileged" attack surface. flags is the first argument of
 		// both calls on x86-64 and arm64.
-		errno([]string{"unshare", "clone"}, masked(0, unix.CLONE_NEWUSER, unix.CLONE_NEWUSER)),
-		// clone3 passes its flags in memory seccomp cannot read; ENOSYS
-		// makes libc fall back to clone.
-		{Names: []string{"clone3"}, Action: specs.ActErrno, ErrnoRet: ptr(uint(unix.ENOSYS))},
+		rules = append(rules, errno([]string{"unshare", "clone"}, masked(0, unix.CLONE_NEWUSER, unix.CLONE_NEWUSER)))
+	case !netAdmin:
+		// Root in a nested user namespace owns the network namespaces it
+		// makes; netfilter is what exploits reach that way.
+		rules = append(rules, errno([]string{"socket"}, eq(0, unix.AF_NETLINK), eq(2, unix.NETLINK_NETFILTER)))
 	}
 	// Socket families with little legitimate use in containers and a
 	// record of exploits.
@@ -122,20 +164,26 @@ type Result struct {
 	Supervised []string
 }
 
-// Apply hardens spec at level.
+// Apply hardens spec as o says.
 //
 // Without a workload profile gcr installs its own: allow everything except
-// Denied, Absent and the argument rules. With one, those two are merged in and wins
-// over the profile's own rules for those calls; argument rules are not,
-// because combining them with the profile's own argument conditions for the
-// same calls cannot be done safely in one filter.
+// Denied, Absent and the argument rules (which follow
+// o.NestedUserNamespaces). With one, Denied and Absent are merged in and
+// win over the profile's own rules for those calls; argument rules are
+// not, because combining them with the profile's own argument conditions
+// for the same calls cannot be done safely in one filter.
 //
 // A container that can mount (CAP_SYS_ADMIN, not privileged; in a user
-// namespace that capability is scoped to it) has mount(2) sent to the
-// supervisor, which allows only MountFilesystems, and in a user namespace
+// namespace that capability is scoped to it), or that may make user
+// namespaces in which it can, has mount(2) sent to the supervisor, which
+// allows only MountFilesystems; with CAP_SYS_ADMIN in a user namespace,
 // setns(2) too (see HandleSetns). The caller must then give the filter a
 // listener and Handlers.
-func Apply(spec *specs.Spec, level Level) Result {
+func Apply(spec *specs.Spec, o Options) Result {
+	level := o.Level
+	if o.NestedUserNamespaces == "" {
+		o.NestedUserNamespaces = Guarded
+	}
 	if level == Off {
 		return Result{Skipped: "Hardening = off"}
 	}
@@ -150,11 +198,15 @@ func Apply(spec *specs.Spec, level Level) Result {
 		return Result{Skipped: "Kubernetes pod with seccomp Unconfined"}
 	}
 	var res Result
-	supervise := ocispec.HasCapability(spec, "CAP_SYS_ADMIN")
+	sysAdmin := ocispec.HasCapability(spec, "CAP_SYS_ADMIN")
+	// With nested user namespaces, root in one can mount: the allowlist
+	// applies there too. Landlock refuses a confined container any mount.
+	supervise := sysAdmin ||
+		(sc == nil && o.NestedUserNamespaces == Guarded && !o.Landlocked)
 	userns := inUserNamespace(spec)
 	if supervise {
 		res.Supervised = []string{"mount"}
-		if userns {
+		if userns && sysAdmin {
 			res.Supervised = append(res.Supervised, "setns")
 		}
 	}
@@ -163,7 +215,7 @@ func Apply(spec *specs.Spec, level Level) Result {
 		sc = &specs.LinuxSeccomp{
 			DefaultAction: specs.ActAllow,
 			Architectures: nativeArchitectures(),
-			Syscalls:      append(denyRules(), argumentRules()...),
+			Syscalls:      append(denyRules(), argumentRules(o.NestedUserNamespaces, ocispec.HasCapability(spec, "CAP_NET_ADMIN"))...),
 		}
 		spec.Linux.Seccomp = sc
 	} else {
@@ -174,7 +226,7 @@ func Apply(spec *specs.Spec, level Level) Result {
 		sc.Syscalls = without(sc.Syscalls, res.Supervised)
 		sc.Syscalls = append(sc.Syscalls, specs.LinuxSyscall{Names: slices.Clone(res.Supervised), Action: specs.ActNotify})
 	}
-	if supervise && userns && sc.DefaultAction != specs.ActAllow {
+	if sysAdmin && userns && sc.DefaultAction != specs.ActAllow {
 		// Container runtimes inside need pivot_root, which default
 		// profiles leave out. It only changes the caller's own mount
 		// namespace, which a user namespace's CAP_SYS_ADMIN already

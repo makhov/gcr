@@ -10,13 +10,20 @@
 // "probe mount" (run with CAP_SYS_ADMIN) checks mounts gcr performs for the
 // container by their exact return value: a refusal must be -1 with errno
 // set, and paths through /proc/self must mean the caller.
+//
+// "probe nested" starts a child in new user, mount, PID and network
+// namespaces, as Chrome's sandbox does, and the child reports what root
+// there can do.
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"runtime"
 	"strconv"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -28,9 +35,18 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "true" {
 		return
 	}
-	if len(os.Args) > 1 && os.Args[1] == "mount" {
-		mounts()
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "mount":
+			mounts()
+			return
+		case "nested":
+			nested()
+			return
+		case "nested-child":
+			nestedChild()
+			return
+		}
 	}
 	refused()
 }
@@ -175,4 +191,35 @@ func mounts() {
 	r, errno = mount("/mnt/src", "/proc/self/fd/"+strconv.Itoa(fd), "", unix.MS_BIND)
 	exact("mount_fd_target", r, errno)
 	fmt.Println("mount_fd_target_same", sameFile("/mnt/dst/marker", "/mnt/src/marker"))
+}
+
+func nested() {
+	cmd := exec.Command("/proc/self/exe", "nested-child")
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Cloneflags:  unix.CLONE_NEWUSER | unix.CLONE_NEWNS | unix.CLONE_NEWPID | unix.CLONE_NEWNET,
+		UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
+		GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
+	}
+	if err := cmd.Run(); err != nil {
+		var errno unix.Errno
+		if errors.As(err, &errno) {
+			fmt.Println("nested_userns", unix.ErrnoName(errno))
+		} else {
+			fmt.Println("nested_userns", err)
+		}
+	}
+}
+
+func nestedChild() {
+	fmt.Println("nested_userns OK")
+	r, errno := socket(unix.AF_NETLINK, unix.SOCK_RAW, unix.NETLINK_NETFILTER)
+	report("nested_netfilter", r, errno)
+	r, errno = socket(unix.AF_NETLINK, unix.SOCK_RAW, unix.NETLINK_ROUTE)
+	report("nested_netlink_route", r, errno)
+	_ = os.MkdirAll("/mnt", 0o755)
+	r, errno = mount("none", "/mnt", "ramfs", 0)
+	exact("nested_mount_ramfs", r, errno)
+	r, errno = mount("none", "/mnt", "tmpfs", 0)
+	exact("nested_mount_tmpfs", r, errno)
 }

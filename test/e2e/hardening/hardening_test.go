@@ -7,6 +7,7 @@
 package hardening
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -66,7 +67,7 @@ func TestRefused(t *testing.T) {
 	e := setup(t)
 	got := e.run(t, framework.Spec{})
 	expect(t, got, "EPERM", "io_uring_setup", "bpf", "perf_event_open", "userfaultfd", "fsopen",
-		"open_tree", "init_module", "open_by_handle_at", "unshare_user",
+		"open_tree", "init_module", "open_by_handle_at",
 		"socket_packet", "socket_raw", "socket_vsock", "socket_alg")
 	expect(t, got, "ENOSYS", "clone3", "keyctl")
 	expect(t, got, "OK", "control_socket_tcp", "control_socket_ping", "control_fork")
@@ -124,4 +125,49 @@ func TestSupervisedMountShell(t *testing.T) {
 	// the container.
 	out, _ = ns.Output(framework.UniqueID("mnt"), framework.Spec{Args: []string{"sh", "-c", script}})
 	expect(t, results(out), "EPERM", "tmpfs")
+}
+
+// withoutHostUsernsRestriction turns off Ubuntu's AppArmor restriction on
+// unprivileged user namespaces for the test: it moves a process that makes
+// one to a profile without capabilities, which would decide the outcome
+// instead of gcr (on runc as much: Chrome needs a profile of its own there).
+func withoutHostUsernsRestriction(t *testing.T) {
+	const knob = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
+	old, err := os.ReadFile(knob)
+	if err != nil || strings.TrimSpace(string(old)) == "0" {
+		return
+	}
+	if err := os.WriteFile(knob, []byte("0"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.WriteFile(knob, old, 0o644) })
+}
+
+func TestNestedUserNamespaces(t *testing.T) {
+	withoutHostUsernsRestriction(t)
+	e := setup(t)
+	t.Run("guarded", func(t *testing.T) {
+		got := e.run(t, framework.Spec{}, "nested")
+		expect(t, got, "OK", "nested_userns", "nested_netlink_route")
+		expect(t, got, "EPERM", "nested_netfilter", "nested_mount_ramfs",
+			// Landlock refuses a confined container any mount.
+			"nested_mount_tmpfs")
+	})
+	t.Run("guarded without Landlock", func(t *testing.T) {
+		got := e.run(t, framework.Spec{RuntimeConfig: `Landlock = "off"`}, "nested")
+		expect(t, got, "OK", "nested_userns", "nested_mount_tmpfs")
+		// The supervisor's filesystem allowlist holds in the nested
+		// namespaces.
+		expect(t, got, "EPERM", "nested_netfilter", "nested_mount_ramfs")
+	})
+	// Control: without gcr's filter the same calls go through, so the
+	// refusals above are gcr's.
+	t.Run("hardening off", func(t *testing.T) {
+		got := e.run(t, framework.Spec{RuntimeConfig: "Hardening = \"off\"\nLandlock = \"off\""}, "nested")
+		expect(t, got, "OK", "nested_userns", "nested_netfilter", "nested_mount_ramfs", "nested_mount_tmpfs")
+	})
+	t.Run("deny", func(t *testing.T) {
+		got := e.run(t, framework.Spec{RuntimeConfig: `NestedUserNamespaces = "deny"`}, "nested")
+		expect(t, got, "EPERM", "nested_userns")
+	})
 }
