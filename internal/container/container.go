@@ -28,6 +28,7 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
 
+	"github.com/makhov/gcr/internal/gpu"
 	"github.com/makhov/gcr/internal/userns"
 )
 
@@ -60,11 +61,42 @@ type CreateOpts struct {
 	PrepareSpec func(*specs.Spec) (Prepared, error)
 }
 
+// CRIUConfig is a CRIU configuration file, which the container rewrites
+// before each checkpoint and restore: libcontainer talks to CRIU over RPC,
+// which has no field for many options, and names the file in the
+// org.criu.config label.
+type CRIUConfig struct {
+	// Path is the file; "" keeps libcontainer's defaults.
+	Path string
+	// Options are config lines for every checkpoint and restore,
+	// RestoreOptions for restores only.
+	Options, RestoreOptions []string
+}
+
+// write writes the configuration for a checkpoint, or a restore.
+func (cc CRIUConfig) write(restore bool) error {
+	if cc.Path == "" {
+		return nil
+	}
+	lines := slices.Clone(cc.Options)
+	if restore {
+		lines = append(lines, cc.RestoreOptions...)
+	}
+	if err := os.MkdirAll(filepath.Dir(cc.Path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(cc.Path, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
+}
+
 // Prepared is what PrepareSpec decided.
 type Prepared struct {
-	// CRIUConfig is a CRIU configuration file for this container's
-	// checkpoints and restores; "" keeps libcontainer's default.
-	CRIUConfig string
+	// CRIU configures this container's checkpoints and restores.
+	CRIU CRIUConfig
+	// GPU describes the container's GPUs, nil without; GPUError, why they
+	// could not be described (checkpoints are refused then). Checkpoints
+	// record the GPUs; restores check them against these.
+	GPU      *gpu.Info
+	GPUError error
 	// CheckpointFrom, when set, makes Start wait for it to return a
 	// directory of CRIU images and restore from it (incoming migration).
 	CheckpointFrom func(context.Context) (string, error)
@@ -138,6 +170,9 @@ type Container struct {
 	ioOwner int
 	// cgroupOwner, if not 0, is given the container's cgroup.
 	cgroupOwner int
+	criu        CRIUConfig
+	gpu         *gpu.Info
+	gpuError    error
 	execs       map[string]*Exec
 }
 
@@ -218,8 +253,11 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		// CRIU restores only pipes for stdio; a pty would need --shell-job.
 		return nil, fmt.Errorf("restore and migration need a container without a terminal: %w", errdefs.ErrNotImplemented)
 	}
-	if prep.CRIUConfig != "" {
-		cfg.Labels = append(cfg.Labels, "org.criu.config="+prep.CRIUConfig)
+	if prep.CRIU.Path != "" {
+		cfg.Labels = append(cfg.Labels, "org.criu.config="+prep.CRIU.Path)
+		if err := prep.CRIU.write(false); err != nil {
+			return nil, fmt.Errorf("CRIU config: %w", err)
+		}
 	}
 	lc, err := libcontainer.Create(Root(o.Namespace), o.ID, cfg)
 	if err != nil {
@@ -269,6 +307,9 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		idKey:          prep.IDKey,
 		ioOwner:        max(prep.IDMapRoot, prep.IOOwner),
 		cgroupOwner:    prep.CgroupOwner,
+		criu:           prep.CRIU,
+		gpu:            prep.GPU,
+		gpuError:       prep.GPUError,
 		status:         Created,
 		exited:         make(chan struct{}),
 		onExit:         onExit,
@@ -324,6 +365,17 @@ func (c *Container) Start(ctx context.Context) error {
 
 // restore starts a new incarnation from CRIU images.
 func (c *Container) restore(images string) error {
+	saved, err := gpu.Load(images)
+	if err != nil {
+		return err
+	}
+	if err := gpu.Compatible(saved, c.gpu); err != nil {
+		return fmt.Errorf("restore: %w", err)
+	}
+	if err := c.criu.write(true); err != nil {
+		return fmt.Errorf("CRIU config: %w", err)
+	}
+	defer c.criu.write(false)
 	proc, err := c.initProcess()
 	if err != nil {
 		return err
@@ -359,6 +411,9 @@ func (c *Container) restore(images string) error {
 func (c *Container) Checkpoint(ctx context.Context, opts CheckpointOpts) error {
 	c.op.Lock()
 	defer c.op.Unlock()
+	if c.gpuError != nil {
+		return fmt.Errorf("checkpoint: %w", c.gpuError)
+	}
 	work := opts.WorkPath
 	if work == "" {
 		var err error
@@ -376,6 +431,9 @@ func (c *Container) Checkpoint(ctx context.Context, opts CheckpointOpts) error {
 	})
 	if err != nil {
 		return fmt.Errorf("checkpoint (criu log in %s): %w", work, err)
+	}
+	if err := c.saveGPU(opts.ImagePath); err != nil {
+		return err
 	}
 	// A restore must use the same user namespace range: CRIU restores the
 	// processes into the mapping they were dumped with.
@@ -429,7 +487,10 @@ func (c *Container) Snapshot(ctx context.Context, dir string) (retErr error) {
 	if err != nil {
 		return fmt.Errorf("checkpoint (criu log in %s): %w", work, err)
 	}
-	return c.saveRange(dir)
+	if err := c.saveRange(dir); err != nil {
+		return err
+	}
+	return c.saveGPU(filepath.Join(dir, "images"))
 }
 
 // saveRange records the user namespace range the container maps, which a
@@ -444,6 +505,18 @@ func (c *Container) saveRange(dir string) error {
 	}
 	return os.WriteFile(filepath.Join(dir, userns.KeyFile), []byte(c.idKey), 0o600)
 }
+
+// saveGPU records the container's GPUs with a checkpoint's images.
+func (c *Container) saveGPU(images string) error {
+	if c.gpu == nil {
+		return nil
+	}
+	return c.gpu.Save(images)
+}
+
+// CanPreDump says whether pre-copy rounds can run: CRIU's CUDA plugin
+// cannot pre-dump, so containers with GPUs migrate stop-and-copy.
+func (c *Container) CanPreDump() bool { return c.gpu == nil && c.gpuError == nil }
 
 // Rewind replaces the running processes and writable layer with the ones in
 // dir (written by Snapshot). containerd keeps seeing one running task.
@@ -533,6 +606,9 @@ func (c *Container) isMigrating() bool {
 func (c *Container) PreDump(ctx context.Context, dir, parent, host string, port int) error {
 	c.op.Lock()
 	defer c.op.Unlock()
+	if !c.CanPreDump() {
+		return fmt.Errorf("pre-dump of a container with GPUs: %w", errdefs.ErrNotImplemented)
+	}
 	return c.dump(dir, parent, host, port, true)
 }
 
@@ -541,10 +617,17 @@ func (c *Container) PreDump(ctx context.Context, dir, parent, host string, port 
 func (c *Container) FreezeDump(ctx context.Context, dir, parent, host string, port int) error {
 	c.op.Lock()
 	defer c.op.Unlock()
+	if c.gpuError != nil {
+		return fmt.Errorf("checkpoint: %w", c.gpuError)
+	}
 	if err := c.lc.Pause(); err != nil {
 		return fmt.Errorf("freeze: %w", err)
 	}
 	if err := c.dump(dir, parent, host, port, false); err != nil {
+		_ = c.lc.Resume()
+		return err
+	}
+	if err := c.saveGPU(dir); err != nil {
 		_ = c.lc.Resume()
 		return err
 	}
