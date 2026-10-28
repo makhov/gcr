@@ -38,6 +38,16 @@ func TestDecide(t *testing.T) {
 	if why := Decide(s, Standard); why == "" || s.Annotations[Annotation] != "" {
 		t.Fatalf("container that can mount: %q", why)
 	}
+	s = plain()
+	s.Linux.Namespaces = []specs.LinuxNamespace{{Type: specs.PIDNamespace, Path: "/proc/42/ns/pid"}}
+	if why := Decide(s, Standard); why == "" || s.Annotations[Annotation] != "" {
+		t.Fatalf("debug container: %q", why)
+	}
+	s = plain()
+	s.Linux.Namespaces = []specs.LinuxNamespace{{Type: specs.PIDNamespace}, {Type: specs.NetworkNamespace, Path: "/proc/42/ns/net"}}
+	if why := Decide(s, Standard); why != "" {
+		t.Fatalf("pod container with its own PID namespace left out: %q", why)
+	}
 }
 
 func TestHandledFS(t *testing.T) {

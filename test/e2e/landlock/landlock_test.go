@@ -8,6 +8,7 @@
 package landlock
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -15,9 +16,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/containerd/containerd/v2/pkg/oci"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
 
+	"github.com/makhov/gcr/internal/userns"
 	"github.com/makhov/gcr/test/e2e/framework"
 )
 
@@ -79,12 +82,17 @@ func setup(t *testing.T) *env {
 
 // run starts a container whose init's child tries the leaked descriptor
 // every half second and writes the outcome to /tmp/result.
-func (e *env) run(runtimeConfig string) *framework.Container {
+func (e *env) run(runtimeConfig string, annotations ...string) *framework.Container {
+	a := map[string]string{}
+	for i := 0; i+1 < len(annotations); i += 2 {
+		a[annotations[i]] = annotations[i+1]
+	}
 	return e.ns.Run(framework.UniqueID("landlock"), framework.Spec{
 		Args: []string{"sh", "-c",
 			"while true; do /leak /sock/fd.sock >/tmp/result.new; mv /tmp/result.new /tmp/result; sleep 0.5; done"},
 		Mounts:        e.mounts,
 		RuntimeConfig: runtimeConfig,
+		Annotations:   a,
 	})
 }
 
@@ -123,5 +131,28 @@ func TestLandlock(t *testing.T) {
 	c.CheckpointRestore()
 	if got := result(t, c); got != "EACCES" {
 		t.Fatalf("restored container: %q", got)
+	}
+}
+
+// TestDebugContainer starts a container in another's PID namespace, as
+// kubectl debug --target does: it is left out of Landlock, so it can
+// inspect the confined container's processes.
+func TestDebugContainer(t *testing.T) {
+	// Host users for both: in two user namespaces of their own, the debug
+	// container could not inspect the app whatever Landlock did.
+	e := setup(t)
+	app := e.run("", userns.AnnotationHostUsers, "true")
+	if got := result(t, app); got != "EACCES" {
+		t.Fatalf("app not confined: %q", got)
+	}
+	out, code := e.ns.Output(framework.UniqueID("debug"), framework.Spec{
+		Annotations: map[string]string{userns.AnnotationHostUsers: "true"},
+		Args: []string{"sh", "-c", "tr '\\0' '\\n' </proc/1/environ | grep -c PATH="},
+		SpecOpts: []oci.SpecOpts{oci.WithLinuxNamespace(specs.LinuxNamespace{
+			Type: specs.PIDNamespace, Path: fmt.Sprintf("/proc/%d/ns/pid", app.Task.Pid()),
+		})},
+	})
+	if code != 0 {
+		t.Fatalf("debug container cannot read the app's /proc/1/environ (exit %d): %s", code, out)
 	}
 }
