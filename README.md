@@ -194,7 +194,7 @@ profile (`RuntimeDefault`, `Localhost`) get the denied set merged in. Set
 the policy per runtime handler, in the runtime's options:
 `Hardening = 'standard'` (default), `'always'` (also unconfined pods), or
 `'off'`. A workload cannot weaken it.
-`hack/e2e-hardening.sh` probes every refused call.
+`test/e2e/hardening` probes every refused call.
 
 ### Landlock
 
@@ -226,7 +226,7 @@ on internal filesystems Landlock does not restrict.
 
 Set it per runtime handler: `Landlock = 'standard'` (default) or `'off'`.
 Kernels without Landlock run containers unconfined.
-`hack/e2e-landlock.sh` passes a host directory descriptor into a container
+`test/e2e/landlock` passes a host directory descriptor into a container
 and checks it leads nowhere, before and after a restore.
 
 ### Docker-in-Docker
@@ -255,7 +255,7 @@ dockerd runs in a gcr pod with a user namespace without being privileged:
 
 Nested `docker run` and `docker build` work. Nested `--privileged` does not:
 the pod's `/sys` is read-only, and the kernel refuses a new read-write
-sysfs under it. `hack/e2e-dind.sh` runs it all with crictl.
+sysfs under it. `test/e2e/dind` runs it all through CRI.
 
 ## Time travel
 
@@ -307,18 +307,28 @@ clear text: use a trusted network.
 | | What | Needs |
 | --- | --- | --- |
 | `make test` | unit tests | Linux, libseccomp |
-| `hack/e2e.sh` | checkpoint/restore through containerd | root, containerd, CRIU |
-| `hack/e2e-timetravel.sh` | timeline and rewind | root, containerd, CRIU fork |
-| `hack/e2e-migrate.sh` | live migration (pre-copy on x86) | root, containerd, CRIU fork |
-| `hack/e2e-hardening.sh` | refused system calls, with hardening on and off; supervised mounts | root, containerd, cc |
-| `hack/e2e-landlock.sh` | a leaked host descriptor, with Landlock on and off, across a restore | root, containerd, CRIU fork, cc, python3 |
-| `hack/e2e-dind.sh` | Docker-in-Docker, unprivileged, in a user namespace | root, containerd, CNI, network |
-| `hack/smoke-cri.sh` | a pod through CRI with crictl | root, containerd, CNI |
+| `make test-e2e` | end-to-end tests in `test/e2e`, below | root (via sudo), containerd, CNI, the CRIU fork, network |
 | `critest --runtime-handler gcr` | CRI conformance | root, containerd, CNI |
 | `make test-k8s` | Kubernetes (stock k0s via k0da) with a gcr RuntimeClass | docker or podman, k0da >= v0.4.0 |
 
-`sudo hack/ci-setup.sh` prepares a host for the root tests (containerd,
-CNI, cri-tools, the CRIU fork). CI runs all of them on every pull request.
+The end-to-end tests are Go tests behind the `e2e` build tag, one directory
+per test, sharing a harness in `test/e2e/framework` (containerd's client,
+CRI, checkpoint/restore, static helper programs to run in containers):
+
+| `test/e2e/` | What |
+| --- | --- |
+| `checkpoint` | a counter carries on after checkpoint/restore, in the same user namespace |
+| `timetravel` | a timeline, a rewind; the counter, the filesystem and the recording carry on from the point |
+| `migrate` | live migration between containerd namespaces (pre-copy on x86); a refused one leaves the source running |
+| `hardening` | refused system calls with hardening on and off; supervised mounts, by exact return value |
+| `landlock` | a leaked host descriptor, with Landlock on and off, across a restore |
+| `dind` | Docker-in-Docker, unprivileged, in a user namespace |
+| `cri` | a pod through CRI: exec, exit codes, logs, updates, stats, user namespace |
+
+`make test-e2e` runs them all, each package's test binary as root, one
+package at a time; `make test-e2e E2E='-run Landlock ./test/e2e/landlock'`
+picks some. `sudo hack/ci-setup.sh` prepares a host for them (containerd,
+CNI, cri-tools, the CRIU fork). CI runs everything on every pull request.
 
 ## Develop
 
@@ -330,12 +340,6 @@ make vm T=criu                            # once: build and install the CRIU for
 make vm T=test-e2e                        # build, install, run the end-to-end tests
 ```
 
-`hack/e2e.sh` checkpoints and restores a counter with `ctr`;
-`hack/e2e-timetravel.sh` records a timeline, rewinds it, and checks the
-counter, the filesystem and the recording all carry on from the point;
-`hack/e2e-migrate.sh` migrates a counter between two containerd namespaces
-and checks a refused migration leaves the source running;
-`hack/smoke-cri.sh` runs a pod through CRI (exec, terminal, logs, stats,
-update, user namespace). For the CRI conformance suite:
+For the CRI conformance suite:
 `critest --runtime-handler gcr` (needs CNI plugins and the `gcr` runtime in
 containerd's CRI config).

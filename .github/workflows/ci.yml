@@ -40,20 +40,8 @@ jobs:
       - run: sudo ./hack/ci-setup.sh
       - run: make build && sudo make install
       - run: sudo systemctl restart containerd
-      - name: checkpoint/restore
-        run: sudo ./hack/e2e.sh
-      - name: time travel
-        run: sudo ./hack/e2e-timetravel.sh
-      - name: live migration
-        run: sudo ./hack/e2e-migrate.sh
-      - name: hardening
-        run: sudo ./hack/e2e-hardening.sh
-      - name: Docker-in-Docker
-        run: sudo ./hack/e2e-dind.sh
-      - name: Landlock
-        run: sudo ./hack/e2e-landlock.sh
-      - name: CRI smoke
-        run: sudo ./hack/smoke-cri.sh
+      - name: end-to-end tests
+        run: make test-e2e
       - name: CRI conformance (critest)
         run: cd /tmp && sudo critest --runtime-handler gcr --ginkgo.no-color --ginkgo.timeout 40m
       - name: logs
