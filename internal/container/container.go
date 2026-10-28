@@ -51,10 +51,19 @@ type CreateOpts struct {
 	// Checkpoint is a directory of CRIU images; when set, Start restores
 	// from it instead of running the spec's process.
 	Checkpoint string
-	// PrepareSpec may change the spec before it is converted. It returns a
-	// CRIU configuration file to use for this container's checkpoints and
-	// restores, or "" for libcontainer's default.
-	PrepareSpec func(*specs.Spec) (criuConfig string, err error)
+	// PrepareSpec may change the spec before it is converted, and decides
+	// the rest of the container's setup from it.
+	PrepareSpec func(*specs.Spec) (Prepared, error)
+}
+
+// Prepared is what PrepareSpec decided.
+type Prepared struct {
+	// CRIUConfig is a CRIU configuration file for this container's
+	// checkpoints and restores; "" keeps libcontainer's default.
+	CRIUConfig string
+	// CheckpointFrom, when set, makes Start wait for it to return a
+	// directory of CRIU images and restore from it (incoming migration).
+	CheckpointFrom func(context.Context) (string, error)
 }
 
 type CheckpointOpts struct {
@@ -73,9 +82,10 @@ type Container struct {
 	namespace  string
 	cfg        *configs.Config
 	rootfs     []mount.Mount
-	spec       *specs.Spec
-	checkpoint string
-	io         *stdio
+	spec           *specs.Spec
+	checkpoint     string
+	checkpointFrom func(context.Context) (string, error)
+	io             *stdio
 
 	// op serializes operations that replace or freeze the processes
 	// (snapshot, rewind) against each other and against delete.
@@ -93,6 +103,8 @@ type Container struct {
 	// is then reported on replaced instead of to containerd.
 	replacing bool
 	replaced  chan struct{}
+	// migrating blocks snapshots and rewinds while a migration dumps.
+	migrating bool
 }
 
 // Root returns the libcontainer state directory for a containerd namespace.
@@ -113,9 +125,9 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	if spec.Process.Terminal {
 		return nil, fmt.Errorf("terminal: %w", errdefs.ErrNotImplemented)
 	}
-	criuConfig := ""
+	var prep Prepared
 	if o.PrepareSpec != nil {
-		if criuConfig, err = o.PrepareSpec(spec); err != nil {
+		if prep, err = o.PrepareSpec(spec); err != nil {
 			return nil, err
 		}
 	}
@@ -145,8 +157,8 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	if err != nil {
 		return nil, fmt.Errorf("convert spec: %w", err)
 	}
-	if criuConfig != "" {
-		cfg.Labels = append(cfg.Labels, "org.criu.config="+criuConfig)
+	if prep.CRIUConfig != "" {
+		cfg.Labels = append(cfg.Labels, "org.criu.config="+prep.CRIUConfig)
 	}
 	lc, err := libcontainer.Create(Root(o.Namespace), o.ID, cfg)
 	if err != nil {
@@ -176,13 +188,14 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		rootfs:     o.Rootfs,
 		lc:         lc,
 		spec:       spec,
-		checkpoint: o.Checkpoint,
-		io:         io,
+		checkpoint:     o.Checkpoint,
+		checkpointFrom: prep.CheckpointFrom,
+		io:             io,
 		status:     Created,
 		exited:     make(chan struct{}),
 		onExit:     onExit,
 	}
-	if o.Checkpoint != "" {
+	if o.Checkpoint != "" || prep.CheckpointFrom != nil {
 		// Restore happens in Start, the way containerd expects.
 		return c, nil
 	}
@@ -202,6 +215,13 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 
 // Start runs the created container, or restores it from its checkpoint.
 func (c *Container) Start(ctx context.Context) error {
+	if c.checkpointFrom != nil {
+		dir, err := c.checkpointFrom(ctx)
+		if err != nil {
+			return err
+		}
+		c.checkpoint = dir
+	}
 	if c.checkpoint == "" {
 		if err := c.lc.Exec(); err != nil {
 			return fmt.Errorf("exec: %w", err)
@@ -282,10 +302,10 @@ func (c *Container) Running() bool {
 func (c *Container) Snapshot(ctx context.Context, dir string) (retErr error) {
 	c.op.Lock()
 	defer c.op.Unlock()
-	if !c.Running() {
-		return fmt.Errorf("container is not running: %w", errdefs.ErrFailedPrecondition)
+	if !c.Running() || c.isMigrating() {
+		return fmt.Errorf("container is not running or is migrating: %w", errdefs.ErrFailedPrecondition)
 	}
-	upper, err := c.upperDir()
+	upper, err := c.UpperDir()
 	if err != nil {
 		return err
 	}
@@ -320,10 +340,10 @@ func (c *Container) Snapshot(ctx context.Context, dir string) (retErr error) {
 func (c *Container) Rewind(ctx context.Context, dir string) error {
 	c.op.Lock()
 	defer c.op.Unlock()
-	if !c.Running() {
-		return fmt.Errorf("container is not running: %w", errdefs.ErrFailedPrecondition)
+	if !c.Running() || c.isMigrating() {
+		return fmt.Errorf("container is not running or is migrating: %w", errdefs.ErrFailedPrecondition)
 	}
-	upper, err := c.upperDir()
+	upper, err := c.UpperDir()
 	if err != nil {
 		return err
 	}
@@ -381,8 +401,105 @@ func (c *Container) replace(upper, dir string) error {
 	return c.restore(filepath.Join(dir, "images"))
 }
 
-// upperDir returns the writable layer of an overlay rootfs.
-func (c *Container) upperDir() (string, error) {
+// SetMigrating marks the container as being migrated out (true) or not.
+func (c *Container) SetMigrating(on bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if on && c.migrating {
+		return fmt.Errorf("already migrating: %w", errdefs.ErrFailedPrecondition)
+	}
+	c.migrating = on
+	return nil
+}
+
+func (c *Container) isMigrating() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.migrating
+}
+
+// PreDump sends memory dirtied since parent to a CRIU page server while
+// the container keeps running (a pre-copy round).
+func (c *Container) PreDump(ctx context.Context, dir, parent, host string, port int) error {
+	c.op.Lock()
+	defer c.op.Unlock()
+	return c.dump(dir, parent, host, port, true)
+}
+
+// FreezeDump freezes the container and dumps it to a page server and dir.
+// The container stays frozen: Thaw on failure, Stop once the target runs.
+func (c *Container) FreezeDump(ctx context.Context, dir, parent, host string, port int) error {
+	c.op.Lock()
+	defer c.op.Unlock()
+	if err := c.lc.Pause(); err != nil {
+		return fmt.Errorf("freeze: %w", err)
+	}
+	if err := c.dump(dir, parent, host, port, false); err != nil {
+		_ = c.lc.Resume()
+		return err
+	}
+	return nil
+}
+
+func (c *Container) dump(dir, parent, host string, port int, pre bool) error {
+	err := c.lc.Checkpoint(&libcontainer.CriuOpts{
+		ImagesDirectory: dir,
+		WorkDirectory:   dir,
+		ParentImage:     parent,
+		PreDump:         pre,
+		LeaveRunning:    !pre,
+		PageServer:      libcontainer.CriuPageServerInfo{Address: host, Port: int32(port)},
+	})
+	if err != nil {
+		return fmt.Errorf("criu dump: %w%s", err, criuErrors(filepath.Join(dir, "dump.log")))
+	}
+	return nil
+}
+
+// criuErrors returns the error lines of a CRIU log, for error messages.
+func criuErrors(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var errs []string
+	for _, l := range strings.Split(string(b), "\n") {
+		if strings.Contains(l, "Error (") {
+			errs = append(errs, strings.TrimSpace(l))
+		}
+	}
+	if len(errs) > 5 {
+		errs = errs[len(errs)-5:]
+	}
+	if len(errs) == 0 {
+		return " (log: " + path + ")"
+	}
+	return ": " + strings.Join(errs, "; ")
+}
+
+// Thaw lets a container frozen by FreezeDump continue.
+func (c *Container) Thaw() error {
+	c.op.Lock()
+	defer c.op.Unlock()
+	return c.lc.Resume()
+}
+
+// Stop kills a container frozen by FreezeDump; containerd sees it exit.
+func (c *Container) Stop() error {
+	c.op.Lock()
+	defer c.op.Unlock()
+	if err := c.lc.Signal(unix.SIGKILL); err != nil && !errors.Is(err, libcontainer.ErrNotRunning) {
+		return err
+	}
+	// Thaw so the killed processes can exit; they may already be gone.
+	if err := c.lc.Resume(); err != nil && !errors.Is(err, libcontainer.ErrNotPaused) {
+		return err
+	}
+	return nil
+}
+
+// UpperDir returns the writable layer of an overlay rootfs.
+func (c *Container) UpperDir() (string, error) {
 	for _, m := range c.rootfs {
 		if m.Type != "overlay" {
 			continue

@@ -1,10 +1,11 @@
 //go:build linux
 
 // Package control is the shim's per-container control socket for features
-// outside containerd's task API (the time-travel timeline), and its client.
+// outside containerd's task API (time travel, migration), and its client.
 package control
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/containerd/errdefs"
 
+	"github.com/makhov/gcr/internal/migrate"
 	"github.com/makhov/gcr/internal/timetravel"
 )
 
@@ -37,12 +39,23 @@ type Timeline interface {
 	Rewind(ctx context.Context, point int) error
 }
 
+// Handlers are what one container supports; nil ones answer 404.
+type Handlers struct {
+	Timeline Timeline
+	Migrate  func(ctx context.Context, target, token string) (migrate.Result, error)
+}
+
+type migrateRequest struct {
+	Target string `json:"target"`
+	Token  string `json:"token"`
+}
+
 type Server struct {
 	path string
 	srv  *http.Server
 }
 
-func Serve(ctx context.Context, namespace, id string, tl Timeline) (*Server, error) {
+func Serve(ctx context.Context, namespace, id string, h Handlers) (*Server, error) {
 	path := SocketPath(namespace, id)
 	if err := os.MkdirAll(socketDir, 0o700); err != nil {
 		return nil, err
@@ -53,26 +66,61 @@ func Serve(ctx context.Context, namespace, id string, tl Timeline) (*Server, err
 		return nil, err
 	}
 	mux := http.NewServeMux()
+	noTimeline := fmt.Sprintf("time travel is off (start the container with %s)", timetravel.AnnotationTrigger)
 	mux.HandleFunc("GET /timeline", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(tl.Points())
+		if h.Timeline == nil {
+			http.Error(w, noTimeline, http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(h.Timeline.Points())
 	})
 	mux.HandleFunc("POST /rewind/{point}", func(w http.ResponseWriter, r *http.Request) {
+		if h.Timeline == nil {
+			http.Error(w, noTimeline, http.StatusNotFound)
+			return
+		}
 		point, err := strconv.Atoi(r.PathValue("point"))
 		if err != nil {
 			http.Error(w, "bad point id", http.StatusBadRequest)
 			return
 		}
-		if err := tl.Rewind(context.WithoutCancel(ctx), point); err != nil {
-			code := http.StatusInternalServerError
-			if errdefs.IsNotFound(err) {
-				code = http.StatusNotFound
-			}
-			http.Error(w, err.Error(), code)
+		if err := h.Timeline.Rewind(context.WithoutCancel(ctx), point); err != nil {
+			httpError(w, err)
 		}
+	})
+	mux.HandleFunc("POST /migrate", func(w http.ResponseWriter, r *http.Request) {
+		if h.Migrate == nil {
+			http.Error(w, "migration is not supported for this container", http.StatusNotFound)
+			return
+		}
+		var req migrateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Target == "" {
+			http.Error(w, "need target", http.StatusBadRequest)
+			return
+		}
+		// Not tied to the client's connection: a half-done migration must
+		// run its own cleanup.
+		res, err := h.Migrate(context.WithoutCancel(ctx), req.Target, req.Token)
+		if err != nil {
+			httpError(w, err)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(res)
 	})
 	s := &Server{path: path, srv: &http.Server{Handler: mux}}
 	go func() { _ = s.srv.Serve(ln) }()
 	return s, nil
+}
+
+func httpError(w http.ResponseWriter, err error) {
+	code := http.StatusInternalServerError
+	switch {
+	case errdefs.IsNotFound(err):
+		code = http.StatusNotFound
+	case errdefs.IsFailedPrecondition(err), errdefs.IsInvalidArgument(err):
+		code = http.StatusConflict
+	}
+	http.Error(w, err.Error(), code)
 }
 
 func (s *Server) Close() {
@@ -96,16 +144,30 @@ func NewClient(namespace, id string) *Client {
 
 func (c *Client) Timeline(ctx context.Context) ([]timetravel.Point, error) {
 	var points []timetravel.Point
-	err := c.do(ctx, http.MethodGet, "/timeline", &points)
+	err := c.do(ctx, http.MethodGet, "/timeline", nil, &points)
 	return points, err
 }
 
 func (c *Client) Rewind(ctx context.Context, point int) error {
-	return c.do(ctx, http.MethodPost, fmt.Sprintf("/rewind/%d", point), nil)
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/rewind/%d", point), nil, nil)
 }
 
-func (c *Client) do(ctx context.Context, method, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, method, "http://gcr"+path, nil)
+func (c *Client) Migrate(ctx context.Context, target, token string) (migrate.Result, error) {
+	var res migrate.Result
+	err := c.do(ctx, http.MethodPost, "/migrate", migrateRequest{Target: target, Token: token}, &res)
+	return res, err
+}
+
+func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
+	var body io.Reader
+	if in != nil {
+		b, err := json.Marshal(in)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, "http://gcr"+path, body)
 	if err != nil {
 		return err
 	}
@@ -113,8 +175,7 @@ func (c *Client) do(ctx context.Context, method, path string, out any) error {
 	if err != nil {
 		var opErr *net.OpError
 		if errors.As(err, &opErr) {
-			return fmt.Errorf("no time-travel control socket (is the container running with %s?): %w",
-				timetravel.AnnotationTrigger, err)
+			return fmt.Errorf("no control socket for this container (is it running under gcr?): %w", err)
 		}
 		return err
 	}

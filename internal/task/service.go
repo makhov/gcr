@@ -32,11 +32,13 @@ import (
 
 	"github.com/makhov/gcr/internal/container"
 	"github.com/makhov/gcr/internal/control"
+	"github.com/makhov/gcr/internal/migrate"
 	"github.com/makhov/gcr/internal/timetravel"
 )
 
-// timeTravelState holds time-travel timelines, per namespace and container.
-const timeTravelState = "/var/lib/gcr"
+// stateRoot holds per-container state (timelines, migration rounds) by
+// namespace and container id.
+const stateRoot = "/var/lib/gcr"
 
 var (
 	_     = shim.TTRPCService(&service{})
@@ -50,20 +52,28 @@ type service struct {
 
 	mu         sync.Mutex
 	containers map[string]*container.Container
-	timeTravel map[string]*timeTravel
+	extras     map[string]*extras
 }
 
-// timeTravel is the time-travel state of one container.
-type timeTravel struct {
-	recorder *timetravel.Recorder
+// extras is what a container has beyond containerd's task API.
+type extras struct {
+	recorder *timetravel.Recorder // time travel, if enabled
+	receiver *migrate.Receiver    // incoming migration, if requested
 	control  *control.Server
+	stateDir string
 }
 
-func (t *timeTravel) Close() {
-	if t.control != nil {
-		t.control.Close()
+func (e *extras) Close() {
+	if e.control != nil {
+		e.control.Close()
 	}
-	_ = t.recorder.Close()
+	if e.receiver != nil {
+		e.receiver.Close()
+	}
+	if e.recorder != nil {
+		_ = e.recorder.Close()
+	}
+	_ = os.RemoveAll(e.stateDir)
 }
 
 func NewTaskService(ctx context.Context, publisher shim.Publisher, sd shutdown.Service) (taskAPI.TTRPCTaskService, error) {
@@ -72,7 +82,7 @@ func NewTaskService(ctx context.Context, publisher shim.Publisher, sd shutdown.S
 		publisher:  publisher,
 		shutdown:   sd,
 		containers: make(map[string]*container.Container),
-		timeTravel: make(map[string]*timeTravel),
+		extras:     make(map[string]*extras),
 	}
 	sd.RegisterCallback(func(context.Context) error {
 		publisher.Close()
@@ -99,8 +109,9 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		rootfs = append(rootfs, mount.Mount{Type: m.Type, Source: m.Source, Target: m.Target, Options: m.Options})
 	}
 
-	var tt *timeTravel
-	c, err := container.Create(ctx, container.CreateOpts{
+	ex := &extras{stateDir: filepath.Join(stateRoot, ns, r.ID)}
+	var c *container.Container
+	opts := container.CreateOpts{
 		ID:         r.ID,
 		Namespace:  ns,
 		Bundle:     r.Bundle,
@@ -109,40 +120,55 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		Stdout:     r.Stdout,
 		Stderr:     r.Stderr,
 		Checkpoint: r.Checkpoint,
-		PrepareSpec: func(spec *specs.Spec) (string, error) {
-			policy, err := timetravel.ParsePolicy(spec.Annotations)
-			if err != nil || policy == nil {
-				return "", err
-			}
-			rec, err := timetravel.NewRecorder(s.ctx, policy,
-				filepath.Join(timeTravelState, ns, r.ID),
-				strings.TrimSuffix(control.SocketPath(ns, r.ID), ".sock")+".tt")
+	}
+	opts.PrepareSpec = func(spec *specs.Spec) (container.Prepared, error) {
+		var prep container.Prepared
+		if addr, ok := spec.Annotations[migrate.AnnotationIn]; ok {
+			recv, err := migrate.NewReceiver(s.ctx, addr, spec.Annotations[migrate.AnnotationToken],
+				filepath.Join(ex.stateDir, "migrate-in"),
+				func() (string, error) { return c.UpperDir() })
 			if err != nil {
-				return "", fmt.Errorf("time travel: %w", err)
+				return prep, fmt.Errorf("migration receiver: %w", err)
 			}
-			tt = &timeTravel{recorder: rec}
-			policy.AddTrigger(spec, rec.HandoffPath())
-			return rec.CRIUConfig(), nil
-		},
-	}, s.handleExit)
-	if err != nil {
-		if tt != nil {
-			tt.Close()
+			ex.receiver = recv
+			prep.CheckpointFrom = recv.Wait
 		}
+		policy, err := timetravel.ParsePolicy(spec.Annotations)
+		if err != nil || policy == nil {
+			return prep, err
+		}
+		rec, err := timetravel.NewRecorder(s.ctx, policy, filepath.Join(ex.stateDir, "time-travel"),
+			strings.TrimSuffix(control.SocketPath(ns, r.ID), ".sock")+".tt")
+		if err != nil {
+			return prep, fmt.Errorf("time travel: %w", err)
+		}
+		ex.recorder = rec
+		policy.AddTrigger(spec, rec.HandoffPath())
+		prep.CRIUConfig = rec.CRIUConfig()
+		return prep, nil
+	}
+	c, err = container.Create(ctx, opts, s.handleExit)
+	if err != nil {
+		ex.Close()
 		return nil, errgrpc.ToGRPC(err)
 	}
-	if tt != nil {
-		tt.recorder.Attach(c)
-		if tt.control, err = control.Serve(s.ctx, ns, r.ID, tt.recorder); err != nil {
-			log.G(ctx).WithError(err).Error("time travel: control socket")
-		}
+
+	h := control.Handlers{
+		Migrate: func(ctx context.Context, target, token string) (migrate.Result, error) {
+			return s.migrateOut(ctx, c, ex, target, token)
+		},
+	}
+	if ex.recorder != nil {
+		ex.recorder.Attach(c)
+		h.Timeline = ex.recorder
+	}
+	if ex.control, err = control.Serve(s.ctx, ns, r.ID, h); err != nil {
+		log.G(ctx).WithError(err).Error("control socket")
 	}
 
 	s.mu.Lock()
 	s.containers[r.ID] = c
-	if tt != nil {
-		s.timeTravel[r.ID] = tt
-	}
+	s.extras[r.ID] = ex
 	s.mu.Unlock()
 
 	s.send(&eventstypes.TaskCreate{
@@ -161,7 +187,16 @@ func (s *service) Start(ctx context.Context, r *taskAPI.StartRequest) (*taskAPI.
 	if err != nil {
 		return nil, err
 	}
-	if err := c.Start(ctx); err != nil {
+	err = c.Start(ctx)
+	s.mu.Lock()
+	ex := s.extras[r.ID]
+	s.mu.Unlock()
+	if ex != nil && ex.receiver != nil {
+		// Tell the migration source how the restore went; it keeps its copy
+		// running unless this succeeded.
+		ex.receiver.Done(err)
+	}
+	if err != nil {
 		return nil, errgrpc.ToGRPC(err)
 	}
 	s.send(&eventstypes.TaskStart{ContainerID: c.ID, Pid: uint32(c.Pid())})
@@ -178,11 +213,11 @@ func (s *service) Delete(ctx context.Context, r *taskAPI.DeleteRequest) (*taskAP
 	}
 	s.mu.Lock()
 	delete(s.containers, r.ID)
-	tt := s.timeTravel[r.ID]
-	delete(s.timeTravel, r.ID)
+	ex := s.extras[r.ID]
+	delete(s.extras, r.ID)
 	s.mu.Unlock()
-	if tt != nil {
-		tt.Close()
+	if ex != nil {
+		ex.Close()
 	}
 
 	status, at := c.Exit()
@@ -355,6 +390,25 @@ func (s *service) Update(ctx context.Context, r *taskAPI.UpdateTaskRequest) (*pt
 
 func (s *service) Stats(ctx context.Context, r *taskAPI.StatsRequest) (*taskAPI.StatsResponse, error) {
 	return nil, errgrpc.ToGRPCf(errdefs.ErrNotImplemented, "stats")
+}
+
+// migrateOut sends container c to the receiver at target.
+func (s *service) migrateOut(ctx context.Context, c *container.Container, ex *extras, target, token string) (migrate.Result, error) {
+	if !c.Running() {
+		return migrate.Result{}, fmt.Errorf("container is not running: %w", errdefs.ErrFailedPrecondition)
+	}
+	if err := c.SetMigrating(true); err != nil {
+		return migrate.Result{}, err
+	}
+	defer c.SetMigrating(false)
+	work := filepath.Join(ex.stateDir, "migrate-out")
+	_ = os.RemoveAll(work)
+	res, err := migrate.Send(ctx, c, target, token, work)
+	if err == nil {
+		// Kept on failure: it holds the CRIU logs.
+		_ = os.RemoveAll(work)
+	}
+	return res, err
 }
 
 func (s *service) get(id, execID string) (*container.Container, error) {

@@ -28,6 +28,7 @@ criu:
 test-e2e: install
 	sudo ./hack/e2e.sh
 	sudo ./hack/e2e-timetravel.sh
+	sudo ./hack/e2e-migrate.sh
 
 # From macOS: run any target inside the VM, e.g. `make vm T=test-e2e`.
 vm:
