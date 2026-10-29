@@ -50,8 +50,9 @@ executing a runc binary per operation. gcr's shim is the bigger binary
 ## Requirements
 
 - Linux 6.12+ with cgroup v2, run as root
-- containerd 2.4 (2.2 cannot start the shim: it predates the shim
-  bootstrap API gcr is built against)
+- containerd 2.3 or later (tested with 2.4.2). gcr is built on
+  containerd 2.4's shim library, which only speaks the shim bootstrap
+  protocol containerd 2.3 introduced; containerd 2.2 cannot start it.
 - libseccomp (runtime and, to build, headers)
 - CRIU for checkpoint/restore; time travel needs the fork with
   `--seccomp-notify-socket` (see below), and keeping Landlock across a

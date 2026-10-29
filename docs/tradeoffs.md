@@ -220,7 +220,7 @@ tests check that each refused call is refused, by return value.
 
 ### Platform and maturity
 
-- **Linux 6.12+ with cgroup v2, run as root;** containerd 2.4. No rootless
+- **Linux 6.12+ with cgroup v2, run as root;** containerd 2.3 or later. No rootless
   mode.
 - **Developed on arm64 (Linux 7.0); CI runs on x86 (Ubuntu 24.04).** The
   whole end-to-end suite also passes on an x86 GPU node (Ubuntu 24.04
