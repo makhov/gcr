@@ -27,15 +27,10 @@ const (
 	// AnnotationHostUsers=true opts a container out (it runs as host root);
 	// =false opts a Kubernetes pod in.
 	AnnotationHostUsers = "gcr.dev/host-users"
-	// containerTypeAnnotation is set by CRI on every pod container.
-	containerTypeAnnotation = "io.kubernetes.cri.container-type"
 	// AnnotationBase asks for a specific range, by its first host ID. A
 	// migration target needs the source's range: CRIU restores processes
 	// into the mapping they were dumped with.
 	AnnotationBase = "gcr.dev/userns-base"
-	// sandboxAnnotation groups a pod's containers onto one range, so they
-	// can share volumes.
-	sandboxAnnotation = "io.kubernetes.cri.sandbox-id"
 
 	// Size of each range; the container sees IDs 0..Size-1.
 	Size = 65536
@@ -118,7 +113,7 @@ func Decide(spec *specs.Spec, mode Mode) (bool, string, error) {
 	// sends it like an explicit true, so gcr does not override it unless
 	// configured to (Always). Pods get a user namespace from hostUsers:
 	// false (containerd's own), or from gcr with gcr.dev/host-users=false.
-	if spec.Annotations[containerTypeAnnotation] != "" && spec.Annotations[AnnotationHostUsers] != "false" {
+	if ocispec.PodContainer(spec) && spec.Annotations[AnnotationHostUsers] != "false" {
 		return false, "Kubernetes pod without hostUsers: false or " + AnnotationHostUsers + "=false", nil
 	}
 	return true, "", nil
@@ -179,7 +174,8 @@ func nsProcName(t specs.LinuxNamespaceType) string {
 // processes, so allocation goes through files under a lock.
 func Allocate(spec *specs.Spec, namespace, id string, want uint32) (Range, error) {
 	key := namespace + "_" + id
-	if sb := spec.Annotations[sandboxAnnotation]; sb != "" {
+	// A pod's containers share one range, so they can share volumes.
+	if sb := ocispec.SandboxID(spec); sb != "" {
 		key = namespace + "_pod_" + sb
 	}
 	var r Range

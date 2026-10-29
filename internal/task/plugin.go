@@ -3,6 +3,10 @@
 package task
 
 import (
+	"context"
+	"os"
+
+	"github.com/containerd/containerd/v2/core/events"
 	"github.com/containerd/containerd/v2/pkg/shim"
 	"github.com/containerd/containerd/v2/pkg/shutdown"
 	"github.com/containerd/containerd/v2/plugins"
@@ -27,7 +31,18 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			return NewTaskService(ic.Context, pp.(shim.Publisher), ss.(shutdown.Service))
+			publisher := pp.(shim.Publisher)
+			if os.Getenv("TTRPC_ADDRESS") == "" {
+				// CRI-O gives no address for events: it waits on tasks.
+				publisher = discard{}
+			}
+			return NewTaskService(ic.Context, publisher, ss.(shutdown.Service))
 		},
 	})
 }
+
+// discard drops events, for callers that take none.
+type discard struct{}
+
+func (discard) Publish(context.Context, string, events.Event) error { return nil }
+func (discard) Close() error                                        { return nil }

@@ -45,9 +45,20 @@ func initHook(c *configs.Config, keep []*os.File) error {
 }
 
 func main() {
+	finish, err := adaptStart()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "start:", err)
+		os.Exit(1)
+	}
 	shim.RunShim(context.Background(), manager.New("io.containerd.gcr.v2"), func(c *shim.Config) {
 		// Containers are children of this process and are waited on by
 		// libcontainer; an implicit reaper would steal their exit status.
 		c.NoReaper = true
 	})
+	if finish != nil {
+		if err := finish(); err != nil {
+			fmt.Fprintln(os.Stderr, "start:", err)
+			os.Exit(1)
+		}
+	}
 }

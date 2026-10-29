@@ -28,8 +28,20 @@ jobs:
       - run: make build
 
   e2e:
-    # Root, containerd 2.4, our CRIU fork; on x86 runners the kernel tracks
-    # dirty memory, so migrations use pre-copy rounds.
+    # Root, our CRIU fork; on x86 runners the kernel tracks dirty memory,
+    # so migrations use pre-copy rounds. Each containerd release gcr
+    # supports: 2.3 and later start the shim with the bootstrap protocol
+    # and use the task API's version 3; the others the older way, and
+    # version 2.
+    name: e2e (containerd ${{ matrix.containerd }})
+    strategy:
+      fail-fast: false
+      matrix:
+        containerd: [2.4.2, 2.2.1, 2.0.7, 1.7.29]
+        include:
+          # Fails with runc as well: containerd 2.2 and this critest.
+          - containerd: 2.2.1
+            critest-skip: pod sandbox metrics
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -37,16 +49,46 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: sudo ./hack/ci-setup.sh
+      - run: sudo CONTAINERD_VERSION=${{ matrix.containerd }} ./hack/ci-setup.sh
       - run: make build && sudo make install
       - run: sudo systemctl restart containerd
       - name: end-to-end tests
         run: make test-e2e
       - name: CRI conformance (critest)
-        run: cd /tmp && sudo critest --runtime-handler gcr --ginkgo.no-color --ginkgo.timeout 40m
+        env:
+          SKIP: ${{ matrix.critest-skip }}
+        run: cd /tmp && sudo critest --runtime-handler gcr --ginkgo.no-color --ginkgo.timeout 40m ${SKIP:+--ginkgo.skip "$SKIP"}
       - name: logs
         if: failure()
         run: sudo journalctl -u containerd --no-pager | tail -300
+
+  crio:
+    # gcr as a CRI-O runtime of type "vm", next to containerd (whose CNI
+    # config and CRIU it shares).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: sudo ./hack/ci-setup.sh
+      - run: make build && sudo make install
+      - run: sudo ./hack/crio-setup.sh
+      - name: end-to-end test under CRI-O
+        run: make test-e2e E2E=./test/e2e/crio/
+      - name: CRI conformance (critest) under CRI-O
+        # Port forwarding is not implemented for CRI-O's "vm" runtimes;
+        # host ports and pod metrics need setup this runner does not have
+        # (they fail with crun too).
+        run: >-
+          cd /tmp && sudo critest --runtime-endpoint unix:///run/crio/crio.sock
+          --image-endpoint unix:///run/crio/crio.sock --runtime-handler gcr
+          --ginkgo.no-color --ginkgo.timeout 30m
+          --ginkgo.skip 'portforward|port mapping with host port|pod sandbox metrics|metrics descriptors'
+      - name: logs
+        if: failure()
+        run: sudo journalctl -u crio-gcr --no-pager | tail -300
 
   k8s:
     # Kubernetes (stock k0s 1.37 via k0da, in rootful podman) with gcr as a

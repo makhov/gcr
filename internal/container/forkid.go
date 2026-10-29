@@ -67,7 +67,7 @@ func writeForkInfo(mounts []mount.Mount, info ForkInfo, root int) error {
 		}
 	}
 	if upper == "" {
-		return fmt.Errorf("fork needs an overlay rootfs with a writable layer: %w", errdefs.ErrNotImplemented)
+		return errRootfs("forks")
 	}
 	b, err := json.Marshal(info)
 	if err != nil {

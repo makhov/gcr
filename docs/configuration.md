@@ -44,6 +44,11 @@ UserNamespaces = 'always'
 When `ConfigPath` is set, gcr reads only that file and ignores any other
 options in the table.
 
+**CRI-O.** Name the file with `runtime_config_path` in the handler's
+table (README, With CRI-O); CRI-O passes it to gcr like `ConfigPath`.
+Options that need gcr to mount the rootfs (`UserNamespaces = 'always'`)
+fail there.
+
 **ctr or containerd's client.** Pass the file per container:
 
 ```sh

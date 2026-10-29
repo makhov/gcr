@@ -94,7 +94,7 @@ func mountRootfs(mounts []mount.Mount, target string, layers []string) (retErr e
 		return mountAll(mounts, target)
 	}
 	if len(mounts) != 1 || mounts[0].Type != "overlay" {
-		return fmt.Errorf("fork needs an overlay rootfs: %w", errdefs.ErrNotImplemented)
+		return errRootfs("forks")
 	}
 	var opts, lowers []string
 	var idmap string

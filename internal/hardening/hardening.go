@@ -69,9 +69,6 @@ type Options struct {
 	Landlocked bool
 }
 
-// containerTypeAnnotation is set by CRI on every pod container.
-const containerTypeAnnotation = "io.kubernetes.cri.container-type"
-
 func (l Level) Validate() error {
 	switch l {
 	case Standard, Always, Off:
@@ -195,7 +192,7 @@ func Apply(spec *specs.Spec, o Options) Result {
 		return Result{Skipped: "privileged container"}
 	}
 	sc := spec.Linux.Seccomp
-	if sc == nil && level == Standard && spec.Annotations[containerTypeAnnotation] != "" {
+	if sc == nil && level == Standard && ocispec.PodContainer(spec) {
 		return Result{Skipped: "Kubernetes pod with seccomp Unconfined"}
 	}
 	var res Result

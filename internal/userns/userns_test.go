@@ -34,8 +34,9 @@ func TestWanted(t *testing.T) {
 	}{
 		{"plain container", podSpec(nil, ownNamespaces...), true},
 		{"opt out", podSpec(map[string]string{AnnotationHostUsers: "true"}, ownNamespaces...), false},
-		{"kubernetes pod follows hostUsers", podSpec(map[string]string{containerTypeAnnotation: "container"}, ownNamespaces...), false},
-		{"kubernetes pod opted in", podSpec(map[string]string{containerTypeAnnotation: "container", AnnotationHostUsers: "false"}, ownNamespaces...), true},
+		{"kubernetes pod follows hostUsers", podSpec(map[string]string{"io.kubernetes.cri.container-type": "container"}, ownNamespaces...), false},
+		{"kubernetes pod opted in", podSpec(map[string]string{"io.kubernetes.cri.container-type": "container", AnnotationHostUsers: "false"}, ownNamespaces...), true},
+		{"CRI-O pod follows hostUsers", podSpec(map[string]string{"io.kubernetes.cri-o.ContainerType": "container"}, ownNamespaces...), false},
 		{"own user namespace", podSpec(nil, append(slices.Clone(ownNamespaces), specs.LinuxNamespace{Type: specs.UserNamespace})...), false},
 		{"host network (no entry)", podSpec(nil, specs.LinuxNamespace{Type: specs.PIDNamespace}, specs.LinuxNamespace{Type: specs.IPCNamespace}), false},
 		{"host network (path)", podSpec(nil, specs.LinuxNamespace{Type: specs.NetworkNamespace, Path: "/proc/1/ns/net"},
@@ -69,7 +70,7 @@ func TestWanted(t *testing.T) {
 }
 
 func TestDecideModes(t *testing.T) {
-	pod := podSpec(map[string]string{containerTypeAnnotation: "container", AnnotationHostUsers: "true"}, ownNamespaces...)
+	pod := podSpec(map[string]string{"io.kubernetes.cri.container-type": "container", AnnotationHostUsers: "true"}, ownNamespaces...)
 	if ok, _, err := Decide(pod, Always); !ok || err != nil {
 		t.Fatalf("always: pod with opt-out annotation: %v, %v; want a user namespace", ok, err)
 	}
@@ -93,7 +94,7 @@ func TestDecideModes(t *testing.T) {
 
 func TestAllocate(t *testing.T) {
 	stateDir = t.TempDir()
-	pod := map[string]string{sandboxAnnotation: "sb1"}
+	pod := map[string]string{"io.kubernetes.cri.sandbox-id": "sb1"}
 
 	a, err := Allocate(podSpec(pod), "k8s.io", "pause", 0)
 	if err != nil {

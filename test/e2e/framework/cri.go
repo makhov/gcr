@@ -19,12 +19,11 @@ import (
 const RuntimeHandler = "gcr"
 
 var (
-	criOnce sync.Once
-	criConn *grpc.ClientConn
-	criErr  error
+	criMu    sync.Mutex
+	criConns = map[string]*grpc.ClientConn{}
 )
 
-// CRI talks to containerd's CRI service.
+// CRI talks to a CRI service: containerd's, or CRI-O's (NewCRIAt).
 type CRI struct {
 	t       testing.TB
 	Ctx     context.Context
@@ -32,17 +31,29 @@ type CRI struct {
 	Images  cri.ImageServiceClient
 }
 
+// NewCRI talks to containerd's CRI service.
 func NewCRI(t testing.TB) *CRI {
 	t.Helper()
-	criOnce.Do(func() {
-		criConn, criErr = grpc.NewClient("unix://"+Socket, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	})
-	if criErr != nil {
-		t.Fatalf("CRI: %v", criErr)
+	return NewCRIAt(t, Socket)
+}
+
+// NewCRIAt talks to the CRI service listening on socket.
+func NewCRIAt(t testing.TB, socket string) *CRI {
+	t.Helper()
+	criMu.Lock()
+	conn, ok := criConns[socket]
+	if !ok {
+		var err error
+		if conn, err = grpc.NewClient("unix://"+socket, grpc.WithTransportCredentials(insecure.NewCredentials())); err != nil {
+			criMu.Unlock()
+			t.Fatalf("CRI at %s: %v", socket, err)
+		}
+		criConns[socket] = conn
 	}
+	criMu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	return &CRI{t: t, Ctx: ctx, Runtime: cri.NewRuntimeServiceClient(criConn), Images: cri.NewImageServiceClient(criConn)}
+	return &CRI{t: t, Ctx: ctx, Runtime: cri.NewRuntimeServiceClient(conn), Images: cri.NewImageServiceClient(conn)}
 }
 
 // Pull pulls an image through CRI.
