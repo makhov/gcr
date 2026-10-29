@@ -415,12 +415,21 @@ lower layers and must be the one the snapshot was taken from.
 Forks share the parent's user namespace range, because the snapshot's
 files carry host IDs from it: they are isolated from other containers,
 not from each other at the host-ID level, which suits fanning one
-workload out and not running two tenants. The snapshot's writable layer
-is copied into each fork, with reflinks where the filesystem has them
-(btrfs, xfs) and real bytes where it does not (ext4); sharing it as a
-read-only layer instead would cost nothing per fork, and needs gcr to
-assemble the overlay itself, since containerd's idmapped overlay wants
-every layer under one directory and would map the snapshot's twice.
+workload out and not running two tenants.
+
+Nothing is copied: the snapshot's writable layer is mounted read-only
+underneath each fork's own, empty one, so a fork costs the same whether
+the snapshot changed a file or a gigabyte. gcr assembles that overlay
+itself, idmapping the image's layers and leaving the snapshot's alone (its
+files already carry the range's IDs); containerd's idmapped overlay would
+map it twice. A snapshot of a fork holds only what the fork changed, and
+records the snapshots beneath it (`gcr-layers`), so forks of forks stack
+layers rather than copy them. The price is that a snapshot must outlive
+the forks of it, and the snapshots taken of those. Checkpoints of a fork
+record the same layers, and a fork migrates only to a fork of the same
+snapshot (shared storage at the same path); the target refuses anything
+else before the first page is sent.
+
 ### Lazy restore
 
 A restore or fork loads the snapshot's memory before the container runs,
