@@ -62,6 +62,9 @@ type CreateOpts struct {
 	// PrepareSpec may change the spec before it is converted, and decides
 	// the rest of the container's setup from it.
 	PrepareSpec func(*specs.Spec) (Prepared, error)
+	// OnOOM is called when the OOM killer has killed one of the
+	// container's processes.
+	OnOOM func(*Container)
 }
 
 // CRIUConfig is a CRIU configuration file, which the container rewrites
@@ -173,6 +176,8 @@ type Container struct {
 	exitedAt   time.Time
 	exited     chan struct{}
 	onExit     func(*Container)
+	onOOM      func(*Container)
+	oomKills   uint64 // told of by onOOM; guarded by mu
 	// replacing is set while a rewind kills the processes; their exit
 	// is then reported on replaced instead of to containerd.
 	replacing bool
@@ -369,6 +374,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		status:         Created,
 		exited:         make(chan struct{}),
 		onExit:         onExit,
+		onOOM:          o.OnOOM,
 	}
 	if o.Checkpoint != "" || prep.CheckpointFrom != nil {
 		// Restore happens in Start, the way containerd expects.
@@ -410,12 +416,14 @@ func (c *Container) Start(ctx context.Context) error {
 			return fmt.Errorf("exec: %w", err)
 		}
 		c.setStatus(Running)
+		c.watchOOM()
 		return nil
 	}
 	if err := c.restore(c.checkpoint); err != nil {
 		return err
 	}
 	c.setStatus(Running)
+	c.watchOOM()
 	if c.forkSignal != 0 {
 		if err := c.lc.Signal(c.forkSignal); err != nil {
 			return fmt.Errorf("fork signal: %w", err)
@@ -872,6 +880,9 @@ func systemdCgroupPath(spec *specs.Spec) bool {
 // idmaps the lower layers, and a still empty upper layer is given to the
 // container's root so files it creates are owned by the mapped IDs.
 func idmapRootfs(mounts []mount.Mount, idmap string, root int) ([]mount.Mount, error) {
+	if len(mounts) == 0 {
+		return nil, errRootfs("gcr's user namespaces")
+	}
 	out := slices.Clone(mounts)
 	for i, m := range out {
 		if m.Type != "overlay" {
@@ -945,7 +956,7 @@ func (c *Container) UpperDir() (string, error) {
 			}
 		}
 	}
-	return "", fmt.Errorf("time travel needs an overlay rootfs with a writable layer: %w", errdefs.ErrNotImplemented)
+	return "", errRootfs("snapshots, time travel and migration")
 }
 
 // Kill signals the init process, or every process in the container.
@@ -1144,6 +1155,7 @@ func (c *Container) track(proc *libcontainer.Process) error {
 
 // markExited records the init's exit and tells containerd.
 func (c *Container) markExited(st *os.ProcessState) {
+	c.noteOOM()
 	c.mu.Lock()
 	if c.status == Stopped {
 		c.mu.Unlock()
@@ -1246,4 +1258,12 @@ var rlimits = map[string]int{
 	"RLIMIT_RTTIME":     unix.RLIMIT_RTTIME,
 	"RLIMIT_SIGPENDING": unix.RLIMIT_SIGPENDING,
 	"RLIMIT_STACK":      unix.RLIMIT_STACK,
+}
+
+// errRootfs says that what needs gcr to mount the container's overlay
+// rootfs cannot have it: the caller passed none (CRI-O mounts the rootfs
+// itself), or one of another kind.
+func errRootfs(what string) error {
+	return fmt.Errorf("%s need the rootfs as overlay mounts from containerd, which gcr mounts itself; "+
+		"this container's was mounted by its caller (CRI-O does): %w", what, errdefs.ErrNotImplemented)
 }

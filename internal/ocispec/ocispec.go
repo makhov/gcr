@@ -37,3 +37,30 @@ func allDevicesAllowed(spec *specs.Spec) bool {
 	}
 	return false
 }
+
+// The annotations CRI implementations put on every pod container:
+// containerd's, then CRI-O's.
+var (
+	containerTypeAnnotations = []string{"io.kubernetes.cri.container-type", "io.kubernetes.cri-o.ContainerType"}
+	sandboxIDAnnotations     = []string{"io.kubernetes.cri.sandbox-id", "io.kubernetes.cri-o.SandboxID"}
+)
+
+// PodContainer says whether spec is a Kubernetes pod's container (its
+// sandbox included), as containerd's or CRI-O's CRI marks them.
+func PodContainer(spec *specs.Spec) bool {
+	return firstAnnotation(spec, containerTypeAnnotations) != ""
+}
+
+// SandboxID is the pod a container belongs to, "" outside one.
+func SandboxID(spec *specs.Spec) string {
+	return firstAnnotation(spec, sandboxIDAnnotations)
+}
+
+func firstAnnotation(spec *specs.Spec, keys []string) string {
+	for _, k := range keys {
+		if v := spec.Annotations[k]; v != "" {
+			return v
+		}
+	}
+	return ""
+}

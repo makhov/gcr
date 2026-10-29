@@ -50,9 +50,8 @@ executing a runc binary per operation. gcr's shim is the bigger binary
 ## Requirements
 
 - Linux 6.12+ with cgroup v2, run as root
-- containerd 2.3 or later (tested with 2.4.2). gcr is built on
-  containerd 2.4's shim library, which only speaks the shim bootstrap
-  protocol containerd 2.3 introduced; containerd 2.2 cannot start it.
+- containerd 1.7 or later (tested: 1.7.29, 2.0.7, 2.2.1, 2.4.2), or
+  CRI-O with some features missing (below)
 - libseccomp (runtime and, to build, headers)
 - CRIU for checkpoint/restore; time travel needs the fork with
   `--seccomp-notify-socket` (see below), and keeping Landlock across a
@@ -132,6 +131,46 @@ spec:
 
 If the kubelet uses the systemd cgroup driver, gcr follows it (CRI sends
 `slice:prefix:name` cgroup paths).
+
+containerd 1.7 takes config version 2, where the table is
+`[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gcr]`. Listing a
+runtime there replaces the default `runc` entry, so list that too.
+
+gcr is built on containerd 2.4's shim library. containerd 2.3 and later
+start it with their shim bootstrap protocol and use the task API's version
+3. For older releases (and CRI-O) gcr answers the way shims did before
+2.3 and serves the task API's version 2 as well, whose messages are the
+same.
+
+### With CRI-O
+
+CRI-O runs containerd shims as runtimes of type `vm` (the way it runs
+Kata Containers):
+
+```toml
+# /etc/crio/crio.conf.d/10-gcr.conf
+[crio.runtime.runtimes.gcr]
+runtime_path = "/usr/local/bin/containerd-shim-gcr-v2"
+runtime_type = "vm"
+runtime_root = "/run/gcr-crio"
+# runtime_config_path = "/etc/gcr/gcr.toml"   # gcr's options (docs/configuration.md)
+```
+
+The RuntimeClass is the same as above. Pods run with gcr's hardening and
+Landlock; exec, logs, resource updates, stats and OOM kills work, and
+CRI conformance passes except for port forwarding, which CRI-O does not
+implement for `vm` runtimes. Not available under CRI-O:
+
+- **gcr's own user namespaces** (`gcr.dev/host-users=false`,
+  `UserNamespaces = 'always'`). CRI-O mounts the container's rootfs
+  itself, and gcr idmaps the layers containerd hands it. Pods with
+  `hostUsers: false` get CRI-O's user namespace, as with any runtime.
+- **Snapshots, forks, time travel and live migration.** They need gcr to
+  mount the overlay rootfs (to read and replace its writable layer, and
+  to stack snapshot layers under it). gcr refuses them with an error
+  that says so.
+- **Checkpoint and restore through the CRI**, which CRI-O does not
+  implement for `vm` runtimes.
 
 ## User namespaces
 
@@ -646,6 +685,7 @@ CRI, checkpoint/restore, static helper programs to run in containers):
 | `landlock` | a leaked host descriptor, with Landlock on and off, across a restore |
 | `dind` | Docker-in-Docker, unprivileged, in a user namespace |
 | `cri` | a pod through CRI: exec, exit codes, logs, updates, stats, user namespace |
+| `crio` | a pod under CRI-O (runtime type `vm`): exec, exit codes, logs, the container is gcr's, stop and remove end the shim; skipped without CRI-O (`hack/crio-setup.sh`) |
 
 `sudo hack/clean-e2e.sh` removes what a failed run left behind (a leaked
 counter container keeps writing, which slows the next run down). Runs

@@ -78,7 +78,7 @@ func TestApplySkips(t *testing.T) {
 		t.Fatal("privileged container hardened")
 	}
 	unconfinedPod := func() *specs.Spec {
-		return &specs.Spec{Process: &specs.Process{}, Annotations: map[string]string{containerTypeAnnotation: "container"}}
+		return &specs.Spec{Process: &specs.Process{}, Annotations: map[string]string{"io.kubernetes.cri.container-type": "container"}}
 	}
 	if s := unconfinedPod(); Apply(s, Options{Level: Standard}).Skipped == "" || s.Linux.Seccomp != nil {
 		t.Fatal("standard: unconfined Kubernetes pod got a filter")

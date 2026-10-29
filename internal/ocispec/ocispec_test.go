@@ -34,3 +34,20 @@ func TestPrivileged(t *testing.T) {
 		}
 	}
 }
+
+func TestPodContainer(t *testing.T) {
+	for _, tc := range []struct {
+		annotations map[string]string
+		pod         bool
+		sandbox     string
+	}{
+		{nil, false, ""},
+		{map[string]string{"io.kubernetes.cri.container-type": "container", "io.kubernetes.cri.sandbox-id": "a"}, true, "a"},
+		{map[string]string{"io.kubernetes.cri-o.ContainerType": "sandbox", "io.kubernetes.cri-o.SandboxID": "b"}, true, "b"},
+	} {
+		spec := &specs.Spec{Annotations: tc.annotations}
+		if PodContainer(spec) != tc.pod || SandboxID(spec) != tc.sandbox {
+			t.Errorf("%v: pod %v, sandbox %q", tc.annotations, PodContainer(spec), SandboxID(spec))
+		}
+	}
+}

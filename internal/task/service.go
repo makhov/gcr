@@ -16,6 +16,7 @@ import (
 	"syscall"
 
 	eventstypes "github.com/containerd/containerd/api/events"
+	taskv2 "github.com/containerd/containerd/api/runtime/task/v2"
 	taskAPI "github.com/containerd/containerd/api/runtime/task/v3"
 	"github.com/containerd/containerd/api/types/runc/options"
 	apitask "github.com/containerd/containerd/api/types/task"
@@ -139,6 +140,7 @@ func NewTaskService(ctx context.Context, publisher shim.Publisher, sd shutdown.S
 
 func (s *service) RegisterTTRPC(server *ttrpc.Server) error {
 	taskAPI.RegisterTTRPCTaskService(server, s)
+	taskv2.RegisterTTRPCTaskService(server, v2{s})
 	return nil
 }
 
@@ -384,6 +386,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		}
 		return prep, nil
 	}
+	opts.OnOOM = func(c *container.Container) { s.send(&eventstypes.TaskOOM{ContainerID: c.ID}) }
 	c, err = container.Create(ctx, opts, s.handleExit)
 	if err != nil {
 		ex.Close()

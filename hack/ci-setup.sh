@@ -27,12 +27,27 @@ curl -fsSL "https://github.com/containerd/containerd/releases/download/v${CONTAI
 curl -fsSL -o /etc/systemd/system/containerd.service \
 	"https://raw.githubusercontent.com/containerd/containerd/v${CONTAINERD_VERSION}/containerd.service"
 mkdir -p /etc/containerd
-cat >/etc/containerd/config.toml <<'EOF'
+case $CONTAINERD_VERSION in
+1.*)
+	# Config version 2; listing runtimes replaces the default runc entry.
+	cat >/etc/containerd/config.toml <<'EOF'
+version = 2
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+  runtime_type = "io.containerd.runc.v2"
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gcr]
+  runtime_type = "io.containerd.gcr.v2"
+  pod_annotations = ["gcr.dev/*"]
+EOF
+	;;
+*)
+	cat >/etc/containerd/config.toml <<'EOF'
 version = 3
 [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr]
   runtime_type = 'io.containerd.gcr.v2'
   pod_annotations = ['gcr.dev/*']
 EOF
+	;;
+esac
 
 mkdir -p /opt/cni/bin /etc/cni/net.d
 curl -fsSL "https://github.com/containernetworking/plugins/releases/download/${CNI_VERSION}/cni-plugins-linux-${ARCH}-${CNI_VERSION}.tgz" |
