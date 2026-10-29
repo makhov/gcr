@@ -165,6 +165,29 @@ func get(t *testing.T, s server, c *framework.Container, path string) (reply, er
 	return r, nil
 }
 
+// settled waits until no TCP connection in c is established: the client
+// just run may still be closing its connection, and CRIU refuses to dump
+// one (connections are not restored).
+func settled(t *testing.T, c *framework.Container) {
+	t.Helper()
+	begin := time.Now()
+	defer func() { t.Logf("connections closed after %s", time.Since(begin).Round(time.Millisecond)) }()
+	framework.Eventually(t, 30*time.Second, "connections to close", func() bool {
+		for _, f := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+			out, code := c.Exec("cat", f)
+			if code != 0 {
+				continue // no IPv6
+			}
+			for _, l := range strings.Split(out, "\n")[1:] {
+				if fields := strings.Fields(l); len(fields) > 3 && fields[3] == "01" { // ESTABLISHED
+					return false
+				}
+			}
+		}
+		return true
+	})
+}
+
 func TestServers(t *testing.T) {
 	for _, s := range servers {
 		t.Run(s.name, func(t *testing.T) { testServer(t, s) })
@@ -184,6 +207,7 @@ func testServer(t *testing.T, s server) {
 			t.Fatalf("parent: %v", err)
 		}
 	}
+	settled(t, parent)
 	dir := filepath.Join(framework.TempDir(t), "snapshot")
 	begin := time.Now()
 	if err := control.NewClient(ns.Name, parent.ID).Snapshot(t.Context(), dir); err != nil {
@@ -285,6 +309,7 @@ func TestPostgres(t *testing.T) {
 	if _, err := sql(parent, "create table t (id serial primary key, v text); insert into t (v) select md5(g::text) from generate_series(1, 1000) g"); err != nil {
 		t.Fatal(err)
 	}
+	settled(t, parent)
 	dir := filepath.Join(framework.TempDir(t), "snapshot")
 	if err := control.NewClient(ns.Name, parent.ID).Snapshot(t.Context(), dir); err != nil {
 		t.Fatalf("snapshot: %v", err)
