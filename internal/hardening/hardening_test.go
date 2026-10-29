@@ -86,6 +86,34 @@ func TestApplySkips(t *testing.T) {
 	if s := unconfinedPod(); Apply(s, Options{Level: Always}).Skipped != "" || s.Linux.Seccomp == nil {
 		t.Fatal("always: unconfined Kubernetes pod not hardened")
 	}
+	// denied: the denied set, and nothing that looks at arguments.
+	s := unconfinedPod()
+	if Apply(s, Options{Level: DeniedSet}).Skipped != "" || s.Linux.Seccomp == nil {
+		t.Fatal("denied: unconfined Kubernetes pod not hardened")
+	}
+	// (The supervised mount stays: without Landlock, a nested user
+	// namespace could mount.)
+	var refusing int
+	for _, r := range s.Linux.Seccomp.Syscalls {
+		if len(r.Args) > 0 {
+			t.Fatalf("denied: an argument rule for %v", r.Names)
+		}
+		if r.Action != specs.ActNotify {
+			refusing++
+		}
+	}
+	if want := len(denyRules()); refusing != want {
+		t.Fatalf("denied: %d refusing rules, want the denied set's %d", refusing, want)
+	}
+	// A pod with a profile (RuntimeDefault, as kubelet's seccompDefault
+	// gives every pod) is hardened at every level but off.
+	for _, l := range []Level{Standard, DeniedSet, Always} {
+		s := unconfinedPod()
+		s.Linux = &specs.Linux{Seccomp: &specs.LinuxSeccomp{DefaultAction: specs.ActErrno}}
+		if Apply(s, Options{Level: l}).Skipped != "" || len(s.Linux.Seccomp.Syscalls) == 0 {
+			t.Fatalf("%s: pod with a profile not hardened", l)
+		}
+	}
 	off := &specs.Spec{Process: &specs.Process{}}
 	if r := Apply(off, Options{Level: Off}); r.Skipped == "" || off.Linux != nil {
 		t.Fatal("Hardening = off applied a profile")

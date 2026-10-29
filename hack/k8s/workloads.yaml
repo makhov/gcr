@@ -19,6 +19,20 @@ spec:
         requests: {cpu: 10m, memory: 16Mi}
         limits: {cpu: 200m, memory: 64Mi}
 ---
+# Asks for no seccomp filter: it gets none, as conformance requires.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: unconfined
+spec:
+  runtimeClassName: gcr
+  securityContext:
+    seccompProfile: {type: Unconfined}
+  containers:
+    - name: app
+      image: busybox:1.37
+      command: ["sleep", "3600"]
+---
 # Kubernetes user namespaces, created by containerd.
 apiVersion: v1
 kind: Pod

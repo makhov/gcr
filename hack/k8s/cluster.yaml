@@ -12,5 +12,8 @@ spec:
       - gcr-containerd.toml
   nodes:
     - role: controller
+      # Pods without a seccomp profile run RuntimeDefault (which gcr
+      # hardens), as the README recommends for nodes running gcr.
+      args: ["--kubelet-extra-args=--seccomp-default=true"]
       mounts:
         - {type: bind, source: ../../bin/static, target: /opt/gcr/bin, options: [ro]}
