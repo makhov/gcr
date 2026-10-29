@@ -87,10 +87,6 @@ var Denied = []string{
 	"io_uring_setup", "io_uring_enter", "io_uring_register",
 	// Kernel programs, profiling and fault handling from user space.
 	"bpf", "perf_event_open", "userfaultfd",
-	// The new mount API; reachable from user namespaces and exploited
-	// (CVE-2022-0185). Mounts for Docker-in-Docker go through the
-	// supervisor later.
-	"fsopen", "fsconfig", "fsmount", "fspick", "open_tree", "move_mount", "mount_setattr",
 	// Kernel code loading and replacement.
 	"init_module", "finit_module", "delete_module", "kexec_load", "kexec_file_load",
 	// File handles bypass path checks ("shocker").
@@ -103,6 +99,11 @@ var Denied = []string{
 var Absent = []string{
 	// The kernel keyring is not namespaced.
 	"add_key", "keyctl", "request_key",
+	// The new mount API; reachable from user namespaces and exploited
+	// (CVE-2022-0185). Absent rather than refused: mount(8) from
+	// util-linux 2.40 on tries it first and falls back to mount(2), which
+	// the supervisor checks, only on ENOSYS; on EPERM it gives up.
+	"fsopen", "fsconfig", "fsmount", "fspick", "open_tree", "move_mount", "mount_setattr",
 }
 
 const eperm = uint(unix.EPERM)

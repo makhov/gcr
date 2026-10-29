@@ -21,7 +21,9 @@ runs); no runc binary.
 - Not yet: the NVIDIA ioctl proxy, restoring onto another GPU index.
 
 What this is good for, what it costs, and what has not been shown yet:
-[docs/tradeoffs.md](docs/tradeoffs.md).
+[docs/tradeoffs.md](docs/tradeoffs.md). Every setting and annotation:
+[docs/configuration.md](docs/configuration.md). What the hardening breaks,
+and the way around each: [docs/compatibility.md](docs/compatibility.md).
 
 ### Compared with runc
 
@@ -184,13 +186,14 @@ Whatever seccomp profile a workload brings (or none, as Kubernetes pods
 default to), gcr refuses calls behind most container escapes and kernel
 exploits reachable from containers:
 
-- with EPERM: `io_uring_*`, `bpf`, `perf_event_open`, `userfaultfd`, the
-  new mount API (`fsopen`, `fsconfig`, `fsmount`, `fspick`, `open_tree`,
-  `move_mount`, `mount_setattr`), module loading and kexec,
-  `open_by_handle_at`;
+- with EPERM: `io_uring_*`, `bpf`, `perf_event_open`, `userfaultfd`,
+  module loading and kexec, `open_by_handle_at`;
 - with ENOSYS, as if the kernel lacked it: the keyring (`add_key`,
   `keyctl`, `request_key`), which is not namespaced (runc and other callers
-  carry on without a session keyring then);
+  carry on without a session keyring then), and the new mount API
+  (`fsopen`, `fsconfig`, `fsmount`, `fspick`, `open_tree`, `move_mount`,
+  `mount_setattr`): `mount(8)` from util-linux 2.40 on falls back to
+  `mount(2)`, which the supervisor checks, only on ENOSYS;
 - when the container has no profile of its own, also: `AF_PACKET`,
   `AF_VSOCK`, `AF_KEY` and `AF_ALG` sockets, and raw IP sockets (`ping` uses
   ICMP datagram sockets, which gcr opens); `clone3` returns ENOSYS so libc
@@ -220,7 +223,9 @@ Privileged means `CAP_SYS_ADMIN` and access to all devices (what
 bubblewrap and rootless podman/buildah make user namespaces of their own.
 Root in one can reach kernel code an unprivileged process cannot, so in
 gcr's own profile they are guarded rather than refused
-(`NestedUserNamespaces = 'guarded'`, the default):
+(`NestedUserNamespaces = 'guarded'`, the default; tools that mount in
+them, such as bubblewrap and rootless podman, also need `Landlock = 'off'`,
+see [compatibility](docs/compatibility.md)):
 
 - mounts go through the supervisor's filesystem allowlist, also in nested
   namespaces;
