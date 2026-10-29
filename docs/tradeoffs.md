@@ -115,9 +115,17 @@ tests check that each refused call is refused, by return value.
 - **A fork must use the image the snapshot was taken from.** Nothing
   outside the container's writable layer is captured: volumes and bind
   mounts must be there, in the same state, when a fork starts.
-- **Tested with simple workloads.** The tests fork counters and a memory
-  hog. Workloads with open network connections, many threads or unusual
-  kernel objects have not been forked in tests yet.
+- **Tested with a handful of real programs.** These fork in the tests,
+  each keeping its listening socket and in-memory state and diverging from
+  the others afterwards:
+  - a Python, a Node.js and a JVM HTTP server, each holding a 48 MiB
+    model in memory (forks start in 0.2–0.3 s);
+  - Postgres with a table: several processes sharing memory, with their
+    data in the writable layer.
+
+  Connections open at the time of the snapshot are not restored (CRIU
+  would need `--tcp-established` and the same addresses). Nor are GPUs,
+  or kernel objects CRIU does not support.
 
 ### Lazy restore
 

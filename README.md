@@ -563,7 +563,8 @@ CRI, checkpoint/restore, static helper programs to run in containers):
 | --- | --- |
 | `checkpoint` | a counter carries on after checkpoint/restore, in the same user namespace |
 | `timetravel` | a timeline, a rewind; the counter, the filesystem and the recording carry on from the point |
-| `fork` | ten containers from one snapshot: each resumes its memory and mounts the snapshot's layer beneath its own; forks of forks; lazy restore, and what it saves; merged memory |
+| `fork` | ten containers from one snapshot: each resumes its memory and mounts the snapshot's layer beneath its own; forks of forks; a fork's identity and signal; lazy restore, and what it saves; merged memory |
+| `workloads` | real programs forked: Python, Node.js and JVM servers holding a model in memory, and Postgres with a table; each fork serves, keeps its state and diverges; a re-seed on the fork signal |
 | `migrate` | live migration between containerd namespaces (pre-copy on x86); a refused one leaves the source running |
 | `hardening` | refused system calls with hardening on and off; supervised mounts, by exact return value; nested user namespaces; the netlink policy (BPF LSM) |
 | `landlock` | a leaked host descriptor, with Landlock on and off, across a restore |
