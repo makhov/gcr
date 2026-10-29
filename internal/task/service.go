@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -176,6 +177,23 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			return prep, err
 		}
 		prep.ForkFrom = forkFrom
+		if v, ok := spec.Annotations[container.AnnotationLazyRestore]; ok {
+			if prep.LazyPages, err = strconv.ParseBool(v); err != nil {
+				return prep, fmt.Errorf("%s=%q: %w", container.AnnotationLazyRestore, v, errdefs.ErrInvalidArgument)
+			}
+			if prep.LazyPages && forkFrom == "" && r.Checkpoint == "" {
+				return prep, fmt.Errorf("%s needs a container that is restored or forked: %w",
+					container.AnnotationLazyRestore, errdefs.ErrInvalidArgument)
+			}
+			if prep.LazyPages && !container.LazyPagesAvailable() {
+				// Said here rather than left to a CRIU log: the node has to
+				// allow it, and an operator should know what they are
+				// allowing (see the README).
+				return prep, fmt.Errorf("%s: this node has vm.unprivileged_userfaultfd = 0, so a container "+
+					"in a user namespace cannot open the userfaultfd a lazy restore needs; set it to 1 to "+
+					"allow lazy restores: %w", container.AnnotationLazyRestore, errdefs.ErrFailedPrecondition)
+			}
+		}
 		ok, why, err := userns.Decide(spec, cfg.UserNamespaces)
 		if err != nil {
 			return prep, err

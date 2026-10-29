@@ -421,9 +421,44 @@ is copied into each fork, with reflinks where the filesystem has them
 read-only layer instead would cost nothing per fork, and needs gcr to
 assemble the overlay itself, since containerd's idmapped overlay wants
 every layer under one directory and would map the snapshot's twice.
-Memory is copied per fork as well: CRIU's lazy pages would let a fork run
-before its memory is loaded, and sharing it copy-on-write is the open
-question in the design.
+### Lazy restore
+
+A restore or fork loads the snapshot's memory before the container runs,
+which costs the time to read it. With `gcr.dev/lazy-restore=true` the
+container runs as soon as its processes are in place, and a
+`criu lazy-pages` daemon sends each page the moment it is touched:
+
+```sh
+ctr run -d --runtime io.containerd.gcr.v2 \
+  --annotation gcr.dev/fork-from=/var/lib/gcr/snapshots/warm \
+  --annotation gcr.dev/lazy-restore=true \
+  docker.io/library/python:3.13 fork-1 python3 -c 'pass'
+```
+
+A fork of a snapshot holding 384 MiB of touched memory takes 175 ms to
+start this way against 459 ms eagerly, and the gap grows with the
+snapshot. What it costs: the daemon has to outlive the restore, and a
+container whose daemon dies before it has touched every page gets SIGBUS
+on the next one (gcr logs that the daemon stopped early). Memory is still
+copied per fork, not shared; sharing it copy-on-write is the open question
+in the design.
+
+**The node has to allow it.** The restored tasks open the userfaultfd
+themselves, from inside the container's user namespace, and the kernel
+allows that unrestricted only to `CAP_SYS_PTRACE` in the initial user
+namespace or when `vm.unprivileged_userfaultfd` is 1. The restricted form
+(`UFFD_USER_MODE_ONLY`) is not enough, because the kernel also faults a
+restored process's pages on its behalf, during a read into one for
+instance, and those faults would reach nobody. Without the setting gcr
+refuses the container and says so, rather than leaving a CRIU log to read.
+
+Setting it to 1 lets any unprivileged process on the node use userfaultfd
+to handle faults from kernel mode, which is a step in several kernel
+exploits; it is why gcr's own filter denies `userfaultfd` to containers,
+and that still holds with the setting on, since only the restore (before
+the filter is in place) uses it. So the exposure is to whatever else runs
+on the node, which argues for turning it on where gcr containers are the
+only unprivileged workload and leaving it alone elsewhere.
 
 `test/e2e/fork` snapshots a counter and runs ten forks of it at once.
 
@@ -471,7 +506,7 @@ CRI, checkpoint/restore, static helper programs to run in containers):
 | --- | --- |
 | `checkpoint` | a counter carries on after checkpoint/restore, in the same user namespace |
 | `timetravel` | a timeline, a rewind; the counter, the filesystem and the recording carry on from the point |
-| `fork` | ten containers from one snapshot: each resumes its memory, each has its own writable layer |
+| `fork` | ten containers from one snapshot: each resumes its memory, each has its own writable layer; lazy restore, and what it saves |
 | `migrate` | live migration between containerd namespaces (pre-copy on x86); a refused one leaves the source running |
 | `hardening` | refused system calls with hardening on and off; supervised mounts, by exact return value; nested user namespaces; the netlink policy (BPF LSM) |
 | `landlock` | a leaked host descriptor, with Landlock on and off, across a restore |

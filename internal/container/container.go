@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/errdefs"
+	"github.com/containerd/log"
 	// Registers the cgroup device-rules driver libcontainer needs.
 	_ "github.com/opencontainers/cgroups/devices"
 	"github.com/opencontainers/runc/libcontainer"
@@ -111,6 +113,8 @@ type Prepared struct {
 	// IOOwner, if not 0, owns the stdio pipes when the container has a user
 	// namespace gcr did not make (Kubernetes hostUsers: false).
 	IOOwner int
+	// LazyPages fills the restored memory on demand (AnnotationLazyRestore).
+	LazyPages bool
 	// ForkFrom, when set, is a snapshot directory (Snapshot's output) this
 	// container starts from: its processes are restored from the
 	// snapshot's images, and its writable layer is the snapshot's, which
@@ -170,11 +174,21 @@ type Container struct {
 	ioOwner int
 	// cgroupOwner, if not 0, is given the container's cgroup.
 	cgroupOwner int
-	criu        CRIUConfig
-	gpu         *gpu.Info
-	gpuError    error
-	execs       map[string]*Exec
+	// lazyPages restores memory on demand, through a criu lazy-pages
+	// daemon this container starts for each restore.
+	lazyPages bool
+	criu      CRIUConfig
+	gpu       *gpu.Info
+	gpuError  error
+	execs     map[string]*Exec
 }
+
+// AnnotationLazyRestore makes a restore fill memory on demand instead of
+// loading it first: the container runs as soon as its processes are in
+// place, and a criu lazy-pages daemon serves each page the moment it is
+// touched. A fork of a large snapshot starts in the time its first pages
+// take, not its whole memory.
+const AnnotationLazyRestore = "gcr.dev/lazy-restore"
 
 // AnnotationForkFrom starts a container from a snapshot directory
 // (Snapshot's output) instead of its image's entrypoint: its processes are
@@ -307,6 +321,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		idKey:          prep.IDKey,
 		ioOwner:        max(prep.IDMapRoot, prep.IOOwner),
 		cgroupOwner:    prep.CgroupOwner,
+		lazyPages:      prep.LazyPages,
 		criu:           prep.CRIU,
 		gpu:            prep.GPU,
 		gpuError:       prep.GPUError,
@@ -384,9 +399,21 @@ func (c *Container) restore(images string) error {
 	if err != nil {
 		return err
 	}
+	if c.lazyPages {
+		// Must be serving before the restore asks it for a page, and it
+		// keeps going afterwards: the container faults pages in as it
+		// runs, and the daemon exits once it has sent the last one.
+		stop, err := startLazyPages(images, work)
+		if err != nil {
+			return err
+		}
+		defer stop()
+	}
 	err = c.lc.Restore(proc, &libcontainer.CriuOpts{
 		ImagesDirectory: images,
 		WorkDirectory:   work,
+		LazyPages:       c.lazyPages,
+		StatusFd:        -1,
 	})
 	if err != nil {
 		c.io.detach() // restore requires pipes, never a terminal
@@ -647,6 +674,67 @@ func (c *Container) dump(dir, parent, host string, port int, pre bool) error {
 		return fmt.Errorf("criu dump: %w%s", err, criuErrors(filepath.Join(dir, "dump.log")))
 	}
 	return nil
+}
+
+// LazyPagesAvailable says whether a container in a user namespace can be
+// restored lazily. The restored tasks open the userfaultfd themselves, from
+// inside the namespace, and the kernel allows that unrestricted only to
+// CAP_SYS_PTRACE in the initial user namespace or when
+// vm.unprivileged_userfaultfd is 1. The restricted form
+// (UFFD_USER_MODE_ONLY) is not enough: the kernel also faults a restored
+// process's pages on its behalf, during a read into one for instance, and
+// those faults would reach nobody.
+func LazyPagesAvailable() bool {
+	b, err := os.ReadFile("/proc/sys/vm/unprivileged_userfaultfd")
+	return err == nil && strings.TrimSpace(string(b)) == "1"
+}
+
+// startLazyPages runs a criu lazy-pages daemon that serves the images'
+// pages to a restore, and returns a function that stops waiting on it.
+// Both sides find each other through a socket named relative to the work
+// directory, so they must share one. The returned function does not kill
+// the daemon: it has to outlive the restore, until the container has
+// touched every page it needs.
+func startLazyPages(images, work string) (func(), error) {
+	ready, signal, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	defer signal.Close()
+	cmd := exec.Command("criu", "lazy-pages", "--images-dir", images, "--work-dir", work, "--status-fd", "3")
+	cmd.ExtraFiles = []*os.File{signal}
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		ready.Close()
+		return nil, fmt.Errorf("lazy pages: %w", err)
+	}
+	// It writes one byte once it is listening; a closed pipe means it
+	// died first, and its log says why.
+	_ = ready.SetReadDeadline(time.Now().Add(30 * time.Second))
+	var b [1]byte
+	if _, err := ready.Read(b[:]); err != nil {
+		ready.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("lazy pages: not serving: %w%s", err, criuErrors(filepath.Join(work, "lazy-pages.log")))
+	}
+	ready.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := cmd.Wait(); err != nil {
+			// The container is left with pages nobody will send it; it
+			// gets SIGBUS when it touches one.
+			log.G(context.Background()).WithError(err).
+				WithField("log", filepath.Join(work, "lazy-pages.log")).Error("lazy pages daemon stopped early")
+		}
+	}()
+	return func() {
+		select {
+		case <-done:
+		default:
+		}
+	}, nil
 }
 
 // criuErrors returns the error lines of a CRIU log, for error messages.
