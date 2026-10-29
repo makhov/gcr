@@ -149,6 +149,9 @@ func run(ctx context.Context, ns string, args []string) error {
 		if err != nil {
 			return err
 		}
+		if res.PreCopyFailed != "" {
+			fmt.Printf("pre-copy failed, went on stop-and-copy: %s\n", res.PreCopyFailed)
+		}
 		if res.MemoryTracking {
 			fmt.Printf("pre-copy rounds: %d (pages %v)\n", len(res.PreCopyPages), res.PreCopyPages)
 		} else {

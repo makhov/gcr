@@ -52,6 +52,9 @@ type Receiver struct {
 
 	mu    sync.Mutex
 	round int
+	// chain is how many rounds the current one is incremental on, plus
+	// one; 0 before the first round and after a restart.
+	chain int
 	ps    *pageServer
 
 	ready   chan string
@@ -159,6 +162,22 @@ func (r *Receiver) finishRound() error {
 	return err
 }
 
+// abandonRound stops the current round's page server, which the source
+// may never have connected to; callers hold r.mu.
+func (r *Receiver) abandonRound() {
+	if r.ps == nil {
+		return
+	}
+	r.ps.Kill()
+	_ = r.ps.Wait()
+	r.ps = nil
+}
+
+// HeaderRestart, on POST /rounds, says the source gave up on the rounds
+// before (a pre-dump failed, after which the memory they hold may be
+// incomplete): the new round is a full dump, with no parent.
+const HeaderRestart = "Gcr-Restart"
+
 // HeaderIDBase carries the source's user namespace range (0: none). CRIU
 // restores processes into the mapping they were dumped with, so the target
 // must have been created with the same range.
@@ -192,7 +211,13 @@ func (r *Receiver) startRound(w http.ResponseWriter, req *http.Request) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if err := r.finishRound(); err != nil {
+	restart := req.Header.Get(HeaderRestart) != ""
+	if restart {
+		// The source gave up on the rounds so far: their memory may be
+		// incomplete. This round is a full dump.
+		r.abandonRound()
+		r.chain = 0
+	} else if err := r.finishRound(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -203,9 +228,10 @@ func (r *Receiver) startRound(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	parent := ""
-	if round > 1 {
+	if r.chain > 0 {
 		parent = filepath.Join("..", strconv.Itoa(round-1))
 	}
+	r.chain++
 	// Not the request's context: the page server outlives this request.
 	ps, err := startPageServer(r.ctx, loopback, dir, parent)
 	if err != nil {

@@ -53,6 +53,9 @@ type Result struct {
 	// MemoryTracking is false when the kernel cannot track dirty pages and
 	// the migration was stop-and-copy only.
 	MemoryTracking bool `json:"memoryTracking"`
+	// PreCopyFailed is why a pre-copy round failed, after which the
+	// migration went on stop-and-copy.
+	PreCopyFailed string `json:"preCopyFailed,omitempty"`
 }
 
 // Send migrates src to the receiver at target, over TLS for an https://
@@ -84,9 +87,10 @@ func Send(ctx context.Context, src Source, target, token string, t TLS, work str
 
 	res.MemoryTracking = memoryTracking()
 	parent := ""
+	restart := false
 	if res.MemoryTracking && src.CanPreDump() {
 		for i := 0; i < maxPreCopyRounds; i++ {
-			round, port, stop, err := c.startRound(ctx)
+			round, port, stop, err := c.startRound(ctx, false)
 			if err != nil {
 				return res, err
 			}
@@ -98,7 +102,14 @@ func Send(ctx context.Context, src Source, target, token string, t TLS, work str
 			err = src.PreDump(ctx, dir, parent, loopback, port)
 			stop()
 			if err != nil {
-				return res, fmt.Errorf("pre-copy round %d: %w", round, err)
+				// Pre-copy only shortens the downtime: go on stop-and-copy.
+				// Not from the rounds so far, whose memory may now be
+				// incomplete (CRIU may have reset the written-page bits
+				// without sending the pages). CRIU can fail here on a task
+				// it cannot seize (one waiting on a vfork child).
+				res.PreCopyFailed = err.Error()
+				parent, restart = "", true
+				break
 			}
 			pages := pagesWritten(dir)
 			res.PreCopyPages = append(res.PreCopyPages, pages)
@@ -111,7 +122,7 @@ func Send(ctx context.Context, src Source, target, token string, t TLS, work str
 		}
 	}
 
-	round, port, stop, err := c.startRound(ctx)
+	round, port, stop, err := c.startRound(ctx, restart)
 	if err != nil {
 		return res, err
 	}
@@ -185,11 +196,18 @@ func (c *client) header(req *http.Request) {
 }
 
 func (c *client) do(ctx context.Context, method, path string, body io.Reader, out any) error {
+	return c.doHeader(ctx, method, path, body, out, nil)
+}
+
+func (c *client) doHeader(ctx context.Context, method, path string, body io.Reader, out any, extra http.Header) error {
 	req, err := http.NewRequestWithContext(ctx, method, c.base.JoinPath(path).String(), body)
 	if err != nil {
 		return err
 	}
 	c.header(req)
+	for k, v := range extra {
+		req.Header[k] = v
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -212,9 +230,13 @@ func (c *client) post(ctx context.Context, path string, out any) error {
 // startRound has the target start a page server for the next round, and
 // returns the loopback port CRIU's page client sends that round's memory
 // to, and how to stop listening there once the dump is done.
-func (c *client) startRound(ctx context.Context) (round, port int, stop func(), err error) {
+func (c *client) startRound(ctx context.Context, restart bool) (round, port int, stop func(), err error) {
 	var r struct{ Round int }
-	if err := c.post(ctx, "/rounds", &r); err != nil {
+	var header http.Header
+	if restart {
+		header = http.Header{HeaderRestart: {"1"}}
+	}
+	if err := c.doHeader(ctx, http.MethodPost, "/rounds", nil, &r, header); err != nil {
 		return 0, 0, nil, err
 	}
 	port, stop, err = c.pageProxy(ctx, r.Round)
