@@ -5,7 +5,9 @@ package fork
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/containerd/errdefs"
 
@@ -22,6 +24,12 @@ func TestSnapshotLifecycle(t *testing.T) {
 	ns := framework.NewNamespace(t, "gcr-e2e")
 	spec := framework.Spec{Args: []string{"sh", "-c", counter}}
 	parent := ns.Run(framework.UniqueID("parent"), spec)
+	// Running, not still starting: CRIU cannot dump a process mid-exec.
+	framework.Eventually(t, time.Minute, "the parent to count", func() bool {
+		s, _ := parent.ReadFile("/tmp/count")
+		n, err := strconv.Atoi(s)
+		return err == nil && n > 0
+	})
 	first := filepath.Join(framework.TempDir(t), "first")
 	if err := control.NewClient(ns.Name, parent.ID).Snapshot(t.Context(), first); err != nil {
 		t.Fatalf("snapshot: %v", err)

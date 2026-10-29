@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/containerd/log"
 	"github.com/opencontainers/cgroups/fs2"
 )
 
@@ -17,13 +18,18 @@ const OOMFile = "oom"
 
 // watchOOM notes OOM kills while the container runs.
 func (c *Container) watchOOM() {
+	if dir, err := c.CgroupPath(); err == nil {
+		c.mu.Lock()
+		c.cgroupDir = dir
+		c.mu.Unlock()
+	}
 	ch, err := c.lc.NotifyOOM()
 	if err != nil {
 		return // no cgroup v2 memory controller: noted at exit, if at all
 	}
 	go func() {
 		for range ch {
-			c.noteOOM()
+			c.noteOOM(false, false)
 		}
 	}()
 }
@@ -31,12 +37,21 @@ func (c *Container) watchOOM() {
 // noteOOM tells of OOM kills the container's cgroup counts and were not
 // told yet. It runs at exit as well, before the exit is reported: the
 // watcher may not have seen the kill that ended the init by then.
-func (c *Container) noteOOM() {
-	dir, err := c.CgroupPath()
-	if err != nil {
-		return
+func (c *Container) noteOOM(exiting, killed bool) {
+	c.mu.Lock()
+	dir := c.cgroupDir
+	c.mu.Unlock()
+	var err error
+	if dir == "" {
+		dir, err = c.CgroupPath()
 	}
-	n, err := fs2.OOMKillCount(dir)
+	var n uint64
+	if err == nil {
+		n, err = fs2.OOMKillCount(dir)
+	}
+	if exiting && killed {
+		log.L.WithError(err).WithField("id", c.ID).WithField("cgroup", dir).WithField("oom_kill", n).Info("killed: OOM kills at exit")
+	}
 	if err != nil {
 		return
 	}
