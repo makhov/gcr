@@ -192,6 +192,7 @@ On Kubernetes they reach gcr only if the handler lists them in
 | `gcr.dev/time-travel-interval` | duration, default `1s` | At most one point per interval. |
 | `gcr.dev/time-travel-keep` | number, default `20` | How many points to keep. |
 | `gcr.dev/fork-from` | absolute path | Start from a snapshot (`gcr snapshot`) instead of the image's entrypoint. |
+| `gcr.dev/fork-signal` | signal name or number (`SIGUSR2`, `USR2`, `12`) | Send this signal to a fork's init once it is restored, so it can re-seed or re-register. Needs `gcr.dev/fork-from`. Every fork also finds `/.gcr/fork.json` (`id`, `snapshot`, `created`). |
 | `gcr.dev/lazy-restore` | `true` | Run a restored or forked container before its memory has loaded. Needs `vm.unprivileged_userfaultfd = 1`. |
 | `gcr.dev/memory-merge` | `true` | Let the kernel (KSM) merge identical memory with other containers that opt in. Needs KSM running. |
 | `gcr.dev/migrate-in` | `host:port` | Make the container a migration target, listening there. |
