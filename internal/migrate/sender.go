@@ -55,15 +55,24 @@ type Result struct {
 	MemoryTracking bool `json:"memoryTracking"`
 }
 
-// Send migrates src to the receiver at target. work holds the local
-// round directories. If anything fails after the freeze, src is thawed and
-// keeps running, and the target is told to abort.
-func Send(ctx context.Context, src Source, target, token, work string) (res Result, retErr error) {
+// Send migrates src to the receiver at target, over TLS for an https://
+// target (t says how). work holds the local round directories. If
+// anything fails after the freeze, src is thawed and keeps running, and
+// the target is told to abort.
+func Send(ctx context.Context, src Source, target, token string, t TLS, work string) (res Result, retErr error) {
 	u, err := url.Parse(target)
 	if err != nil {
 		return res, err
 	}
-	c := &client{base: u, token: token, idBase: src.IDBase(), layers: src.Layers()}
+	tlsConf, err := t.clientConfig(u)
+	if err != nil {
+		return res, err
+	}
+	c := &client{
+		base: u, token: token, idBase: src.IDBase(), layers: src.Layers(),
+		http: &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConf}},
+	}
+	defer c.http.CloseIdleConnections()
 	// Once the target runs the container, the source must never run again:
 	// no abort, no thaw, whatever happens after.
 	handedOver := false
@@ -77,15 +86,18 @@ func Send(ctx context.Context, src Source, target, token, work string) (res Resu
 	parent := ""
 	if res.MemoryTracking && src.CanPreDump() {
 		for i := 0; i < maxPreCopyRounds; i++ {
-			round, port, err := c.startRound(ctx)
+			round, port, stop, err := c.startRound(ctx)
 			if err != nil {
 				return res, err
 			}
 			dir := filepath.Join(work, strconv.Itoa(round))
 			if err := os.MkdirAll(dir, 0o700); err != nil {
+				stop()
 				return res, err
 			}
-			if err := src.PreDump(ctx, dir, parent, u.Hostname(), port); err != nil {
+			err = src.PreDump(ctx, dir, parent, loopback, port)
+			stop()
+			if err != nil {
 				return res, fmt.Errorf("pre-copy round %d: %w", round, err)
 			}
 			pages := pagesWritten(dir)
@@ -99,18 +111,20 @@ func Send(ctx context.Context, src Source, target, token, work string) (res Resu
 		}
 	}
 
-	round, port, err := c.startRound(ctx)
+	round, port, stop, err := c.startRound(ctx)
 	if err != nil {
 		return res, err
 	}
+	defer stop()
 	dir := filepath.Join(work, strconv.Itoa(round))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return res, err
 	}
 	frozen := time.Now()
-	if err := src.FreezeDump(ctx, dir, parent, u.Hostname(), port); err != nil {
+	if err := src.FreezeDump(ctx, dir, parent, loopback, port); err != nil {
 		return res, fmt.Errorf("final dump: %w", err)
 	}
+	stop()
 	defer func() {
 		if retErr != nil && !handedOver {
 			if err := src.Thaw(); err != nil {
@@ -159,6 +173,15 @@ type client struct {
 	token  string
 	idBase uint32
 	layers []string
+	http   *http.Client
+}
+
+func (c *client) header(req *http.Request) {
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set(HeaderIDBase, strconv.Itoa(int(c.idBase)))
+	if len(c.layers) > 0 {
+		req.Header.Set(HeaderLayers, strings.Join(c.layers, ":"))
+	}
 }
 
 func (c *client) do(ctx context.Context, method, path string, body io.Reader, out any) error {
@@ -166,12 +189,8 @@ func (c *client) do(ctx context.Context, method, path string, body io.Reader, ou
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
-	req.Header.Set(HeaderIDBase, strconv.Itoa(int(c.idBase)))
-	if len(c.layers) > 0 {
-		req.Header.Set(HeaderLayers, strings.Join(c.layers, ":"))
-	}
-	resp, err := http.DefaultClient.Do(req)
+	c.header(req)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
 	}
@@ -190,12 +209,19 @@ func (c *client) post(ctx context.Context, path string, out any) error {
 	return c.do(ctx, http.MethodPost, path, nil, out)
 }
 
-func (c *client) startRound(ctx context.Context) (round, port int, err error) {
-	var r struct{ Round, Port int }
+// startRound has the target start a page server for the next round, and
+// returns the loopback port CRIU's page client sends that round's memory
+// to, and how to stop listening there once the dump is done.
+func (c *client) startRound(ctx context.Context) (round, port int, stop func(), err error) {
+	var r struct{ Round int }
 	if err := c.post(ctx, "/rounds", &r); err != nil {
-		return 0, 0, err
+		return 0, 0, nil, err
 	}
-	return r.Round, r.Port, nil
+	port, stop, err = c.pageProxy(ctx, r.Round)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	return r.Round, port, stop, nil
 }
 
 func (c *client) putDir(ctx context.Context, path, dir string) error {

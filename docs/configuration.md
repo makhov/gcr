@@ -63,6 +63,7 @@ error that names the setting and the values it accepts.
 | `NestedUserNamespaces` | `guarded`, `deny` | `guarded` |
 | `Landlock` | `standard`, `off` | `standard` |
 | `NetlinkPolicy` | `auto`, `off` | `auto` |
+| `MigrationTLS` | a table: `Cert`, `Key`, `CA` (file paths) | unset: plain HTTP |
 
 ### `UserNamespaces`
 
@@ -178,6 +179,34 @@ them).
 The program and its allowlist are shared by every gcr shim on the node,
 which is why the allowlist is fixed in the code and not set per handler.
 `off` takes a handler's containers out of it.
+
+### `MigrationTLS`
+
+Secures live migration to and from the handler's containers. Memory,
+files and the token all go over one connection to the target's
+`gcr.dev/migrate-in` address (CRIU's page servers listen on loopback
+only), so this covers all of it.
+
+```toml
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr.options.MigrationTLS]
+  Cert = '/etc/gcr/tls/node.crt'
+  Key = '/etc/gcr/tls/node.key'
+  CA = '/etc/gcr/tls/ca.crt'
+```
+
+- As a target, with `Cert` and `Key`, the container's receiver serves
+  TLS 1.3 only. With `CA` as well, it requires each source to present a
+  certificate signed by it.
+- As a source, with any of the three set, it migrates only to `https://`
+  targets and verifies them against `CA` (the system's roots without
+  one), presenting `Cert` and `Key` if set. The target's certificate must
+  be valid for the host in the URL.
+- `Cert` and `Key` go together. The files are read when a migration
+  starts, so they can be replaced in place.
+
+In a `ConfigPath` file the table is `[MigrationTLS]`. Set it on both
+hosts' handlers. The token
+(`gcr.dev/migrate-token`) is checked either way.
 
 ## Annotations
 

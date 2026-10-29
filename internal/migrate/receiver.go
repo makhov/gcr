@@ -5,6 +5,7 @@ package migrate
 import (
 	"context"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,14 +33,14 @@ const (
 // Receiver is the target side of a migration, run by the target container's
 // shim. Its Start waits on Wait, then restores from the returned directory.
 //
-//	POST /rounds   start a page server for the next round -> {"round","port"}
+//	POST /rounds   start a page server for the next round -> {"round"}
+//	POST /rounds/N/pages  Upgrade: the round's page stream (tunnel.go)
 //	PUT  /images   the final dump's images (tar), after its page server is done
 //	PUT  /upper    the writable layer (tar)
 //	POST /restore  restore and start; answers once the container runs
 //	POST /abort    give up; Start fails
 type Receiver struct {
 	ctx    context.Context
-	host   string
 	token  string
 	root   string
 	upper  func() (string, error)
@@ -59,20 +60,20 @@ type Receiver struct {
 	once    sync.Once
 }
 
-// NewReceiver listens on addr. root holds the round directories; upper
-// returns the target container's writable layer, idBase its user
-// namespace range (0 if none) and layers the read-only layers beneath its
-// writable layer.
-func NewReceiver(ctx context.Context, addr, token, root string, upper func() (string, error), idBase func() uint32, layers func() []string) (*Receiver, error) {
+// NewReceiver listens on addr, with TLS if t has a certificate. root
+// holds the round directories; upper returns the target container's
+// writable layer, idBase its user namespace range (0 if none) and layers
+// the read-only layers beneath its writable layer.
+func NewReceiver(ctx context.Context, addr, token string, t TLS, root string, upper func() (string, error), idBase func() uint32, layers func() []string) (*Receiver, error) {
 	if token == "" {
 		return nil, fmt.Errorf("%s needs %s: %w", AnnotationIn, AnnotationToken, errdefs.ErrInvalidArgument)
 	}
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
+	if _, _, err := net.SplitHostPort(addr); err != nil {
 		return nil, fmt.Errorf("%s=%q: %w", AnnotationIn, addr, errdefs.ErrInvalidArgument)
 	}
-	if host == "" {
-		host = "0.0.0.0"
+	tlsConf, err := t.serverConfig()
+	if err != nil {
+		return nil, err
 	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, err
@@ -81,13 +82,17 @@ func NewReceiver(ctx context.Context, addr, token, root string, upper func() (st
 	if err != nil {
 		return nil, err
 	}
+	if tlsConf != nil {
+		ln = tls.NewListener(ln, tlsConf)
+	}
 	r := &Receiver{
-		ctx:  ctx,
-		host: host, token: token, root: root, upper: upper, idBase: idBase, layers: layers,
+		ctx:   ctx,
+		token: token, root: root, upper: upper, idBase: idBase, layers: layers,
 		ready: make(chan string, 1), result: make(chan error, 1), aborted: make(chan struct{}),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /rounds", r.auth(r.startRound))
+	mux.HandleFunc("POST /rounds/{round}/pages", r.auth(r.pages))
 	mux.HandleFunc("PUT /images", r.auth(r.putImages))
 	mux.HandleFunc("PUT /upper", r.auth(r.putUpper))
 	mux.HandleFunc("POST /restore", r.auth(r.restore))
@@ -95,7 +100,7 @@ func NewReceiver(ctx context.Context, addr, token, root string, upper func() (st
 	r.srv = &http.Server{Handler: mux}
 	r.ln = ln
 	go func() { _ = r.srv.Serve(ln) }()
-	log.G(ctx).WithField("addr", ln.Addr()).Info("migration receiver listening")
+	log.G(ctx).WithField("addr", ln.Addr()).WithField("tls", tlsConf != nil).Info("migration receiver listening")
 	return r, nil
 }
 
@@ -202,13 +207,13 @@ func (r *Receiver) startRound(w http.ResponseWriter, req *http.Request) {
 		parent = filepath.Join("..", strconv.Itoa(round-1))
 	}
 	// Not the request's context: the page server outlives this request.
-	ps, err := startPageServer(r.ctx, r.host, dir, parent)
+	ps, err := startPageServer(r.ctx, loopback, dir, parent)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	r.round, r.ps = round, ps
-	_ = json.NewEncoder(w).Encode(map[string]int{"round": round, "port": ps.Port})
+	_ = json.NewEncoder(w).Encode(map[string]int{"round": round})
 }
 
 func (r *Receiver) putImages(w http.ResponseWriter, req *http.Request) {

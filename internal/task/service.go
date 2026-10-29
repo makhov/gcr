@@ -90,6 +90,7 @@ type extras struct {
 	recorder   *timetravel.Recorder   // time travel, if enabled
 	supervisor *supervisor.Supervisor // if the filter hands calls to user space
 	receiver   *migrate.Receiver      // incoming migration, if requested
+	migrateTLS migrate.TLS            // the handler's MigrationTLS
 	userns     *userns.Range          // the container's user namespace range
 	control    *control.Server
 	stateDir   string
@@ -158,7 +159,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 	if err != nil {
 		return nil, errgrpc.ToGRPC(err)
 	}
-	ex := &extras{stateDir: filepath.Join(stateRoot, ns, r.ID), id: r.ID}
+	ex := &extras{stateDir: filepath.Join(stateRoot, ns, r.ID), id: r.ID, migrateTLS: cfg.MigrationTLS}
 	var c *container.Container
 	opts := container.CreateOpts{
 		ID:         r.ID,
@@ -283,7 +284,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		// gcr's user namespace or one Kubernetes asked for.
 		prep.CgroupOwner = userns.DelegateCgroup(spec)
 		if addr, ok := spec.Annotations[migrate.AnnotationIn]; ok {
-			recv, err := migrate.NewReceiver(s.ctx, addr, spec.Annotations[migrate.AnnotationToken],
+			recv, err := migrate.NewReceiver(s.ctx, addr, spec.Annotations[migrate.AnnotationToken], cfg.MigrationTLS,
 				filepath.Join(ex.stateDir, "migrate-in"),
 				func() (string, error) { return c.UpperDir() },
 				func() uint32 { return c.IDBase() },
@@ -801,7 +802,7 @@ func (s *service) migrateOut(ctx context.Context, c *container.Container, ex *ex
 	defer c.SetMigrating(false)
 	work := filepath.Join(ex.stateDir, "migrate-out")
 	_ = os.RemoveAll(work)
-	res, err := migrate.Send(ctx, c, target, token, work)
+	res, err := migrate.Send(ctx, c, target, token, ex.migrateTLS, work)
 	if err == nil {
 		// Kept on failure: it holds the CRIU logs.
 		_ = os.RemoveAll(work)

@@ -196,7 +196,9 @@ tests check that each refused call is refused, by return value.
   same user namespace range, and for a fork the same snapshot at the same
   path on shared storage. A mismatch is refused before any memory is
   sent.
-- **The token travels in clear text.** Migrate over a trusted network.
+- **Encrypted only with `MigrationTLS`.** Without it, the migration's
+  one connection (memory, files and the token) is plain HTTP. Setting it
+  takes a certificate for each node, from a CA the platform runs.
 
 ### GPUs
 

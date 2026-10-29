@@ -12,7 +12,7 @@ import (
 
 func newTestReceiver(t *testing.T, idBase uint32, layers ...string) (*Receiver, string) {
 	t.Helper()
-	r, err := NewReceiver(context.Background(), "127.0.0.1:0", "secret", t.TempDir(),
+	r, err := NewReceiver(context.Background(), "127.0.0.1:0", "secret", TLS{}, t.TempDir(),
 		func() (string, error) { return t.TempDir(), nil },
 		func() uint32 { return idBase },
 		func() []string { return layers })
@@ -41,7 +41,7 @@ func post(t *testing.T, url, token string, idBase string) *http.Response {
 }
 
 func TestReceiverNeedsToken(t *testing.T) {
-	if _, err := NewReceiver(context.Background(), "127.0.0.1:0", "", t.TempDir(), nil, nil, nil); err == nil {
+	if _, err := NewReceiver(context.Background(), "127.0.0.1:0", "", TLS{}, t.TempDir(), nil, nil, nil); err == nil {
 		t.Fatal("receiver without a token accepted")
 	}
 	_, url := newTestReceiver(t, 0)

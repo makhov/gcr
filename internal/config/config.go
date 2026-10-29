@@ -18,6 +18,7 @@ import (
 
 	"github.com/makhov/gcr/internal/hardening"
 	"github.com/makhov/gcr/internal/landlock"
+	"github.com/makhov/gcr/internal/migrate"
 	"github.com/makhov/gcr/internal/netpolicy"
 	"github.com/makhov/gcr/internal/userns"
 )
@@ -35,6 +36,9 @@ type Config struct {
 	Landlock landlock.Level `toml:"Landlock"`
 	// NetlinkPolicy is "auto" (default) or "off"; see netpolicy.Mode.
 	NetlinkPolicy netpolicy.Mode `toml:"NetlinkPolicy"`
+	// MigrationTLS secures live migration to and from the handler's
+	// containers; see migrate.TLS. Unset, migrations are plain HTTP.
+	MigrationTLS migrate.TLS `toml:"MigrationTLS"`
 
 	// IOUID and IOGID own the container's stdio pipes. containerd sets
 	// them (in runc's options) for Kubernetes user namespace pods, so the
@@ -87,6 +91,9 @@ func FromOptions(a *anypb.Any) (Config, error) {
 		return c, err
 	}
 	if err := c.NetlinkPolicy.Validate(); err != nil {
+		return c, err
+	}
+	if err := c.MigrationTLS.Validate(); err != nil {
 		return c, err
 	}
 	return c, nil
