@@ -177,6 +177,15 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			return prep, err
 		}
 		prep.ForkFrom = forkFrom
+		if v, ok := spec.Annotations[container.AnnotationForkSignal]; ok {
+			if forkFrom == "" {
+				return prep, fmt.Errorf("%s needs %s: %w", container.AnnotationForkSignal,
+					container.AnnotationForkFrom, errdefs.ErrInvalidArgument)
+			}
+			if prep.ForkSignal, err = container.ParseSignal(v); err != nil {
+				return prep, err
+			}
+		}
 		switch {
 		case forkFrom != "":
 			prep.Layers, err = container.ForkLayers(forkFrom)

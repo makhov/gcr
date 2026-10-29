@@ -7,6 +7,7 @@
 package fork
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -252,6 +253,10 @@ func TestForkOfFork(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(first, "upper", "parent")); err != nil {
 		t.Fatalf("the first snapshot's layer lost /parent: %v", err)
 	}
+	// b's own fork file shadows the one a's layer brought along.
+	if s, err := b.ReadFile(container.ForkFile); err != nil || !strings.Contains(s, `"id":"`+b.ID+`"`) {
+		t.Fatalf("fork b: %s is %q, %v; want its own ID", container.ForkFile, s, err)
+	}
 	if n := b.ReadInt("/tmp/count"); n < at {
 		t.Fatalf("fork b: count %d, below the second snapshot's %d", n, at)
 	}
@@ -278,4 +283,67 @@ func mountsOf(t *testing.T, layer string) int {
 		}
 	}
 	return n
+}
+
+// TestForkIdentity checks that a fork can tell it is one: it finds its
+// own ID in /.gcr/fork.json, and a fork that asked for a signal gets it
+// once restored, with the file already in place for its handler to read.
+// The parent has neither.
+func TestForkIdentity(t *testing.T) {
+	const script = `
+		trap 'cat /.gcr/fork.json > /tmp/forked' USR2
+		i=0
+		while true; do
+			i=$((i+1)); echo $i > /tmp/count.new && mv /tmp/count.new /tmp/count
+			sleep 0.2
+		done`
+	ns := framework.NewNamespace(t, "gcr-e2e")
+	parent := ns.Run(framework.UniqueID("parent"), framework.Spec{Args: []string{"sh", "-c", script}})
+	framework.Eventually(t, time.Minute, "the parent to start counting", func() bool {
+		_, err := parent.ReadFile("/tmp/count")
+		return err == nil
+	})
+	dir := filepath.Join(framework.TempDir(t), "snapshot")
+	if err := control.NewClient(ns.Name, parent.ID).Snapshot(t.Context(), dir); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	quiet := ns.Run(framework.UniqueID("fork-quiet"), framework.Spec{
+		Args:        []string{"sh", "-c", script},
+		Annotations: map[string]string{container.AnnotationForkFrom: dir},
+	})
+	signalled := ns.Run(framework.UniqueID("fork-signalled"), framework.Spec{
+		Args: []string{"sh", "-c", script},
+		Annotations: map[string]string{
+			container.AnnotationForkFrom:   dir,
+			container.AnnotationForkSignal: "SIGUSR2",
+		},
+	})
+	for _, c := range []*framework.Container{quiet, signalled} {
+		var info container.ForkInfo
+		s, err := c.ReadFile(container.ForkFile)
+		if err != nil || json.Unmarshal([]byte(s), &info) != nil {
+			t.Fatalf("%s: %s is %q, %v", c.ID, container.ForkFile, s, err)
+		}
+		if info.ID != c.ID || info.Snapshot != dir || info.Created.IsZero() {
+			t.Fatalf("%s: %s says %+v", c.ID, container.ForkFile, info)
+		}
+		// Owned by the container's root, as anything it made itself.
+		if out, code := c.Exec("stat", "-c", "%u", container.ForkFile); code != 0 || strings.TrimSpace(out) != "0" {
+			t.Fatalf("%s: %s owned by %q", c.ID, container.ForkFile, out)
+		}
+	}
+	framework.Eventually(t, time.Minute, "the signalled fork's handler to run", func() bool {
+		s, _ := signalled.ReadFile("/tmp/forked")
+		return strings.Contains(s, `"id":"`+signalled.ID+`"`)
+	})
+	if _, err := quiet.ReadFile("/tmp/forked"); err == nil {
+		t.Fatal("a fork that asked for no signal got one")
+	}
+	if _, err := parent.ReadFile(container.ForkFile); err == nil {
+		t.Fatal("the parent has a fork file")
+	}
+	if st := signalled.Status(); st != containerd.Running {
+		t.Fatalf("the signalled fork is %s", st)
+	}
 }

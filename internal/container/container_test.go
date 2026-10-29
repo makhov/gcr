@@ -10,6 +10,7 @@ import (
 
 	"github.com/containerd/containerd/v2/core/mount"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"golang.org/x/sys/unix"
 )
 
 func TestIDMapRootfs(t *testing.T) {
@@ -118,6 +119,19 @@ func TestReadLayers(t *testing.T) {
 		}
 		if _, err := ReadLayers(dir); err == nil {
 			t.Errorf("layer %q accepted", bad)
+		}
+	}
+}
+
+func TestParseSignal(t *testing.T) {
+	for _, s := range []string{"SIGUSR2", "USR2", "usr2", "12"} {
+		if sig, err := ParseSignal(s); err != nil || sig != unix.SIGUSR2 {
+			t.Errorf("%q: %v, %v", s, sig, err)
+		}
+	}
+	for _, s := range []string{"", "SIGNOPE", "0", "99"} {
+		if _, err := ParseSignal(s); err == nil {
+			t.Errorf("%q accepted", s)
 		}
 	}
 }
