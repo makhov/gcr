@@ -7,6 +7,8 @@
 //	gcr [-n namespace] snapshot ID DIR
 //	gcr snapshot-users DIR
 //	gcr snapshot-rm DIR...
+//	gcr snapshot-push [-plain-http] DIR REF
+//	gcr snapshot-pull [-plain-http] [-store DIR] REF DIR
 //	gcr [-n namespace] migrate [-token TOKEN] ID TARGET-URL
 package main
 
@@ -23,6 +25,7 @@ import (
 
 	"github.com/makhov/gcr/internal/control"
 	"github.com/makhov/gcr/internal/snapshot"
+	"github.com/makhov/gcr/internal/snapshot/registry"
 )
 
 func main() {
@@ -33,6 +36,8 @@ func main() {
 			"       gcr [-n namespace] snapshot ID DIR\n"+
 			"       gcr snapshot-users DIR\n"+
 			"       gcr snapshot-rm DIR...\n"+
+			"       gcr snapshot-push [-plain-http] DIR REF\n"+
+			"       gcr snapshot-pull [-plain-http] [-store DIR] REF DIR\n"+
 			"       gcr [-n namespace] migrate [-token TOKEN] ID TARGET-URL\n")
 	}
 	flag.Parse()
@@ -94,6 +99,37 @@ func run(ctx context.Context, ns string, args []string) error {
 			errs = append(errs, snapshot.Remove(dir))
 		}
 		return errors.Join(errs...)
+	case len(args) >= 1 && (args[0] == "snapshot-push" || args[0] == "snapshot-pull"):
+		// Through an OCI registry: REF is like registry.example.com/snapshots/warm:v1.
+		fs := flag.NewFlagSet(args[0], flag.ExitOnError)
+		plainHTTP := fs.Bool("plain-http", false, "speak HTTP, not HTTPS, to the registry (always for loopback)")
+		store := fs.String("store", registry.DefaultStore, "where the layers beneath pulled snapshots go")
+		_ = fs.Parse(args[1:])
+		if fs.NArg() != 2 {
+			flag.Usage()
+			os.Exit(2)
+		}
+		ref := fs.Arg(1)
+		if args[0] == "snapshot-pull" {
+			ref = fs.Arg(0)
+		}
+		repo, err := registry.Repository(ref, *plainHTTP)
+		if err != nil {
+			return err
+		}
+		tag := repo.Reference.Reference
+		if tag == "" {
+			tag = "latest"
+		}
+		if args[0] == "snapshot-pull" {
+			return registry.Pull(ctx, repo, tag, fs.Arg(1), *store)
+		}
+		desc, err := registry.Push(ctx, fs.Arg(0), repo, tag)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s@%s\n", repo.Reference.Registry+"/"+repo.Reference.Repository, desc.Digest)
+		return nil
 	case len(args) >= 1 && args[0] == "migrate":
 		fs := flag.NewFlagSet("migrate", flag.ExitOnError)
 		token := fs.String("token", os.Getenv("GCR_MIGRATE_TOKEN"), "token the target expects (default $GCR_MIGRATE_TOKEN)")

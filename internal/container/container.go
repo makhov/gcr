@@ -177,7 +177,9 @@ type Container struct {
 	exited     chan struct{}
 	onExit     func(*Container)
 	onOOM      func(*Container)
-	oomKills   uint64 // told of by onOOM; guarded by mu
+	oomKills   uint64        // told of by onOOM; guarded by mu
+	cgroupDir  string        // read at start, for OOM kills at exit; guarded by mu
+	oomWatched chan struct{} // the watcher told of a kill; guarded by mu
 	// replacing is set while a rewind kills the processes; their exit
 	// is then reported on replaced instead of to containerd.
 	replacing bool
@@ -1155,7 +1157,7 @@ func (c *Container) track(proc *libcontainer.Process) error {
 
 // markExited records the init's exit and tells containerd.
 func (c *Container) markExited(st *os.ProcessState) {
-	c.noteOOM()
+	c.noteOOMAtExit(exitStatus(st) == 128+uint32(syscall.SIGKILL))
 	c.mu.Lock()
 	if c.status == Stopped {
 		c.mu.Unlock()

@@ -538,6 +538,57 @@ References are kept on the host the containers run on. With snapshots on
 shared storage, check each host before deleting one. Checkpoints of a
 fork (containerd's, not snapshots) hold no reference.
 
+### Moving snapshots between hosts
+
+Snapshots travel through any OCI registry: one backed by S3, ECR, GHCR,
+Harbor, Zot.
+
+```sh
+# where the snapshot was taken
+gcr snapshot-push /var/lib/gcr/snapshots/warm registry.example.com/snapshots/warm:v1
+# anywhere else
+gcr snapshot-pull registry.example.com/snapshots/warm:v1 /var/lib/gcr/snapshots/warm
+ctr run -d --runtime io.containerd.gcr.v2 \
+  --annotation gcr.dev/fork-from=/var/lib/gcr/snapshots/warm IMAGE fork-1 CMD...
+```
+
+- **What gets pushed.** A snapshot is one artifact: its process images,
+  and the writable layers a fork mounts (its own, and those of the
+  snapshots it was forked from).
+  - Each part is a zstd-compressed tar, packed deterministically, so a
+    layer that several snapshots share is stored once in the registry
+    and uploaded once.
+  - The tars keep numeric owners, xattrs and overlay's whiteouts.
+- **Where a pull puts things.**
+  - The snapshot goes to the directory given.
+  - The layers beneath it go to a store (`-store`, default
+    `/var/lib/gcr/layers`), shared by every snapshot pulled onto the host
+    that has them.
+  - Both are counted like snapshots taken there (`gcr snapshot-users`,
+    `gcr snapshot-rm`).
+- **Credentials** come from Docker's config (`docker login`). Registries
+  on loopback are spoken to over plain HTTP; `-plain-http` forces it for
+  others.
+- **What the target needs.** Pulling claims the snapshot's user namespace
+  range on the target, which forks map, and fails if another container
+  there has it: plan ranges across hosts, or keep snapshots' ranges for
+  them. A fork also needs the image the snapshot was taken from, on the
+  same architecture (checked), and a CPU with the features the
+  processes were using (CRIU checks).
+
+A registry storing in S3, for example the distribution registry's own:
+
+```yaml
+# config.yml for docker.io/library/registry:3
+version: 0.1
+storage:
+  s3:
+    region: eu-west-1
+    bucket: gcr-snapshots
+http:
+  addr: :5000
+```
+
 ### Lazy restore
 
 A restore or fork loads the snapshot's memory before the container runs,
@@ -678,7 +729,7 @@ CRI, checkpoint/restore, static helper programs to run in containers):
 | `checkpoint` | a counter carries on after checkpoint/restore, in the same user namespace |
 | `timetravel` | a timeline, a rewind; the counter, the filesystem and the recording carry on from the point |
 | `gpu` | checkpoint and restore of CUDA state, and forks of a model in GPU memory (needs a GPU node; skipped elsewhere); a GPU gcr cannot describe is refused checkpoints |
-| `fork` | ten containers from one snapshot: each resumes its memory and mounts the snapshot's layer beneath its own; forks of forks; a fork's identity and signal; lazy restore, and what it saves; merged memory |
+| `fork` | ten containers from one snapshot: each resumes its memory and mounts the snapshot's layer beneath its own; forks of forks; a fork's identity and signal; lazy restore, and what it saves; merged memory; a snapshot of a fork through a registry, forked after everything local is gone |
 | `workloads` | real programs forked: Python, Node.js and JVM servers holding a model in memory, and Postgres with a table; each fork serves, keeps its state and diverges; a re-seed on the fork signal |
 | `migrate` | live migration between containerd namespaces (pre-copy on x86); a refused one leaves the source running |
 | `hardening` | refused system calls with hardening on and off; supervised mounts, by exact return value; nested user namespaces; the netlink policy (BPF LSM) |
