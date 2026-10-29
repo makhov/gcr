@@ -15,6 +15,7 @@ import (
 	"github.com/containerd/containerd/v2/contrib/apparmor"
 	"github.com/containerd/containerd/v2/contrib/seccomp"
 	"github.com/containerd/containerd/v2/pkg/oci"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/makhov/gcr/internal/netpolicy"
 	"github.com/makhov/gcr/internal/userns"
@@ -134,13 +135,19 @@ func TestSupervisedMountShell(t *testing.T) {
 		mkdir -p /srv/a /srv/b; try bind mount --bind /srv/a /srv/b
 		# A bind remount: a plain remount would pass the options from
 		# /proc/mounts, where tmpfs shows its owner as an unmapped host ID.
-		try remount mount -o remount,bind,ro /mnt`
+		try remount mount -o remount,bind,ro /mnt
+		# A read-only volume stays read-only.
+		try rw-remount mount -o remount,bind,rw /ro
+		echo x > /ro/x 2>/dev/null && echo "ro-write OK" || echo "ro-write EPERM"`
+	vol := framework.TempDir(t)
+	ro := specs.Mount{Type: "bind", Source: vol, Destination: "/ro", Options: []string{"rbind", "ro"}}
 	for _, image := range []string{"", "docker.io/library/debian:trixie"} {
 		out, _ := ns.Output(framework.UniqueID("mnt"), framework.Spec{
-			Image: image, Args: []string{"sh", "-c", script}, SpecOpts: withSysAdmin,
+			Image: image, Args: []string{"sh", "-c", script}, SpecOpts: withSysAdmin, Mounts: []specs.Mount{ro},
 		})
 		t.Logf("%s:\n%s", cmp.Or(image, "busybox"), out)
 		expect(t, results(out), "OK", "tmpfs", "visible", "proc", "bind", "remount")
+		expect(t, results(out), "EPERM", "rw-remount", "ro-write")
 	}
 
 	// Without CAP_SYS_ADMIN the kernel refuses, and gcr does not mount for
@@ -207,8 +214,8 @@ func TestNetlinkPolicy(t *testing.T) {
 	}
 	got := e.run(t, framework.Spec{}, "nested")
 	expect(t, got, "OK", "nested_userns", "link_veth", "link_dummy", "link_bridge")
-	expect(t, got, "EPERM", "link_bond", "link_macvlan")
-	expect(t, got, "NO", "link_bond_exists", "link_macvlan_exists")
+	expect(t, got, "EPERM", "link_bond", "link_macvlan", "link_dummy_then_bond")
+	expect(t, got, "NO", "link_bond_exists", "link_macvlan_exists", "link_dup_exists")
 	// The refusals were the policy's: its counter moved.
 	_, refusedAfter, err := netpolicy.PinnedStats()
 	if err != nil {

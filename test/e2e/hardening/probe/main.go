@@ -230,14 +230,19 @@ func nestedChild() {
 	// dummy, bridge) and what it refuses (bonding, macvlan, which has to
 	// sit on another link).
 	for _, k := range []string{"veth", "dummy", "bridge", "bond"} {
-		fmt.Println("link_"+k, newLink("p-"+k, k, 0))
+		fmt.Println("link_"+k, newLink("p-"+k, 0, k))
 	}
+	// Two kinds in one request: the kernel goes by the last, so must the
+	// policy.
+	fmt.Println("link_dummy_then_bond", newLink("p-dup", 0, "dummy", "bond"))
+	_, err := net.InterfaceByName("p-dup")
+	fmt.Println("link_dup_exists", map[bool]string{true: "YES", false: "NO"}[err == nil])
 	parent, err := net.InterfaceByName("p-dummy")
 	if err != nil {
 		fmt.Println("link_macvlan NOPARENT")
 		return
 	}
-	fmt.Println("link_macvlan", newLink("p-macvlan", "macvlan", parent.Index))
+	fmt.Println("link_macvlan", newLink("p-macvlan", parent.Index, "macvlan"))
 	// A refused request must have made nothing.
 	for _, k := range []string{"bond", "macvlan"} {
 		_, err := net.InterfaceByName("p-" + k)
@@ -247,8 +252,9 @@ func nestedChild() {
 
 // newLink asks the kernel for a link of kind (RTM_NEWLINK with
 // IFLA_LINKINFO/IFLA_INFO_KIND, on parent if not 0) and reports OK or the
-// errno's name, from sendmsg or the kernel's acknowledgement.
-func newLink(name, kind string, parent int) string {
+// errno's name, from sendmsg or the kernel's acknowledgement. Given more
+// than one kind, it sends an IFLA_INFO_KIND for each.
+func newLink(name string, parent int, kinds ...string) string {
 	attr := func(typ uint16, payload []byte) []byte {
 		b := make([]byte, 4+len(payload))
 		binary.LittleEndian.PutUint16(b[0:], uint16(4+len(payload)))
@@ -263,7 +269,11 @@ func newLink(name, kind string, parent int) string {
 		binary.LittleEndian.PutUint32(p, uint32(parent))
 		attrs = append(attrs, attr(unix.IFLA_LINK, p)...)
 	}
-	attrs = append(attrs, attr(unix.IFLA_LINKINFO|unix.NLA_F_NESTED, attr(unix.IFLA_INFO_KIND, append([]byte(kind), 0)))...)
+	var info []byte
+	for _, kind := range kinds {
+		info = append(info, attr(unix.IFLA_INFO_KIND, append([]byte(kind), 0))...)
+	}
+	attrs = append(attrs, attr(unix.IFLA_LINKINFO|unix.NLA_F_NESTED, info)...)
 	msg := make([]byte, unix.NLMSG_HDRLEN+unix.SizeofIfInfomsg, unix.NLMSG_HDRLEN+unix.SizeofIfInfomsg+len(attrs))
 	msg = append(msg, attrs...)
 	h := (*unix.NlMsghdr)(unsafe.Pointer(&msg[0]))

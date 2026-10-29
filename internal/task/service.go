@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	eventstypes "github.com/containerd/containerd/api/events"
 	taskv2 "github.com/containerd/containerd/api/runtime/task/v2"
@@ -340,6 +341,15 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		policy, err := timetravel.ParsePolicy(spec.Annotations)
 		if err != nil {
 			return prep, err
+		}
+		if policy != nil {
+			// Each point is a dump of the container's memory, on the
+			// node's disk: as many and as often as the handler allows.
+			lim := cfg.TimeTravel
+			if policy.Interval < time.Duration(lim.MinInterval) || policy.Keep > lim.MaxKeep {
+				return prep, fmt.Errorf("time travel every %s keeping %d points: the handler allows at most every %s, %d points (TimeTravel): %w",
+					policy.Interval, policy.Keep, time.Duration(lim.MinInterval), lim.MaxKeep, errdefs.ErrInvalidArgument)
+			}
 		}
 		if policy != nil {
 			if len(gpu.Minors(spec)) > 0 {
