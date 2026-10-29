@@ -203,6 +203,36 @@ static int become(struct creds *c)
 	return syscall(SYS_capset, &hdr, data);
 }
 
+// confine_like takes on the caller's AppArmor profile, so the mount is
+// mediated by it as the caller's own would be (a profile may refuse
+// mounts, as docker-default does). The shim is unconfined, which may
+// change to any profile. Without AppArmor there is nothing to take on.
+static int confine_like(int procfd, int hostproc)
+{
+	char label[256], cmd[300];
+	ssize_t n;
+	int fd = openat(procfd, "attr/apparmor/current", O_RDONLY | O_CLOEXEC);
+
+	if (fd < 0)
+		return errno == ENOENT || errno == EINVAL || errno == ENOTDIR ? 0 : -1;
+	n = read(fd, label, sizeof(label) - 1);
+	close(fd);
+	if (n < 0)
+		return -1;
+	label[n] = '\0';
+	// "profile (mode)\n", or "unconfined".
+	label[strcspn(label, " \n")] = '\0';
+	if (label[0] == '\0' || strcmp(label, "unconfined") == 0)
+		return 0;
+	snprintf(cmd, sizeof(cmd), "changeprofile %s", label);
+	fd = openat(hostproc, "thread-self/attr/apparmor/current", O_WRONLY | O_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	n = write(fd, cmd, strlen(cmd));
+	close(fd);
+	return n < 0 ? -1 : 0;
+}
+
 static const char *arg(const char *name)
 {
 	const char *v = getenv(name);
@@ -290,13 +320,27 @@ static void do_mount(void)
 	if (child < 0)
 		FAIL(errno);
 	if (child == 0) {
+		// The caller's profile and credentials before anything else is
+		// done in its namespaces.
+		if (confine_like(procfd, hostproc) < 0)
+			_exit(errno ? errno : EPERM);
+		if (become(&c) < 0)
+			_exit(errno ? errno : EPERM);
 		// Paths through the caller's descriptors are copies already.
 		if (source == arg("_GCR_SOURCE"))
 			source = self_path(source, hostproc, &caller, sbuf, sizeof(sbuf));
 		if (target == arg("_GCR_TARGET"))
 			target = self_path(target, hostproc, &caller, tbuf, sizeof(tbuf));
-		if (become(&c) < 0)
-			_exit(errno ? errno : EPERM);
+		// Nothing of the host's or the caller's stays open for the mount:
+		// a process of the container could reach what this one holds.
+		close(hostproc);
+		close(procfd);
+		close(pidfd);
+		close(rootfd);
+		close(cwdfd);
+		for (size_t i = 0; i < NNS; i++)
+			if (fds[i] >= 0)
+				close(fds[i]);
 		if (mount(source, target, arg("_GCR_FSTYPE"), flags, arg("_GCR_DATA")) < 0)
 			_exit(errno ? errno : EPERM);
 		_exit(0);
@@ -312,6 +356,12 @@ __attribute__((constructor)) static void gcr_nsexec(void)
 
 	if (!mode)
 		return;
+	// Root on the host, about to enter a container's namespaces: nothing
+	// there may ptrace this process or its child, nor read their memory
+	// or descriptors through /proc. Set before the child is forked, which
+	// inherits it; changing credentials only ever lowers it.
+	if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) < 0)
+		_exit(errno);
 	if (strcmp(mode, "mount") == 0)
 		do_mount();
 	_exit(EINVAL);

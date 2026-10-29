@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/containerd/containerd/v2/contrib/apparmor"
 	"github.com/containerd/containerd/v2/contrib/seccomp"
 	"github.com/containerd/containerd/v2/pkg/oci"
 
@@ -88,22 +89,34 @@ func TestOff(t *testing.T) {
 
 func TestSupervisedMount(t *testing.T) {
 	e := setup(t)
-	for _, tc := range []struct {
-		name        string
-		annotations map[string]string
-	}{
-		{"user namespace", nil},
-		{"host users", map[string]string{userns.AnnotationHostUsers: "true"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := e.run(t, framework.Spec{SpecOpts: withSysAdmin, Annotations: tc.annotations}, "mount")
-			// A refusal is -1 with errno set, not a value a caller would
-			// take for success.
-			expect(t, got, "EPERM", "mount_ramfs")
-			expect(t, got, "OK", "mount_tmpfs", "mount_self_task_ns", "mount_self_task_ns_same",
-				"mount_thread_self_ns", "mount_thread_self_ns_same", "mount_fd_target", "mount_fd_target_same")
-		})
+	got := e.run(t, framework.Spec{SpecOpts: withSysAdmin}, "mount")
+	// A refusal is -1 with errno set, not a value a caller would take for
+	// success.
+	expect(t, got, "EPERM", "mount_ramfs")
+	expect(t, got, "OK", "mount_tmpfs", "mount_self_task_ns", "mount_self_task_ns_same",
+		"mount_thread_self_ns", "mount_thread_self_ns_same", "mount_fd_target", "mount_fd_target_same")
+
+	// Without a user namespace gcr does not mount for the container: it
+	// would with the init namespace's privilege. The kernel and the LSM
+	// decide, as with runc (here there is no LSM profile: ramfs mounts).
+	got = e.run(t, framework.Spec{SpecOpts: withSysAdmin,
+		Annotations: map[string]string{userns.AnnotationHostUsers: "true"}}, "mount")
+	expect(t, got, "OK", "mount_ramfs", "mount_tmpfs")
+}
+
+// TestSupervisedMountAppArmor: the supervisor mounts as the container
+// would, under its AppArmor profile too, and containerd's default one
+// refuses mounts.
+func TestSupervisedMountAppArmor(t *testing.T) {
+	const profile = "cri-containerd.apparmor.d"
+	b, err := os.ReadFile("/sys/kernel/security/apparmor/profiles")
+	if err != nil || !strings.Contains(string(b), profile+" ") {
+		t.Skipf("no AppArmor profile %s loaded", profile)
 	}
+	e := setup(t)
+	got := e.run(t, framework.Spec{SpecOpts: append(withSysAdmin, apparmor.WithProfile(profile))}, "mount")
+	// AppArmor's refusal, as the same container gets on runc.
+	expect(t, got, "EACCES", "mount_tmpfs")
 }
 
 // TestSupervisedMountShell mounts with busybox, which reads mount options
