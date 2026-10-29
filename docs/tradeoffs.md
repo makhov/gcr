@@ -50,9 +50,13 @@ snapshot settle at about 210 MiB instead of 1.25 GiB.
   the class of escapes through leaked host file descriptors
   (CVE-2024-21626).
 
-Tools that need more than a default container keep working: Chrome's
-sandbox, bubblewrap and rootless podman get guarded nested user
-namespaces, and Docker-in-Docker runs unprivileged.
+Some tools that need more than a default container keep working:
+Docker-in-Docker runs unprivileged, and nested user namespaces (Chrome's
+sandbox) are guarded rather than refused. Tools that mount inside a
+nested namespace (bubblewrap, rootless podman) need a handler with
+Landlock off. [Compatibility](compatibility.md) lists what the hardening
+breaks and the way around each; [configuration](configuration.md) has the
+knobs.
 
 **Fast and compatible.** gcr runs libcontainer inside the shim instead of
 executing a runc binary per operation: container start is 16 ms median
@@ -81,6 +85,12 @@ tests check that each refused call is refused, by return value.
   no denied set and no user namespace, only Landlock. Turn them on with
   `Hardening = 'always'` and `UserNamespaces = 'always'` on a runtime
   handler, or with pod settings (`RuntimeDefault`, `hostUsers: false`).
+- **Some workloads need the hardening relaxed.** io_uring programs,
+  in-container eBPF and profilers, packet capture, kernel WireGuard and
+  VXLAN, FUSE mounts, and sandboxing tools that mount (bubblewrap,
+  rootless podman) are refused under the defaults. Each needs a handler
+  configured for it ([compatibility](compatibility.md)). There is no
+  per-container opt-out.
 - **Landlock has gaps.** It does not apply to processes started with
   `exec` (it would break debuggers), to containers that can mount
   (Docker-in-Docker), to privileged containers, or to containers that join
