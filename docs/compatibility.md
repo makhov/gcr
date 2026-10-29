@@ -119,7 +119,7 @@ under it.
 ## Netlink policy (hardened containers, BPF LSM enabled)
 
 Containers may create links of kind `veth`, `dummy`, `bridge` and `vlan`,
-and the common qdiscs, classes and filters (the README lists them). Other
+and the common qdiscs, classes and filters ([hardening](hardening.md#netlink-policy) lists them). Other
 kinds are refused:
 
 | Refused | Who uses it |
