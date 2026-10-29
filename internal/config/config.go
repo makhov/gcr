@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"time"
 
 	runcoptions "github.com/containerd/containerd/api/types/runc/options"
 	"github.com/containerd/containerd/api/types/runtimeoptions/v1"
@@ -62,6 +63,9 @@ type Config struct {
 	// (gcr.dev/fork-from), with every layer beneath them: required for
 	// pods to fork at all, and checked for any container if set.
 	SnapshotRoots []string `toml:"SnapshotRoots"`
+	// TimeTravel limits what a container's annotations may ask of time
+	// travel: every point is a dump of its memory, kept on the node.
+	TimeTravel TimeTravelLimits `toml:"TimeTravel"`
 
 	// IOUID and IOGID own the container's stdio pipes. containerd sets
 	// them (in runc's options) for Kubernetes user namespace pods, so the
@@ -69,12 +73,34 @@ type Config struct {
 	IOUID, IOGID int `toml:"-"`
 }
 
+// TimeTravelLimits bound gcr.dev/time-travel-interval and -keep.
+type TimeTravelLimits struct {
+	// MinInterval is the shortest interval between points a container
+	// may ask for (default 100ms).
+	MinInterval Duration `toml:"MinInterval"`
+	// MaxKeep is the most points a container may keep (default 50).
+	MaxKeep int `toml:"MaxKeep"`
+}
+
+// Duration is a time.Duration written as Go writes them ("1s", "250ms").
+type Duration time.Duration
+
+func (d *Duration) UnmarshalText(b []byte) error {
+	v, err := time.ParseDuration(string(b))
+	if err != nil {
+		return fmt.Errorf("%q: %w", b, errdefs.ErrInvalidArgument)
+	}
+	*d = Duration(v)
+	return nil
+}
+
 // FromOptions decodes the runtime options of a create request. No options
 // means the defaults.
 func FromOptions(a *anypb.Any) (Config, error) {
 	c := Config{UserNamespaces: userns.Auto, Hardening: hardening.Standard,
 		NestedUserNamespaces: hardening.Guarded, Landlock: landlock.Standard,
-		NetlinkPolicy: netpolicy.Auto}
+		NetlinkPolicy: netpolicy.Auto,
+		TimeTravel:    TimeTravelLimits{MinInterval: Duration(100 * time.Millisecond), MaxKeep: 50}}
 	if a == nil || len(a.GetValue()) == 0 {
 		return c, nil
 	}
@@ -124,6 +150,9 @@ func FromOptions(a *anypb.Any) (Config, error) {
 			return c, fmt.Errorf("PodAnnotations: %q is not one of %v (the others need no listing): %w",
 				a, RestrictedAnnotations, errdefs.ErrInvalidArgument)
 		}
+	}
+	if c.TimeTravel.MinInterval < 0 || c.TimeTravel.MaxKeep < 1 {
+		return c, fmt.Errorf("TimeTravel: MinInterval must be at least 0 and MaxKeep at least 1: %w", errdefs.ErrInvalidArgument)
 	}
 	for _, r := range c.SnapshotRoots {
 		if !filepath.IsAbs(r) || filepath.Clean(r) == "/" {

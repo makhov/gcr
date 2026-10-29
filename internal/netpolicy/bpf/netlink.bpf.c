@@ -159,6 +159,37 @@ static __always_inline int find_attr(const unsigned char *data, __u32 off, __u32
 	return -1;
 }
 
+// repeated says whether attribute type want occurs more than once in
+// [off, end) of data: 1 if so, 0 if not, -1 if undecided. The kernel's
+// parser keeps the last of several, find_attr finds the first: "veth"
+// then "vxlan" would pass as veth. No client sends a kind twice, so such
+// a message is refused. (A separate pass, counting only: carrying the
+// last match through the loop is more than the verifier will follow. A
+// global function, so it is verified once, not at every call inlined in
+// the loop over messages; its arguments must be scalars.)
+__noinline int repeated(__u64 addr, __u32 off, __u32 end, __u16 want)
+{
+	const unsigned char *data = (const unsigned char *)addr;
+	struct nlattr a;
+	int seen = 0;
+
+	for (int i = 0; i < MAX_ATTRS; i++) {
+		if (off + NLA_HDRLEN > end)
+			return 0;
+		if (bpf_probe_read_kernel(&a, sizeof(a), data + off))
+			return -1;
+		if (a.nla_len < NLA_HDRLEN || off + a.nla_len > end)
+			return -1;
+		if ((a.nla_type & NLA_TYPE_MASK) == want) {
+			if (seen)
+				return 1;
+			seen = 1;
+		}
+		off += (a.nla_len + 3) & ~3u;
+	}
+	return -1;
+}
+
 // kind_allowed says whether the kind in the attribute payload [off, end)
 // is in map. The payload is a string of that length, with a trailing NUL
 // only sometimes: iproute2 sends "veth" in four bytes, the kernel's own
@@ -198,11 +229,15 @@ static __always_inline int check_message(const unsigned char *data, __u32 off, _
 		attrs = off + NLMSG_HDRLEN + IFINFOMSG_LEN;
 		if (attrs > end)
 			return 0;
+		if (repeated((__u64)data, attrs, end, IFLA_LINKINFO))
+			return -1;
 		r = find_attr(data, attrs, end, IFLA_LINKINFO, &p, &pe);
 		if (r < 0)
 			return -1;
 		if (r == 0)
 			return 0;
+		if (repeated((__u64)data, p, pe, IFLA_INFO_KIND))
+			return -1;
 		r = find_attr(data, p, pe, IFLA_INFO_KIND, &q, &qe);
 		if (r < 0)
 			return -1;
@@ -216,6 +251,8 @@ static __always_inline int check_message(const unsigned char *data, __u32 off, _
 		attrs = off + NLMSG_HDRLEN + TCMSG_LEN;
 		if (attrs > end)
 			return 0;
+		if (repeated((__u64)data, attrs, end, TCA_KIND))
+			return -1;
 		r = find_attr(data, attrs, end, TCA_KIND, &p, &pe);
 		if (r < 0)
 			return -1;

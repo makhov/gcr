@@ -54,6 +54,7 @@ container that brings a profile is left to it here.
 | `AF_KEY` | Legacy IPsec over PF_KEY (ipsec-tools/racoon, strongSwan's `kernel-pfkey` plugin). strongSwan's default netlink path is unaffected. | Use the netlink XFRM path. |
 | `AF_ALG` | The kernel crypto API from user space: iwd, OpenSSL's `afalg` engine, libkcapi, some cryptsetup operations | Use user-space crypto (OpenSSL's default). |
 | `clone3`: `ENOSYS` | glibc, Go, systemd and crun fall back to `clone`. | Only programs that call `clone3` with no fallback would notice. |
+| Tunnels made by `ioctl` (`SIOCADDTUNNEL`, `SIOCCHGTUNNEL` and the PRL calls on the `ipip`, `gre` and `sit` devices), with `CAP_NET_ADMIN` | Old `ip tunnel add` (iproute2 before netlink support), legacy tunnel scripts | `ip link add ... type ipip` and the like over netlink, which the netlink policy decides. |
 | `NETLINK_NETFILTER` without `CAP_NET_ADMIN` (`NestedUserNamespaces = 'guarded'`) | Firewall rules in a namespace the container made itself: rootless Docker, and podman networks that need nftables or iptables (netavark bridge networks). podman's default rootless networking (pasta) needs none. | Give the container `CAP_NET_ADMIN`, or use host networking for the nested containers. |
 | `CLONE_NEWUSER` (`NestedUserNamespaces = 'deny'`) | Chrome's and Chromium's sandbox (Puppeteer, Playwright, Electron), bubblewrap, Flatpak, rootless podman and buildah, `unshare -r`, Nix and Bazel sandboxes | Use the default, `guarded`. Or run Chrome with `--no-sandbox` and forgo its sandbox. |
 
@@ -95,10 +96,14 @@ never confined, so debuggers and `kubectl debug` keep working.
 
 ## Supervised mounts (containers that can mount)
 
-Containers with `CAP_SYS_ADMIN`, and nested namespaces in gcr's own
-profile without Landlock, may mount `proc`, `sysfs`, `tmpfs`, `devpts`,
-`mqueue`, `cgroup2` and `overlay`, plus bind mounts, remounts and
-propagation changes. Refused:
+Containers in a user namespace with `CAP_SYS_ADMIN`, and nested
+namespaces in gcr's own profile without Landlock, may mount `proc`,
+`sysfs`, `tmpfs`, `devpts`, `mqueue`, `cgroup2` and `overlay`, plus bind
+mounts, remounts and propagation changes, under the container's AppArmor
+profile. A remount may not make writable what is read-only (a read-only
+volume, or `readOnlyRootFilesystem`), whoever mounted it. Containers
+without a user namespace are not supervised: the kernel and the LSM
+decide, as with runc. Refused:
 
 | Refused | Who uses it | Way around |
 | --- | --- | --- |

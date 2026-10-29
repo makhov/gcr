@@ -256,3 +256,15 @@ func TestNestedUserNamespacesGuarded(t *testing.T) {
 		t.Fatal("CLONE_NEWUSER allowed with NestedUserNamespaces = deny")
 	}
 }
+
+// Tunnels made by ioctl, which the netlink policy does not see, are
+// refused in gcr's own profile.
+func TestTunnelIoctls(t *testing.T) {
+	s := &specs.Spec{Process: &specs.Process{Capabilities: &specs.LinuxCapabilities{Bounding: []string{"CAP_NET_ADMIN"}}}}
+	Apply(s, Options{Level: Standard})
+	for _, cmd := range []uint64{0x89f1, 0x89f3, 0x89f5, 0x89f7} {
+		if r := rule(s.Linux.Seccomp.Syscalls, "ioctl", 1, cmd); r == nil || r.Action != specs.ActErrno {
+			t.Errorf("ioctl %#x not refused", cmd)
+		}
+	}
+}

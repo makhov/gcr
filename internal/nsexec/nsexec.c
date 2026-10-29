@@ -19,6 +19,7 @@
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -341,6 +342,16 @@ static void do_mount(void)
 		for (size_t i = 0; i < NNS; i++)
 			if (fds[i] >= 0)
 				close(fds[i]);
+		// A remount may not make writable what is read-only: a volume, or
+		// the root filesystem, mounted read-only for the container (the
+		// kernel locks those only when it copies them into a namespace).
+		if ((flags & MS_REMOUNT) && !(flags & MS_RDONLY)) {
+			struct statvfs st;
+			if (statvfs(target, &st) < 0)
+				_exit(errno ? errno : EPERM);
+			if (st.f_flag & ST_RDONLY)
+				_exit(EPERM);
+		}
 		if (mount(source, target, arg("_GCR_FSTYPE"), flags, arg("_GCR_DATA")) < 0)
 			_exit(errno ? errno : EPERM);
 		_exit(0);

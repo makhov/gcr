@@ -14,9 +14,11 @@ import (
 	"time"
 )
 
+const testToken = "secret-0123456789abcdef"
+
 func newTestReceiver(t *testing.T, idBase uint32, layers ...string) (*Receiver, string) {
 	t.Helper()
-	r, err := NewReceiver(context.Background(), "127.0.0.1:0", "secret", TLS{}, t.TempDir(),
+	r, err := NewReceiver(context.Background(), "127.0.0.1:0", testToken, TLS{}, t.TempDir(),
 		func() (string, error) { return t.TempDir(), nil },
 		func() uint32 { return idBase },
 		func() []string { return layers })
@@ -45,8 +47,10 @@ func post(t *testing.T, url, token string, idBase string) *http.Response {
 }
 
 func TestReceiverNeedsToken(t *testing.T) {
-	if _, err := NewReceiver(context.Background(), "127.0.0.1:0", "", TLS{}, t.TempDir(), nil, nil, nil); err == nil {
-		t.Fatal("receiver without a token accepted")
+	for _, token := range []string{"", "short"} {
+		if _, err := NewReceiver(context.Background(), "127.0.0.1:0", token, TLS{}, t.TempDir(), nil, nil, nil); err == nil {
+			t.Fatalf("receiver with token %q accepted", token)
+		}
 	}
 	_, url := newTestReceiver(t, 0)
 	for _, token := range []string{"", "wrong"} {
@@ -58,7 +62,7 @@ func TestReceiverNeedsToken(t *testing.T) {
 
 func TestReceiverRefusesOtherUserNamespaceRange(t *testing.T) {
 	_, url := newTestReceiver(t, 1073741824)
-	resp := post(t, url+"/rounds", "secret", "1073807360")
+	resp := post(t, url+"/rounds", testToken, "1073807360")
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("status %d, want 409", resp.StatusCode)
 	}
@@ -75,7 +79,7 @@ func TestReceiverRefusesOtherLayers(t *testing.T) {
 	_, url := newTestReceiver(t, 0, "/snap/b/upper", "/snap/a/upper")
 	for _, h := range []string{"", "/snap/a/upper", "/snap/b/upper"} {
 		req, _ := http.NewRequest(http.MethodPost, url+"/rounds", nil)
-		req.Header.Set("Authorization", "Bearer secret")
+		req.Header.Set("Authorization", "Bearer "+testToken)
 		req.Header.Set(HeaderIDBase, "0")
 		if h != "" {
 			req.Header.Set(HeaderLayers, h)
@@ -93,7 +97,7 @@ func TestReceiverRefusesOtherLayers(t *testing.T) {
 
 func TestReceiverAbort(t *testing.T) {
 	r, url := newTestReceiver(t, 0)
-	if resp := post(t, url+"/abort", "secret", ""); resp.StatusCode != http.StatusOK {
+	if resp := post(t, url+"/abort", testToken, ""); resp.StatusCode != http.StatusOK {
 		t.Fatalf("abort: status %d", resp.StatusCode)
 	}
 	if _, err := r.Wait(context.Background()); err == nil {
@@ -113,7 +117,7 @@ func TestReceiverRestart(t *testing.T) {
 	round := func(restart bool) int {
 		t.Helper()
 		req, _ := http.NewRequest(http.MethodPost, url+"/rounds", nil)
-		req.Header.Set("Authorization", "Bearer secret")
+		req.Header.Set("Authorization", "Bearer "+testToken)
 		req.Header.Set(HeaderIDBase, "0")
 		if restart {
 			req.Header.Set(HeaderRestart, "1")

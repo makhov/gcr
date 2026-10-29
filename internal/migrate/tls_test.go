@@ -18,7 +18,7 @@ import (
 
 func newTLSReceiver(t *testing.T, f testcerts.Files) *Receiver {
 	t.Helper()
-	r, err := NewReceiver(context.Background(), "127.0.0.1:0", "secret",
+	r, err := NewReceiver(context.Background(), "127.0.0.1:0", testToken,
 		TLS{Cert: f.ServerCert, Key: f.ServerKey, CA: f.CA}, t.TempDir(),
 		func() (string, error) { return t.TempDir(), nil },
 		func() uint32 { return 0 },
@@ -40,7 +40,7 @@ func newClient(t *testing.T, target string, tl TLS) (*client, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &client{base: u, token: "secret", http: &http.Client{Transport: &http.Transport{TLSClientConfig: conf}}}
+	c := &client{base: u, token: testToken, http: &http.Client{Transport: &http.Transport{TLSClientConfig: conf}}}
 	t.Cleanup(c.http.CloseIdleConnections)
 	return c, nil
 }

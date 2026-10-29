@@ -157,6 +157,13 @@ func argumentRules(nested NestedUserNamespaces, netAdmin bool) []specs.LinuxSysc
 	for _, family := range []uint64{unix.AF_INET, unix.AF_INET6} {
 		rules = append(rules, errno([]string{"socket"}, eq(0, family), masked(1, 0xf, unix.SOCK_RAW)))
 	}
+	// Tunnels made by ioctl on the ipip, gre and sit fallback devices:
+	// the netlink policy sees only links made over netlink.
+	// (linux/if_tunnel.h: SIOCDEVPRIVATE + 1, 3, 5, 7.)
+	const siocAddTunnel, siocChgTunnel, siocAddPRL, siocChgPRL = 0x89f1, 0x89f3, 0x89f5, 0x89f7
+	for _, cmd := range []uint64{siocAddTunnel, siocChgTunnel, siocAddPRL, siocChgPRL} {
+		rules = append(rules, errno([]string{"ioctl"}, eq(1, cmd)))
+	}
 	return rules
 }
 

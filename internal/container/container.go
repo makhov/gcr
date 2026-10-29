@@ -616,6 +616,14 @@ func (c *Container) snapshot(ctx context.Context, dir, parent string) (retErr er
 			retErr = fmt.Errorf("thaw: %w", err)
 		}
 	}()
+	// The snapshot holds the container's memory, secrets and all: root's
+	// alone.
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
 	if err := copyTree(upper, filepath.Join(dir, "upper")); err != nil {
 		return fmt.Errorf("copy writable layer: %w", err)
 	}

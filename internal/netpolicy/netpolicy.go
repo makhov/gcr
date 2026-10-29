@@ -19,7 +19,9 @@ package netpolicy
 
 import (
 	"bytes"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -145,17 +147,32 @@ func Load() (*Policy, error) {
 	defer objs.LinkKinds.Close()
 	defer objs.TCKinds.Close()
 
+	// The program attached is the one this shim carries: a shim of
+	// another version replaces it. The new one is attached before the
+	// old one goes, so the hook is never without a policy.
 	linkPin := filepath.Join(PinDir, "link")
-	if _, err := os.Stat(linkPin); err != nil {
+	// Beside the lock: bpffs holds BPF objects only.
+	versionFile := filepath.Join(filepath.Dir(lockFile), "netlink.version")
+	sum := sha256.Sum256(object)
+	version := hex.EncodeToString(sum[:])
+	attached, _ := os.ReadFile(versionFile)
+	if _, err := os.Stat(linkPin); err != nil || string(attached) != version {
 		l, err := link.AttachLSM(link.LSMOptions{Program: objs.Prog})
 		if err != nil {
 			return nil, fmt.Errorf("attach netlink policy: %w", err)
+		}
+		if old, err := link.LoadPinnedLink(linkPin, nil); err == nil {
+			_ = old.Unpin()
+			old.Close() // detached: nothing holds it now
 		}
 		if err := l.Pin(linkPin); err != nil {
 			l.Close()
 			return nil, fmt.Errorf("pin netlink policy: %w", err)
 		}
 		l.Close() // the pin keeps it attached
+		if err := os.WriteFile(versionFile, []byte(version), 0o600); err != nil {
+			return nil, err
+		}
 	}
 	for _, k := range LinkKinds {
 		if err := objs.LinkKinds.Put(kindKey(k), uint8(1)); err != nil {

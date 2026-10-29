@@ -10,6 +10,7 @@ package timetravel
 import (
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,4 +107,28 @@ func TestRewind(t *testing.T) {
 		t.Fatalf("only %d points recorded after the rewind", fresh)
 	}
 	t.Logf("count %d right after the rewind, %d 4s later; %d new points", after, later, fresh)
+}
+
+// TestLimits: the handler bounds how often points are taken and how many
+// are kept, each a dump of the container's memory on the node's disk.
+func TestLimits(t *testing.T) {
+	ns := framework.NewNamespace(t, "gcr-e2e")
+	for name, a := range map[string]map[string]string{
+		"too often": {timetravel.AnnotationTrigger: "execve", timetravel.AnnotationInterval: "0s"},
+		"too many":  {timetravel.AnnotationTrigger: "execve", timetravel.AnnotationKeep: "1000"},
+	} {
+		c := ns.Create(framework.UniqueID("tt-limit"), framework.Spec{Args: []string{"sleep", "60"}, Annotations: a})
+		if err := c.Start(); err == nil || !strings.Contains(err.Error(), "TimeTravel") {
+			t.Errorf("%s: %v, want refused by the handler's TimeTravel", name, err)
+		}
+	}
+	// A handler that allows it.
+	c := ns.Create(framework.UniqueID("tt-allowed"), framework.Spec{
+		Args:          []string{"sleep", "60"},
+		Annotations:   map[string]string{timetravel.AnnotationTrigger: "execve", timetravel.AnnotationKeep: "1000"},
+		RuntimeConfig: "[TimeTravel]\nMaxKeep = 1000\n",
+	})
+	if err := c.Start(); err != nil {
+		t.Fatalf("allowed by the handler: %v", err)
+	}
 }

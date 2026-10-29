@@ -31,6 +31,8 @@ const (
 	AnnotationIn = "gcr.dev/migrate-in"
 	// AnnotationToken is the shared secret the source must present.
 	AnnotationToken = "gcr.dev/migrate-token"
+	// MinTokenLength is the shortest token accepted.
+	MinTokenLength = 16
 )
 
 // Receiver is the target side of a migration, run by the target container's
@@ -76,8 +78,8 @@ type Receiver struct {
 // writable layer, idBase its user namespace range (0 if none) and layers
 // the read-only layers beneath its writable layer.
 func NewReceiver(ctx context.Context, addr, token string, t TLS, root string, upper func() (string, error), idBase func() uint32, layers func() []string) (*Receiver, error) {
-	if token == "" {
-		return nil, fmt.Errorf("%s needs %s: %w", AnnotationIn, AnnotationToken, errdefs.ErrInvalidArgument)
+	if len(token) < MinTokenLength {
+		return nil, fmt.Errorf("%s needs %s of at least %d characters: %w", AnnotationIn, AnnotationToken, MinTokenLength, errdefs.ErrInvalidArgument)
 	}
 	if _, _, err := net.SplitHostPort(addr); err != nil {
 		return nil, fmt.Errorf("%s=%q: %w", AnnotationIn, addr, errdefs.ErrInvalidArgument)
@@ -108,7 +110,8 @@ func NewReceiver(ctx context.Context, addr, token string, t TLS, root string, up
 	mux.HandleFunc("PUT /upper", r.auth(r.putUpper))
 	mux.HandleFunc("POST /restore", r.auth(r.restore))
 	mux.HandleFunc("POST /abort", r.auth(r.abort))
-	r.srv = &http.Server{Handler: mux}
+	// Root listens here: no connection may sit on it for nothing.
+	r.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute}
 	r.ln = ln
 	go func() { _ = r.srv.Serve(ln) }()
 	log.G(ctx).WithField("addr", ln.Addr()).WithField("tls", tlsConf != nil).Info("migration receiver listening")

@@ -71,6 +71,7 @@ error that names the setting and the values it accepts.
 | `MigrationTLS` | a table: `Cert`, `Key`, `CA` (file paths) | unset: plain HTTP |
 | `PodAnnotations` | restricted annotations pods may use | none |
 | `SnapshotRoots` | directories snapshots may be forked from | none |
+| `TimeTravel` | a table: `MinInterval` (duration), `MaxKeep` (number) | `100ms`, `50` |
 
 ### `UserNamespaces`
 
@@ -260,6 +261,19 @@ snapshot could choose what CRIU restores and what a fork mounts. Pods
 may fork only where this is set. Include the store `gcr snapshot-pull`
 puts layers in (`/var/lib/gcr/layers` by default).
 
+### `TimeTravel`
+
+Every point on a time-travel timeline is a dump of the container's
+memory, kept on the node's disk. The handler bounds what a container's
+annotations may ask for: points no more often than `MinInterval`, and no
+more than `MaxKeep` kept. A container asking for more fails to start.
+
+```toml
+  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr.options.TimeTravel]
+    MinInterval = '1s'
+    MaxKeep = 20
+```
+
 ## Annotations
 
 On Kubernetes they reach gcr only if the handler lists them in
@@ -279,7 +293,7 @@ restricted ones (`fork-from`, `migrate-in`, `migrate-token`,
 | `gcr.dev/lazy-restore` | `true` | Run a restored or forked container before its memory has loaded. Needs `vm.unprivileged_userfaultfd = 1`. |
 | `gcr.dev/memory-merge` | `true` | Let the kernel (KSM) merge identical memory with other containers that opt in. Needs KSM running. |
 | `gcr.dev/migrate-in` | `host:port` | Make the container a migration target, listening there. |
-| `gcr.dev/migrate-token` | secret | The token a migration source must present. |
+| `gcr.dev/migrate-token` | secret, 16 characters or more | The token a migration source must present. |
 
 `gcr.dev/landlock` is gcr's own marker. It overwrites any value a
 workload sets.
