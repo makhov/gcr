@@ -17,7 +17,7 @@ the end-to-end tests (arm64 VM, Linux 7.0, unless said otherwise).
 | Drop-in for runc under containerd or Kubernetes | Yes: CRI conformance passes; some hardening is off under Kubernetes defaults |
 | Move a running sandbox to another node | Yes, with pre-copy on x86; stop-and-copy on arm64; TCP connections reset |
 | Undo what a sandbox did | Yes: time travel, for its processes and writable layer, not its volumes |
-| GPUs | Built, not yet run on a GPU |
+| GPUs | Yes, NVIDIA through CDI: checkpoint, restore and fork with GPU memory, tested on one Blackwell GPU |
 | Strong isolation for hostile multi-tenant code | No: use a VM-based runtime |
 
 ## Advantages
@@ -139,8 +139,8 @@ tests check that each refused call is refused, by return value.
     data in the writable layer.
 
   Connections open at the time of the snapshot are not restored (CRIU
-  would need `--tcp-established` and the same addresses). Nor are GPUs,
-  or kernel objects CRIU does not support.
+  would need `--tcp-established` and the same addresses). Nor are kernel
+  objects CRIU does not support.
 
 ### Lazy restore
 
@@ -202,8 +202,15 @@ tests check that each refused call is refused, by return value.
 
 ### GPUs
 
-- **Not yet run on a GPU.** The design and tests exist, and the test that
-  checkpoints PyTorch state on a GPU skips when there is none.
+- **Tested on one GPU model.** The GPU tests ran on a single NVIDIA RTX
+  PRO 6000 Blackwell (driver 580): checkpoint and restore, and forks of a
+  4 GiB model in GPU memory (snapshot 1.9 s, each fork 1.6–1.8 s). Not
+  yet on several GPUs in one container, other generations, or under
+  Kubernetes. CI has no GPU, so these tests run only by hand on a GPU
+  node.
+- **A GPU fork copies device memory.** Unlike forks' host memory, which
+  memory merging can share, each fork has its own copy of the
+  snapshot's GPU memory, and the forks have to fit on the GPU together.
 - **A restore needs the same GPU index,** the same driver version, and
   the same GPU models and count.
 - **GPU containers migrate stop-and-copy.** CRIU's CUDA plugin cannot
@@ -213,10 +220,12 @@ tests check that each refused call is refused, by return value.
 
 ### Platform and maturity
 
-- **Linux 6.12+ with cgroup v2, run as root;** containerd 2.x. No rootless
+- **Linux 6.12+ with cgroup v2, run as root;** containerd 2.3 or later. No rootless
   mode.
-- **Developed on arm64 (Linux 7.0); CI runs on x86 (Ubuntu 24.04).** Other
-  kernels and distributions have not been tried.
+- **Developed on arm64 (Linux 7.0); CI runs on x86 (Ubuntu 24.04).** The
+  whole end-to-end suite also passes on an x86 GPU node (Ubuntu 24.04
+  with its 7.0 HWE kernel). Other kernels and distributions have not been
+  tried.
 - **Each shim uses about 6 MiB, against runc's 4 MiB,** because the shim
   carries libcontainer instead of calling a binary.
 - **Young.** The name is a placeholder, interfaces (annotations, the

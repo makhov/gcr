@@ -16,8 +16,8 @@ runs); no runc binary.
 - Hardening: a denied set of system calls on top of any profile, supervised
   mounts, a netlink policy (BPF LSM) and Landlock confining containers to
   their root (below).
-- NVIDIA GPUs through CDI, with CUDA state in checkpoints (below; not yet
-  run on a GPU node).
+- NVIDIA GPUs through CDI, with CUDA state in checkpoints and forks
+  (below).
 - Not yet: the NVIDIA ioctl proxy, restoring onto another GPU index.
 
 What this is good for, what it costs, and what has not been shown yet:
@@ -50,7 +50,9 @@ executing a runc binary per operation. gcr's shim is the bigger binary
 ## Requirements
 
 - Linux 6.12+ with cgroup v2, run as root
-- containerd 2.x
+- containerd 2.3 or later (tested with 2.4.2). gcr is built on
+  containerd 2.4's shim library, which only speaks the shim bootstrap
+  protocol containerd 2.3 introduced; containerd 2.2 cannot start it.
 - libseccomp (runtime and, to build, headers)
 - CRIU for checkpoint/restore; time travel needs the fork with
   `--seccomp-notify-socket` (see below), and keeping Landlock across a
@@ -379,10 +381,23 @@ checkpointed into something no node could restore. CRIU's CUDA plugin
 cannot pre-dump: GPU containers migrate stop-and-copy, and time travel
 refuses them (every point would copy GPU memory).
 
-This has not run on a GPU node yet. `test/e2e/gpu`'s `TestCUDA` does,
-where one is (`/dev/nvidiactl`, the CDI spec, the CUDA plugin): it keeps a
-counter in GPU memory with PyTorch and checks it carries on after a
-checkpoint and restore (`GCR_E2E_CUDA_IMAGE` picks the image).
+Forks work the same way: each fork of a snapshot gets its own copy of
+the device memory, restored onto the same GPU, which the forks and the
+parent then share as separate CUDA contexts.
+
+Run on one NVIDIA RTX PRO 6000 Blackwell (96 GB), driver 580.178.04,
+Linux 7.0, x86: `test/e2e/gpu` runs where there is a GPU
+(`/dev/nvidiactl`, the CDI spec, the CUDA plugin) and is skipped
+elsewhere.
+
+- `TestCUDA` keeps a counter in GPU memory with PyTorch and checks that
+  it carries on after a checkpoint and restore.
+- `TestCUDAFork` loads 4 GiB of weights into GPU memory, snapshots the
+  running container (1.9 s), and starts two forks (1.6–1.8 s each). Each
+  one carries on with the weights intact, as does the parent.
+
+`GCR_E2E_CUDA_IMAGE` picks the image. The default is PyTorch built for
+CUDA 12.8, the first with kernels for Blackwell (sm_120).
 
 ## Time travel
 
@@ -623,6 +638,7 @@ CRI, checkpoint/restore, static helper programs to run in containers):
 | --- | --- |
 | `checkpoint` | a counter carries on after checkpoint/restore, in the same user namespace |
 | `timetravel` | a timeline, a rewind; the counter, the filesystem and the recording carry on from the point |
+| `gpu` | checkpoint and restore of CUDA state, and forks of a model in GPU memory (needs a GPU node; skipped elsewhere); a GPU gcr cannot describe is refused checkpoints |
 | `fork` | ten containers from one snapshot: each resumes its memory and mounts the snapshot's layer beneath its own; forks of forks; a fork's identity and signal; lazy restore, and what it saves; merged memory |
 | `workloads` | real programs forked: Python, Node.js and JVM servers holding a model in memory, and Postgres with a table; each fork serves, keeps its state and diverges; a re-seed on the fork signal |
 | `migrate` | live migration between containerd namespaces (pre-copy on x86); a refused one leaves the source running |
