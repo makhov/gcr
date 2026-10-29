@@ -20,6 +20,9 @@ runs); no runc binary.
   run on a GPU node).
 - Not yet: the NVIDIA ioctl proxy, restoring onto another GPU index.
 
+What this is good for, what it costs, and what has not been shown yet:
+[docs/tradeoffs.md](docs/tradeoffs.md).
+
 ### Compared with runc
 
 Same host (arm64, Linux 7.0), containerd 2.4.2, runc v1.5.2 (the release
@@ -551,7 +554,7 @@ CRI, checkpoint/restore, static helper programs to run in containers):
 | --- | --- |
 | `checkpoint` | a counter carries on after checkpoint/restore, in the same user namespace |
 | `timetravel` | a timeline, a rewind; the counter, the filesystem and the recording carry on from the point |
-| `fork` | ten containers from one snapshot: each resumes its memory, each has its own writable layer; lazy restore, and what it saves |
+| `fork` | ten containers from one snapshot: each resumes its memory and mounts the snapshot's layer beneath its own; forks of forks; lazy restore, and what it saves; merged memory |
 | `migrate` | live migration between containerd namespaces (pre-copy on x86); a refused one leaves the source running |
 | `hardening` | refused system calls with hardening on and off; supervised mounts, by exact return value; nested user namespaces; the netlink policy (BPF LSM) |
 | `landlock` | a leaked host descriptor, with Landlock on and off, across a restore |

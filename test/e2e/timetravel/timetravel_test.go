@@ -49,12 +49,13 @@ func TestRewind(t *testing.T) {
 		return points
 	}
 
-	// The container deletes /keep at count 25; how long that takes is the
+	// The container deletes /keep at count 25, after writing 25 and
+	// before writing 26: past 25 it is gone. How long that takes is the
 	// machine's business, not the test's.
 	framework.Eventually(t, time.Minute, "the container to pass count 25", func() bool {
 		s, err := c.ReadFile("/tmp/count")
 		n, convErr := strconv.Atoi(s)
-		return err == nil && convErr == nil && n >= 25
+		return err == nil && convErr == nil && n > 25
 	})
 	before := c.ReadInt("/tmp/count")
 	if _, err := os.Stat(c.Rootfs("/keep")); !os.IsNotExist(err) {
