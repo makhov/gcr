@@ -100,7 +100,7 @@ func TestPod(t *testing.T) {
 	})
 	t.Run("user namespace", func(t *testing.T) {
 		f := strings.Fields(run(t, "cat", "/proc/self/uid_map"))
-		if len(f) != 3 || f[0] != "0" || !strings.HasPrefix(f[1], "1073") || f[2] != "65536" {
+		if len(f) != 3 || f[0] != "0" || f[2] != "65536" || !validBase(f[1]) {
 			// The pod asks for one with gcr.dev/host-users, which reaches
 			// the shim only if containerd passes gcr's annotations on.
 			t.Fatalf("not in a gcr user namespace: %v; is pod_annotations = ['gcr.dev/*'] set "+
@@ -131,4 +131,10 @@ func shimPID(t *testing.T, podID string) int {
 	}
 	t.Fatalf("no shim for pod %s", podID)
 	return 0
+}
+
+// validBase says whether s is the first host ID of one of gcr's ranges.
+func validBase(s string) bool {
+	_, err := userns.ParseBase(s)
+	return err == nil
 }

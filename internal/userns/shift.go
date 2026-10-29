@@ -9,9 +9,11 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/checkpoint-restore/go-criu/v8/crit"
 	usernsimg "github.com/checkpoint-restore/go-criu/v8/crit/images/userns"
+	"github.com/containerd/errdefs"
 	"golang.org/x/sys/unix"
 )
 
@@ -148,7 +150,8 @@ func ShiftImages(dir string, from, to uint32) error {
 }
 
 func shiftImage(path string, from, to uint32) error {
-	in, err := os.Open(path)
+	// Images may come from elsewhere: never follow a link among them.
+	in, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}
@@ -169,11 +172,13 @@ func shiftImage(path string, from, to uint32) error {
 			}
 		}
 	}
-	tmp := path + ".shift"
-	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	// A new file of its own (O_EXCL), not one of a name the images could
+	// have planted.
+	out, err := os.CreateTemp(filepath.Dir(path), ".shift-")
 	if err != nil {
 		return err
 	}
+	tmp := out.Name()
 	err = crit.New(nil, out, "", false, false).Encode(img)
 	if cerr := out.Close(); err == nil {
 		err = cerr
@@ -183,4 +188,59 @@ func shiftImage(path string, from, to uint32) error {
 		return err
 	}
 	return os.Rename(tmp, path)
+}
+
+// Extent is one line of a uid or gid map.
+type Extent struct {
+	ContainerID, HostID, Size uint32
+}
+
+// CheckImages refuses CRIU images in dir whose user namespace maps are
+// not uid and gid. CRIU recreates the container's user namespace from
+// them on a restore, so images from elsewhere (a snapshot pulled or
+// forked from, a migration's source) would otherwise choose the host IDs
+// its processes run as, host root included. Without maps, the images may
+// not have a user namespace at all.
+func CheckImages(dir string, uid, gid []Extent) error {
+	imgs, err := filepath.Glob(filepath.Join(dir, "userns-*.img"))
+	if err != nil {
+		return err
+	}
+	if len(imgs) > 0 && len(uid) == 0 {
+		return fmt.Errorf("images have a user namespace, the container none: %w", errdefs.ErrPermissionDenied)
+	}
+	for _, path := range imgs {
+		in, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW, 0)
+		if err != nil {
+			return err
+		}
+		img, err := crit.New(in, nil, "", false, false).Decode(&usernsimg.UsernsEntry{})
+		in.Close()
+		if err != nil {
+			return fmt.Errorf("%s: %w", filepath.Base(path), err)
+		}
+		for _, e := range img.Entries {
+			ue, ok := e.Message.(*usernsimg.UsernsEntry)
+			if !ok {
+				return fmt.Errorf("%s: entry is %T", filepath.Base(path), e.Message)
+			}
+			if !sameMap(ue.UidMap, uid) || !sameMap(ue.GidMap, gid) {
+				return fmt.Errorf("%s maps uids %v and gids %v, the container %v and %v: %w",
+					filepath.Base(path), extents(ue.UidMap), extents(ue.GidMap), uid, gid, errdefs.ErrPermissionDenied)
+			}
+		}
+	}
+	return nil
+}
+
+func extents(m []*usernsimg.UidGidExtent) []Extent {
+	out := make([]Extent, len(m))
+	for i, e := range m {
+		out[i] = Extent{e.GetFirst(), e.GetLowerFirst(), e.GetCount()}
+	}
+	return out
+}
+
+func sameMap(m []*usernsimg.UidGidExtent, want []Extent) bool {
+	return slices.Equal(extents(m), want)
 }

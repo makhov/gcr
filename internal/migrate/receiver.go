@@ -17,9 +17,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
+
+	"github.com/makhov/gcr/internal/imagetar"
 )
 
 const (
@@ -56,6 +59,11 @@ type Receiver struct {
 	// one; 0 before the first round and after a restart.
 	chain int
 	ps    *pageServer
+	// What has been received: each part is taken once, and nothing
+	// after the restore was asked for.
+	imagesRound int
+	upperDone   bool
+	restoring   bool
 
 	ready   chan string
 	result  chan error
@@ -211,6 +219,10 @@ func (r *Receiver) startRound(w http.ResponseWriter, req *http.Request) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.restoring {
+		http.Error(w, "restore already requested", http.StatusConflict)
+		return
+	}
 	restart := req.Header.Get(HeaderRestart) != ""
 	if restart {
 		// The source gave up on the rounds so far: their memory may be
@@ -245,20 +257,35 @@ func (r *Receiver) startRound(w http.ResponseWriter, req *http.Request) {
 func (r *Receiver) putImages(w http.ResponseWriter, req *http.Request) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.round == 0 {
+	switch {
+	case r.round == 0:
 		http.Error(w, "no round started", http.StatusConflict)
+		return
+	case r.restoring, r.imagesRound == r.round:
+		http.Error(w, "images already received", http.StatusConflict)
 		return
 	}
 	if err := r.finishRound(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := untarDir(req.Body, r.dir(r.round)); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	r.imagesRound = r.round
+	// Not GNU tar: CRIU images are regular files and their parent link,
+	// and nothing else is extracted, nor anything through a link.
+	if err := imagetar.Extract(req.Body, r.dir(r.round)); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 	}
 }
 
 func (r *Receiver) putUpper(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	taken := r.upperDone || r.restoring
+	r.upperDone = true
+	r.mu.Unlock()
+	if taken {
+		http.Error(w, "writable layer already received", http.StatusConflict)
+		return
+	}
 	upper, err := r.upper()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -283,8 +310,13 @@ func (r *Receiver) putUpper(w http.ResponseWriter, req *http.Request) {
 
 func (r *Receiver) restore(w http.ResponseWriter, req *http.Request) {
 	r.mu.Lock()
-	round := r.round
+	round, already := r.round, r.restoring
+	r.restoring = true
 	r.mu.Unlock()
+	if already {
+		http.Error(w, "restore already requested", http.StatusConflict)
+		return
+	}
 	select {
 	case r.ready <- r.dir(round):
 	default:
@@ -296,6 +328,12 @@ func (r *Receiver) restore(w http.ResponseWriter, req *http.Request) {
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
+		// The migration is over either way: stop listening once this
+		// answer is out.
+		go func() {
+			time.Sleep(time.Second)
+			r.Close()
+		}()
 	case <-req.Context().Done():
 	}
 }

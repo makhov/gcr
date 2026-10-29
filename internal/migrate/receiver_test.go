@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -105,8 +106,8 @@ func TestReceiverAbort(t *testing.T) {
 // the next is a full dump, since the memory the rounds before hold may be
 // incomplete.
 func TestReceiverRestart(t *testing.T) {
-	if _, err := exec.LookPath("criu"); err != nil {
-		t.Skip("no criu")
+	if _, err := exec.LookPath("criu"); err != nil || os.Geteuid() != 0 {
+		t.Skip("needs criu, as root")
 	}
 	r, url := newTestReceiver(t, 0)
 	round := func(restart bool) int {

@@ -11,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/checkpoint-restore/go-criu/v8/crit"
+	usernsimg "github.com/checkpoint-restore/go-criu/v8/crit/images/userns"
+
 	"github.com/makhov/gcr/internal/container"
 	"github.com/makhov/gcr/internal/control"
 	"github.com/makhov/gcr/internal/migrate"
@@ -121,5 +124,60 @@ func TestForkKeyTraversal(t *testing.T) {
 	c.Remove()
 	if _, err := os.Stat(filepath.Join(victim, "keep")); err != nil {
 		t.Fatalf("the directory the key pointed at was touched: %v", err)
+	}
+}
+
+// TestForkHostRootImages: CRIU recreates the user namespace from the
+// images, so a snapshot whose images map the container's root to the
+// host's would restore its processes as host root. The maps must be the
+// fork's own.
+func TestForkHostRootImages(t *testing.T) {
+	ns := framework.NewNamespace(t, "gcr-e2e")
+	parent := ns.Run(framework.UniqueID("parent"), framework.Spec{Args: []string{"sh", "-c", counter}})
+	framework.Eventually(t, time.Minute, "the parent to count", func() bool {
+		s, _ := parent.ReadFile("/tmp/count")
+		n, err := strconv.Atoi(s)
+		return err == nil && n > 0
+	})
+	snap := filepath.Join(framework.TempDir(t), "snap")
+	if err := control.NewClient(ns.Name, parent.ID).Snapshot(t.Context(), snap); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	imgs, _ := filepath.Glob(filepath.Join(snap, "images", "userns-*.img"))
+	if len(imgs) == 0 {
+		t.Fatal("the snapshot has no user namespace image")
+	}
+	for _, path := range imgs {
+		in, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		img, err := crit.New(in, nil, "", false, false).Decode(&usernsimg.UsernsEntry{})
+		in.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		zero := uint32(0)
+		for _, e := range img.Entries {
+			ue := e.Message.(*usernsimg.UsernsEntry)
+			for _, ext := range append(ue.UidMap, ue.GidMap...) {
+				ext.LowerFirst = &zero
+			}
+		}
+		out, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := crit.New(nil, out, "", false, false).Encode(img); err != nil {
+			t.Fatal(err)
+		}
+		out.Close()
+	}
+	c := ns.Create(framework.UniqueID("fork-hostroot"), framework.Spec{
+		Args:        []string{"sh", "-c", counter},
+		Annotations: map[string]string{container.AnnotationForkFrom: snap},
+	})
+	if err := c.Start(); err == nil || !strings.Contains(err.Error(), "maps uids") {
+		t.Fatalf("fork from images mapping to host root: %v, want refused", err)
 	}
 }

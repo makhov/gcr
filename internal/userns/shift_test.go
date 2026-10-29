@@ -10,6 +10,7 @@ import (
 
 	"github.com/checkpoint-restore/go-criu/v8/crit"
 	usernsimg "github.com/checkpoint-restore/go-criu/v8/crit/images/userns"
+	"github.com/containerd/errdefs"
 	"golang.org/x/sys/unix"
 )
 
@@ -135,5 +136,42 @@ func TestShiftImages(t *testing.T) {
 	}
 	if ue.GidMap[1].GetLowerFirst() != 5 || ue.UidMap[0].GetFirst() != 0 || ue.UidMap[0].GetCount() != Size {
 		t.Fatalf("an extent outside the range, or the rest, changed: %v", ue)
+	}
+}
+
+func TestCheckImages(t *testing.T) {
+	write := func(t *testing.T, host uint32) string {
+		t.Helper()
+		dir := t.TempDir()
+		ext := func(first, lower, count uint32) *usernsimg.UidGidExtent {
+			return &usernsimg.UidGidExtent{First: &first, LowerFirst: &lower, Count: &count}
+		}
+		img := &crit.CriuImage{Magic: "USERNS", Entries: []*crit.CriuEntry{{Message: &usernsimg.UsernsEntry{
+			UidMap: []*usernsimg.UidGidExtent{ext(0, host, Size)},
+			GidMap: []*usernsimg.UidGidExtent{ext(0, host, Size)},
+		}}}}
+		f, err := os.Create(filepath.Join(dir, "userns-13.img"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if err := crit.New(nil, f, "", false, false).Encode(img); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	own := []Extent{{0, from, Size}}
+	if err := CheckImages(write(t, from), own, own); err != nil {
+		t.Fatalf("the container's own maps: %v", err)
+	}
+	// Images mapping the container's root to the host's.
+	if err := CheckImages(write(t, 0), own, own); !errdefs.IsPermissionDenied(err) {
+		t.Fatalf("maps to host root: %v", err)
+	}
+	if err := CheckImages(write(t, from), nil, nil); !errdefs.IsPermissionDenied(err) {
+		t.Fatalf("a user namespace in images for a container with none: %v", err)
+	}
+	if err := CheckImages(t.TempDir(), nil, nil); err != nil {
+		t.Fatalf("no user namespace either side: %v", err)
 	}
 }

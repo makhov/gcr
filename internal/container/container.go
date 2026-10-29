@@ -450,6 +450,11 @@ func (c *Container) Start(ctx context.Context) error {
 // restore starts a new incarnation from CRIU images.
 func (c *Container) restore(images string) error {
 	c.trackedSince = ""
+	// The images may come from elsewhere (a snapshot, a migration): their
+	// user namespace must be this container's.
+	if err := userns.CheckImages(images, idExtents(c.cfg.UIDMappings), idExtents(c.cfg.GIDMappings)); err != nil {
+		return fmt.Errorf("restore: %w", err)
+	}
 	saved, err := gpu.Load(images)
 	if err != nil {
 		return err
@@ -1324,4 +1329,12 @@ var rlimits = map[string]int{
 func errRootfs(what string) error {
 	return fmt.Errorf("%s need the rootfs as overlay mounts from containerd, which gcr mounts itself; "+
 		"this container's was mounted by its caller (CRI-O does): %w", what, errdefs.ErrNotImplemented)
+}
+
+func idExtents(m []configs.IDMap) []userns.Extent {
+	out := make([]userns.Extent, len(m))
+	for i, e := range m {
+		out[i] = userns.Extent{ContainerID: uint32(e.ContainerID), HostID: uint32(e.HostID), Size: uint32(e.Size)}
+	}
+	return out
 }

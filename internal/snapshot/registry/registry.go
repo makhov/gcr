@@ -43,6 +43,7 @@ import (
 	"oras.land/oras-go/v2/registry/remote/credentials"
 	"oras.land/oras-go/v2/registry/remote/retry"
 
+	"github.com/makhov/gcr/internal/imagetar"
 	"github.com/makhov/gcr/internal/snapshot"
 	"github.com/makhov/gcr/internal/userns"
 )
@@ -320,9 +321,21 @@ func Pull(ctx context.Context, source oras.ReadOnlyTarget, ref, dir, store strin
 	if manifest.ArtifactType != ArtifactType || manifest.Config.MediaType != ConfigMediaType {
 		return pulled, fmt.Errorf("%s is not a gcr snapshot (artifact type %q): %w", ref, manifest.ArtifactType, errdefs.ErrInvalidArgument)
 	}
+	// Digests become paths in the store: refuse any that is not one
+	// (go-digest does not check on decoding, and "sha256:../.." is not).
+	for _, d := range append([]ocispec.Descriptor{manifest.Config}, manifest.Layers...) {
+		if err := d.Digest.Validate(); err != nil {
+			return pulled, fmt.Errorf("%s: %q: %v: %w", ref, d.Digest, err, errdefs.ErrInvalidArgument)
+		}
+	}
 	var cfg Config
 	if err := fetchJSON(ctx, source, manifest.Config, &cfg); err != nil {
 		return pulled, fmt.Errorf("config: %w", err)
+	}
+	for _, d := range cfg.Layers {
+		if err := d.Validate(); err != nil {
+			return pulled, fmt.Errorf("%s: config: %q: %v: %w", ref, d, err, errdefs.ErrInvalidArgument)
+		}
 	}
 	if cfg.Arch != runtime.GOARCH {
 		return pulled, fmt.Errorf("snapshot is for %s, this host is %s: %w", cfg.Arch, runtime.GOARCH, errdefs.ErrFailedPrecondition)
@@ -342,7 +355,9 @@ func Pull(ctx context.Context, source oras.ReadOnlyTarget, ref, dir, store strin
 		// Keyed by the range the snapshot was taken in, on the host it
 		// was taken on, not that host's key, which may name something
 		// else here.
-		sum := sha256.Sum256([]byte(fmt.Sprintf("%s@%d", cfg.UsernsKey, cfg.UsernsBase)))
+		// Also by the lineage's first layer: the publisher chose the
+		// rest, and could copy them to share another lineage's range.
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%s@%d@%s", cfg.UsernsKey, cfg.UsernsBase, uppers[len(uppers)-1].Digest)))
 		key := "pulled_" + hex.EncodeToString(sum[:8])
 		r, err := userns.ClaimForSnapshot(dir, key, cfg.UsernsBase)
 		if errdefs.IsConflict(err) {
@@ -382,10 +397,10 @@ func Pull(ctx context.Context, source oras.ReadOnlyTarget, ref, dir, store strin
 		return pulled, err
 	}
 	defer os.RemoveAll(tmp)
-	if err := unpack(ctx, source, manifest.Layers[0], filepath.Join(tmp, "images")); err != nil {
+	if err := unpackImages(ctx, source, manifest.Layers[0], filepath.Join(tmp, "images")); err != nil {
 		return pulled, fmt.Errorf("images: %w", err)
 	}
-	if err := unpack(ctx, source, uppers[0], filepath.Join(tmp, snapshot.Upper)); err != nil {
+	if err := unpackLayer(ctx, source, uppers[0], filepath.Join(tmp, snapshot.Upper)); err != nil {
 		return pulled, fmt.Errorf("writable layer: %w", err)
 	}
 	b := blobs{Upper: &uppers[0], Images: &manifest.Layers[0]}
@@ -441,7 +456,7 @@ func pullLayer(ctx context.Context, source oras.ReadOnlyTarget, desc ocispec.Des
 		return "", err
 	}
 	defer os.RemoveAll(tmp)
-	if err := unpack(ctx, source, desc, filepath.Join(tmp, snapshot.Upper)); err != nil {
+	if err := unpackLayer(ctx, source, desc, filepath.Join(tmp, snapshot.Upper)); err != nil {
 		return "", err
 	}
 	b := blobs{Upper: &desc}
@@ -478,7 +493,33 @@ func writeSnapshotFiles(dir string, below []string, b blobs) error {
 
 // unpack fetches desc and extracts it into dir, failing if its content
 // does not match its digest.
-func unpack(ctx context.Context, source oras.ReadOnlyTarget, desc ocispec.Descriptor, dir string) error {
+// untar extracts a writable layer, into a directory of its own (a
+// temporary one, empty): keeping owners, xattrs and overlay's whiteouts,
+// which only GNU tar does, and safely only once, into an empty directory.
+func untar(ctx context.Context, r io.Reader, dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, "tar", "--numeric-owner", "--xattrs", "--xattrs-include=*", "-C", dir, "-xpf", "-")
+	cmd.Stdin = r
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("untar: %w: %s", err, out)
+	}
+	return nil
+}
+
+// unpackImages extracts CRIU images: regular files only (imagetar).
+func unpackImages(ctx context.Context, source oras.ReadOnlyTarget, desc ocispec.Descriptor, dir string) error {
+	return unpack(ctx, source, desc, dir, func(_ context.Context, r io.Reader, dir string) error {
+		return imagetar.Extract(r, dir)
+	})
+}
+
+func unpackLayer(ctx context.Context, source oras.ReadOnlyTarget, desc ocispec.Descriptor, dir string) error {
+	return unpack(ctx, source, desc, dir, untar)
+}
+
+func unpack(ctx context.Context, source oras.ReadOnlyTarget, desc ocispec.Descriptor, dir string, extract func(context.Context, io.Reader, string) error) error {
 	rc, err := source.Fetch(ctx, desc)
 	if err != nil {
 		return err
@@ -490,13 +531,8 @@ func unpack(ctx context.Context, source oras.ReadOnlyTarget, desc ocispec.Descri
 		return err
 	}
 	defer zr.Close()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := extract(ctx, zr, dir); err != nil {
 		return err
-	}
-	cmd := exec.CommandContext(ctx, "tar", "--numeric-owner", "--xattrs", "--xattrs-include=*", "-C", dir, "-xpf", "-")
-	cmd.Stdin = zr
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("untar: %w: %s", err, out)
 	}
 	// tar stops at the archive's end; the verifier needs all of it.
 	if _, err := io.Copy(io.Discard, vr); err != nil {
