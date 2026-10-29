@@ -351,6 +351,11 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 				return prep, fmt.Errorf("time travel: %w", err)
 			}
 			ex.recorder = rec
+			if container.MemoryTracking() {
+				// Points after the first dump only what was written.
+				criuOpts = append(criuOpts, "track-mem")
+				prep.TrackMemory = true
+			}
 			policy.AddTrigger(spec)
 			for _, name := range policy.Syscalls {
 				handlers[name] = rec.Handle
