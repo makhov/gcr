@@ -151,9 +151,6 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 	if err != nil {
 		return nil, errgrpc.ToGRPC(err)
 	}
-	if r.Terminal {
-		return nil, errgrpc.ToGRPCf(errdefs.ErrNotImplemented, "terminal")
-	}
 	var rootfs []mount.Mount
 	for _, m := range r.Rootfs {
 		rootfs = append(rootfs, mount.Mount{Type: m.Type, Source: m.Source, Target: m.Target, Options: m.Options})
