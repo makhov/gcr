@@ -21,7 +21,9 @@ runs); no runc binary.
 - Not yet: the NVIDIA ioctl proxy, restoring onto another GPU index.
 
 What this is good for, what it costs, and what has not been shown yet:
-[docs/tradeoffs.md](docs/tradeoffs.md).
+[docs/tradeoffs.md](docs/tradeoffs.md). Every setting and annotation:
+[docs/configuration.md](docs/configuration.md). What the hardening breaks,
+and the way around each: [docs/compatibility.md](docs/compatibility.md).
 
 ### Compared with runc
 
@@ -220,7 +222,9 @@ Privileged means `CAP_SYS_ADMIN` and access to all devices (what
 bubblewrap and rootless podman/buildah make user namespaces of their own.
 Root in one can reach kernel code an unprivileged process cannot, so in
 gcr's own profile they are guarded rather than refused
-(`NestedUserNamespaces = 'guarded'`, the default):
+(`NestedUserNamespaces = 'guarded'`, the default; tools that mount in
+them, such as bubblewrap and rootless podman, also need `Landlock = 'off'`,
+see [compatibility](docs/compatibility.md)):
 
 - mounts go through the supervisor's filesystem allowlist, also in nested
   namespaces;
