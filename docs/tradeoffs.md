@@ -189,10 +189,23 @@ tests check that each refused call is refused, by return value.
   seccomp notification support, keeping Landlock across a restore needs
   another change, and both are in `makhov/criu`, not upstream CRIU. The
   runc fork adds an init hook and a way to wrap the criu it runs.
-- **A point on the timeline copies the writable layer.** Its cost grows
-  with what the container has written. The overhead per point has not
-  been measured on real workloads, and points are taken at most once per
-  interval (1 s by default).
+- **Time travel costs every exec, and each point freezes the container.**
+  Measured (`test/e2e/timetravel` `TestCost`, `GCR_E2E_BENCH=1`; an arm64
+  VM and an x86 VM, points on their virtual disks):
+  - An exec takes 45–85 µs longer (16–30% for a tiny program), whether or
+    not it takes a point: each one goes through gcr's supervisor.
+  - A point is a full dump of memory plus a copy of the writable layer,
+    with the container frozen meanwhile: about 90–125 ms at 64 MiB of
+    memory, 140–160 ms at 256 MiB, 260–390 ms at 1 GiB, and about 30 ms
+    more for 200 MiB written. These are writes to the page cache; a node
+    short of memory or disk bandwidth freezes longer.
+  - Each point takes as much disk as the container's memory plus its
+    writable layer: with the default of 20 points kept, a 1 GiB container
+    keeps about 20 GiB. Points are full, not incremental.
+
+  Points are taken at most once per interval (1 s by default), so the
+  freeze is a fraction of that at most; a container that does not exec
+  takes none.
 - **Rewind covers processes and the writable layer only,** not volumes,
   nor anything outside the container (databases it talked to, files on a
   shared volume).

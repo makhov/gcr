@@ -467,7 +467,13 @@ gcr rewind ID 3
 ```
 
 Rewind replaces the processes and the writable layer in place; containerd
-keeps seeing one running task. It needs CRIU with `--seccomp-notify-socket`
+keeps seeing one running task.
+
+What it costs (docs/tradeoffs.md has the numbers): every exec goes
+through gcr's supervisor (45–85 µs more), and each point freezes the
+container while its memory is dumped and its writable layer copied
+(about 90 ms at 64 MiB of memory, 260–390 ms at 1 GiB), and takes that
+much disk, for each of the points kept. It needs CRIU with `--seccomp-notify-socket`
 ([makhov/criu#1](https://github.com/makhov/criu/pull/1)) installed as `criu`.
 
 ## Fork
