@@ -467,7 +467,17 @@ gcr rewind ID 3
 ```
 
 Rewind replaces the processes and the writable layer in place; containerd
-keeps seeing one running task. It needs CRIU with `--seccomp-notify-socket`
+keeps seeing one running task.
+
+Where the kernel tracks which pages a process wrote (soft-dirty bits: x86,
+not arm64), points are incremental: each dumps only the memory written
+since the last, and a restore reads the rest from the points before it
+(CRIU's parent images). Every eighth point is full again, so old points
+can be deleted a chain at a time; between `keep` and `keep` + 7 are kept.
+A full point follows any other dump of the container (a snapshot, a
+checkpoint, a migration) and any rewind, which leave nothing to count
+from. A point of a 256 MiB container that wrote little since the last is
+a few hundred KiB, against 257 MiB for a full one. It needs CRIU with `--seccomp-notify-socket`
 ([makhov/criu#1](https://github.com/makhov/criu/pull/1)) installed as `criu`.
 
 ## Fork

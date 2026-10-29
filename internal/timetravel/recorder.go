@@ -23,8 +23,10 @@ import (
 type Snapshotter interface {
 	// Running reports whether the container's process has started.
 	Running() bool
-	// Snapshot writes a checkpoint of the running container into dir.
-	Snapshot(ctx context.Context, dir string) error
+	// Point writes a checkpoint of the running container into dir. With
+	// parent, the directory of the last point, it may dump only the
+	// memory written since then (falling back to a full one).
+	Point(ctx context.Context, dir, parent string) error
 	// Rewind replaces the running container with the checkpoint in dir.
 	Rewind(ctx context.Context, dir string) error
 	// Pids lists the container's processes (host pids).
@@ -50,7 +52,15 @@ type Recorder struct {
 	// The container's first execve is libcontainer's init executing the
 	// container's process; it is not a point.
 	seenInit bool
+	// The last point, and how many points its chain has: up to
+	// fullEvery, a point is incremental on the last one.
+	lastID, chain int
 }
+
+// fullEvery is how long a chain of points gets before a full one starts
+// the next: old points are deleted a chain at a time, so up to this many
+// more than Keep are kept.
+const fullEvery = 8
 
 // NewRecorder keeps its timeline in stateDir. Its Handle answers the
 // policy's trigger calls on the container's supervisor.
@@ -152,18 +162,44 @@ func (r *Recorder) handle(ctx context.Context, t Trigger, allow func()) {
 		log.G(ctx).WithError(err).Error("time travel: reserve point")
 		return
 	}
+	r.mu.Lock()
+	parentID := 0
+	if r.lastID != 0 && r.chain < fullEvery {
+		parentID = r.lastID
+	}
+	r.mu.Unlock()
+	parent := ""
+	if parentID != 0 {
+		parent = r.timeline.Dir(parentID)
+	}
 	start := time.Now()
-	if err := snap.Snapshot(ctx, dir); err != nil {
+	if err := snap.Point(ctx, dir, parent); err != nil {
 		r.timeline.Discard(id)
+		r.mu.Lock()
+		r.lastID = 0 // the next starts a chain
+		r.mu.Unlock()
 		log.G(ctx).WithError(err).Error("time travel: snapshot")
 		return
 	}
-	p := Point{ID: id, Time: start, Syscall: t.Syscall, Path: t.Path, Argv: t.Argv, StoppedPid: nspid}
+	// The container falls back to a full dump when it cannot do an
+	// incremental one; CRIU links "parent" in the images when it did.
+	if _, err := os.Lstat(filepath.Join(dir, "images", "parent")); err != nil {
+		parentID = 0
+	}
+	p := Point{ID: id, Time: start, Syscall: t.Syscall, Path: t.Path, Argv: t.Argv, StoppedPid: nspid, Parent: parentID}
 	if err := r.timeline.Commit(p); err != nil {
 		r.timeline.Discard(id)
 		log.G(ctx).WithError(err).Error("time travel: commit point")
 		return
 	}
+	r.mu.Lock()
+	if parentID == 0 {
+		r.chain = 1
+	} else {
+		r.chain++
+	}
+	r.lastID = id
+	r.mu.Unlock()
 	log.G(ctx).WithField("point", id).WithField("took", time.Since(start)).Debug("time travel: point")
 }
 
@@ -185,6 +221,7 @@ func (r *Recorder) Rewind(ctx context.Context, id int) error {
 	}
 	r.mu.Lock()
 	r.last = time.Now()
+	r.lastID = 0 // the restored memory has no tracking: start a chain
 	r.mu.Unlock()
 
 	pids, err := snap.Pids()
