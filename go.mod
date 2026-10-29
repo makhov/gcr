@@ -78,4 +78,4 @@ require (
 	tags.cncf.io/container-device-interface/specs-go v1.1.1 // indirect
 )
 
-replace github.com/opencontainers/runc => github.com/makhov/runc v0.0.0-20261028125522-2e2f678fc660
+replace github.com/opencontainers/runc => github.com/makhov/runc v0.0.0-20261028221520-53ed6c486b6d

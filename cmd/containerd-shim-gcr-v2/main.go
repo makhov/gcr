@@ -6,12 +6,15 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 
 	"github.com/containerd/containerd/v2/pkg/shim"
 	"github.com/opencontainers/runc/libcontainer"
+	"github.com/opencontainers/runc/libcontainer/configs"
 	_ "github.com/opencontainers/runc/libcontainer/nsenter"
 
+	"github.com/makhov/gcr/internal/container"
 	"github.com/makhov/gcr/internal/landlock"
 	"github.com/makhov/gcr/internal/manager"
 	_ "github.com/makhov/gcr/internal/task"
@@ -21,9 +24,24 @@ func init() {
 	// libcontainer re-executes this binary as the container's init.
 	// nsenter's constructor has already set up namespaces by now.
 	if len(os.Args) > 1 && os.Args[1] == "init" {
-		libcontainer.InitHook = landlock.InitHook
+		libcontainer.InitHook = initHook
 		libcontainer.Init()
 	}
+	// The shim runs criu through itself to set up criu's process first.
+	if len(os.Args) > 1 && os.Args[1] == container.MemoryMergeExec {
+		err := container.ExecMerged(os.Args[2:])
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func initHook(c *configs.Config, keep []*os.File) error {
+	// Before Landlock, which may leave the init unable to do anything
+	// but exec.
+	if err := container.MemoryMergeInitHook(c, keep); err != nil {
+		return err
+	}
+	return landlock.InitHook(c, keep)
 }
 
 func main() {
