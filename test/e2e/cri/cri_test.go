@@ -2,8 +2,8 @@
 
 // Package cri is a quick check of the gcr runtime handler through CRI: a
 // pod in gcr's user namespace, exec, exit codes, logs, resource updates,
-// stats, and what the container's root may do. critest covers the rest
-// of CRI (terminals included).
+// stats, a container with a terminal, and what the container's root may
+// do. critest covers the rest of CRI.
 package cri
 
 import (
@@ -57,6 +57,21 @@ func TestPod(t *testing.T) {
 	t.Run("logs", func(t *testing.T) {
 		framework.Eventually(t, 5*time.Second, "the log line", func() bool {
 			return strings.Contains(pod.Log(app), "hello from gcr")
+		})
+	})
+	t.Run("terminal", func(t *testing.T) {
+		// kubectl run -it: the container's own process has a terminal.
+		term := &cri.ContainerConfig{
+			Metadata: &cri.ContainerMetadata{Name: "term"},
+			Image:    &cri.ImageSpec{Image: framework.Busybox},
+			Command:  []string{"sh", "-c", "tty; stty size; sleep 3600"},
+			LogPath:  "term.log",
+			Tty:      true,
+			Stdin:    true,
+		}
+		pod.Start(term)
+		framework.Eventually(t, 5*time.Second, "the terminal in the log", func() bool {
+			return strings.Contains(pod.Log(term), "/dev/pts/")
 		})
 	})
 	t.Run("update", func(t *testing.T) {
