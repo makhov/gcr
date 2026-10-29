@@ -5,8 +5,8 @@ package container
 import (
 	"os"
 	"path/filepath"
+	"time"
 
-	"github.com/containerd/log"
 	"github.com/opencontainers/cgroups/fs2"
 )
 
@@ -27,17 +27,28 @@ func (c *Container) watchOOM() {
 	if err != nil {
 		return // no cgroup v2 memory controller: noted at exit, if at all
 	}
+	watched := make(chan struct{}, 1)
+	c.mu.Lock()
+	c.oomWatched = watched
+	c.mu.Unlock()
 	go func() {
 		for range ch {
-			c.noteOOM(false, false)
+			// libcontainer read the count as it changed. By now the
+			// cgroup may be gone (systemd removes a scope as soon as it is
+			// empty), but a kill it signalled happened.
+			c.noteOOM(true)
+			select {
+			case watched <- struct{}{}:
+			default:
+			}
 		}
 	}()
 }
 
 // noteOOM tells of OOM kills the container's cgroup counts and were not
-// told yet. It runs at exit as well, before the exit is reported: the
-// watcher may not have seen the kill that ended the init by then.
-func (c *Container) noteOOM(exiting, killed bool) {
+// told yet, or of one if signalled and the cgroup is gone. It returns
+// whether any kill has been told of.
+func (c *Container) noteOOM(signalled bool) bool {
 	c.mu.Lock()
 	dir := c.cgroupDir
 	c.mu.Unlock()
@@ -49,23 +60,41 @@ func (c *Container) noteOOM(exiting, killed bool) {
 	if err == nil {
 		n, err = fs2.OOMKillCount(dir)
 	}
-	if exiting && killed {
-		log.L.WithError(err).WithField("id", c.ID).WithField("cgroup", dir).WithField("oom_kill", n).Info("killed: OOM kills at exit")
-	}
-	if err != nil {
-		return
-	}
 	c.mu.Lock()
 	seen := c.oomKills
+	if err != nil {
+		if !signalled {
+			c.mu.Unlock()
+			return seen > 0
+		}
+		n = seen + 1
+	}
 	if n > seen {
 		c.oomKills = n
 	}
 	c.mu.Unlock()
-	if n <= seen {
+	if n > seen {
+		_ = os.WriteFile(filepath.Join(c.Bundle, OOMFile), nil, 0o644)
+		if c.onOOM != nil {
+			c.onOOM(c)
+		}
+	}
+	return n > 0
+}
+
+// noteOOMAtExit runs before an exit is reported, so the OOM kill that
+// ended the init is told of first. A process killed by SIGKILL whose
+// cgroup is already gone may have been the OOM killer's, with the watcher
+// not yet woken: give it a moment.
+func (c *Container) noteOOMAtExit(killed bool) {
+	c.mu.Lock()
+	watched := c.oomWatched
+	c.mu.Unlock()
+	if c.noteOOM(false) || !killed || watched == nil {
 		return
 	}
-	_ = os.WriteFile(filepath.Join(c.Bundle, OOMFile), nil, 0o644)
-	if c.onOOM != nil {
-		c.onOOM(c)
+	select {
+	case <-watched:
+	case <-time.After(500 * time.Millisecond):
 	}
 }
