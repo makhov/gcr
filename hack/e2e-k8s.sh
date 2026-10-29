@@ -34,7 +34,7 @@ kc get nodes
 echo "== workloads"
 "$ENGINE" cp hack/k8s/workloads.yaml "$CLUSTER":/tmp/workloads.yaml
 kc apply -f /tmp/workloads.yaml
-kc wait --for=condition=Ready pod plain hostusers-false gcr-userns enforced --timeout=300s || fail "pods not ready"
+kc wait --for=condition=Ready pod plain unconfined hostusers-false gcr-userns enforced --timeout=300s || fail "pods not ready"
 kc get pods -o wide
 
 echo "== exec, exit code, stdin"
@@ -45,6 +45,11 @@ code=0; kc exec plain -- sh -c 'exit 3' || code=$?
 
 echo "== logs"
 kc logs plain | grep -q "hello from gcr" || fail "logs"
+
+echo "== seccomp (kubelet seccompDefault)"
+seccomp() { kc exec "$1" -- grep '^Seccomp:' /proc/self/status | awk '{print $2}'; }
+[ "$(seccomp plain)" = 2 ] || fail "a pod without a profile has no filter under seccompDefault"
+[ "$(seccomp unconfined)" = 0 ] || fail "an Unconfined pod got a filter"
 
 echo "== resource limits"
 [ "$(kc exec plain -- cat /sys/fs/cgroup/memory.max)" = 67108864 ] || fail "memory limit"

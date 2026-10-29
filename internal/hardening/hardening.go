@@ -27,8 +27,15 @@ const (
 	// seccomp profile is Unconfined, and a runtime cannot tell the default
 	// from an explicit choice).
 	Standard Level = "standard"
-	// Always also hardens unconfined Kubernetes pods. Kubernetes asked for
-	// no filter there, so this is the operator overriding it.
+	// DeniedSet also gives unconfined Kubernetes pods the denied set (Denied
+	// and Absent), but not the argument rules of gcr's own profile: the
+	// calls behind most escapes are closed, while what a pod may use
+	// sockets and namespaces for stays as Kubernetes asked. Their seccomp
+	// is then not off, which CRI conformance tests expect of Unconfined.
+	DeniedSet Level = "denied"
+	// Always also hardens unconfined Kubernetes pods with gcr's whole
+	// profile. Kubernetes asked for no filter there, so this is the
+	// operator overriding it.
 	Always Level = "always"
 	// Off leaves the workload's seccomp profile as it is.
 	Off Level = "off"
@@ -71,10 +78,10 @@ type Options struct {
 
 func (l Level) Validate() error {
 	switch l {
-	case Standard, Always, Off:
+	case Standard, DeniedSet, Always, Off:
 		return nil
 	}
-	return fmt.Errorf("Hardening = %q, want standard, always or off: %w", l, errdefs.ErrInvalidArgument)
+	return fmt.Errorf("Hardening = %q, want standard, denied, always or off: %w", l, errdefs.ErrInvalidArgument)
 }
 
 // Denied are refused with EPERM whatever the workload's profile allows.
@@ -192,8 +199,16 @@ func Apply(spec *specs.Spec, o Options) Result {
 		return Result{Skipped: "privileged container"}
 	}
 	sc := spec.Linux.Seccomp
-	if sc == nil && level == Standard && ocispec.PodContainer(spec) {
-		return Result{Skipped: "Kubernetes pod with seccomp Unconfined"}
+	// Kubernetes' default is Unconfined, and kubelet's seccompDefault
+	// makes it RuntimeDefault, which is hardened below like any profile.
+	deniedOnly := false
+	if sc == nil && ocispec.PodContainer(spec) {
+		switch level {
+		case Standard:
+			return Result{Skipped: "Kubernetes pod with seccomp Unconfined (kubelet seccompDefault, or Hardening = 'denied' or 'always', would harden it)"}
+		case DeniedSet:
+			deniedOnly = true
+		}
 	}
 	var res Result
 	sysAdmin := ocispec.HasCapability(spec, "CAP_SYS_ADMIN")
@@ -208,7 +223,14 @@ func Apply(spec *specs.Spec, o Options) Result {
 			res.Supervised = append(res.Supervised, "setns")
 		}
 	}
-	if sc == nil {
+	if sc == nil && deniedOnly {
+		sc = &specs.LinuxSeccomp{
+			DefaultAction: specs.ActAllow,
+			Architectures: nativeArchitectures(),
+			Syscalls:      denyRules(),
+		}
+		spec.Linux.Seccomp = sc
+	} else if sc == nil {
 		allowPing(spec)
 		sc = &specs.LinuxSeccomp{
 			DefaultAction: specs.ActAllow,

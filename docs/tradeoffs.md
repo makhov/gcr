@@ -81,10 +81,14 @@ tests check that each refused call is refused, by return value.
   tenant.
 - **Under Kubernetes defaults, much of the hardening is off.** Kubernetes
   sends `Unconfined` seccomp and `hostUsers: true` by default, and a
-  runtime cannot tell that from an explicit choice. So a default pod gets
-  no denied set and no user namespace, only Landlock. Turn them on with
-  `Hardening = 'always'` and `UserNamespaces = 'always'` on a runtime
-  handler, or with pod settings (`RuntimeDefault`, `hostUsers: false`).
+  runtime cannot tell that from an explicit choice. CRI conformance
+  requires an `Unconfined` container to have no seccomp filter, so gcr
+  leaves it be: a default pod gets no denied set and no user namespace,
+  only Landlock. The kubelet's `seccompDefault: true` fixes the first for
+  every pod that does not ask for `Unconfined`, and keeps conformance.
+  Beyond that, `Hardening = 'denied'` or `'always'` and
+  `UserNamespaces = 'always'` on a runtime handler, or pod settings
+  (`hostUsers: false`), at the cost of those conformance tests.
 - **Some workloads need the hardening relaxed.** io_uring programs,
   in-container eBPF and profilers, packet capture, kernel WireGuard and
   VXLAN, FUSE mounts, and sandboxing tools that mount (bubblewrap,

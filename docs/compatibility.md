@@ -15,11 +15,14 @@ error.
 
 **Under Kubernetes defaults most of this does not apply.** A pod with the
 default `Unconfined` seccomp profile and `hostUsers` left at true gets no
-seccomp hardening and no user namespace from gcr, only Landlock. The
-seccomp sections apply to:
+seccomp hardening and no user namespace from gcr, only Landlock. With the
+kubelet's `seccompDefault: true`, pods without a profile run
+`RuntimeDefault` instead and get the denied set. The seccomp sections
+apply to:
 
 - containers started outside Kubernetes;
-- pods with a seccomp profile;
+- pods with a seccomp profile, which every pod has under `seccompDefault`;
+- `Unconfined` pods under `Hardening = 'denied'` (the denied set only);
 - every pod under `Hardening = 'always'`.
 
 ## Denied system calls (all hardened containers)

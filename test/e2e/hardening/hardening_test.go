@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/containerd/containerd/v2/contrib/seccomp"
 	"github.com/containerd/containerd/v2/pkg/oci"
 
 	"github.com/makhov/gcr/internal/netpolicy"
@@ -207,4 +208,37 @@ func TestNetlinkPolicy(t *testing.T) {
 		got := e.run(t, framework.Spec{RuntimeConfig: control}, "nested")
 		expect(t, got, "OK", "link_veth", "link_bond", "link_macvlan")
 	}
+}
+
+// Kubernetes pods: Unconfined (Kubernetes' default) is left alone, as CRI
+// conformance expects, unless the handler says otherwise; RuntimeDefault
+// (every pod's, with kubelet's seccompDefault) gets the denied set on
+// top of the runtime's profile.
+func TestPods(t *testing.T) {
+	e := setup(t)
+	pod := map[string]string{"io.kubernetes.cri.container-type": "container"}
+
+	got := e.run(t, framework.Spec{Annotations: pod})
+	for _, c := range []string{"io_uring_setup", "bpf", "keyctl"} {
+		if got[c] == "EPERM" || got[c] == "ENOSYS" {
+			t.Errorf("standard: %s refused in an Unconfined pod (%s)", c, got[c])
+		}
+	}
+
+	got = e.run(t, framework.Spec{Annotations: pod, RuntimeConfig: `Hardening = "denied"`})
+	expect(t, got, "EPERM", "io_uring_setup", "bpf", "perf_event_open", "userfaultfd")
+	expect(t, got, "ENOSYS", "keyctl", "fsopen")
+	// Not gcr's argument rules: sockets as Kubernetes asked.
+	for _, c := range []string{"socket_alg", "socket_vsock"} {
+		if got[c] == "EPERM" {
+			t.Errorf("denied: %s refused (%s), which only gcr's own profile does", c, got[c])
+		}
+	}
+	expect(t, got, "OK", "control_socket_tcp", "control_fork")
+
+	got = e.run(t, framework.Spec{Annotations: pod, SpecOpts: []oci.SpecOpts{seccomp.WithDefaultProfile()}})
+	// containerd's profile allows keyctl; gcr's denied set does not.
+	expect(t, got, "ENOSYS", "keyctl")
+	expect(t, got, "EPERM", "io_uring_setup")
+	expect(t, got, "OK", "control_socket_tcp", "control_fork")
 }

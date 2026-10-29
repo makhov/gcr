@@ -100,16 +100,26 @@ The seccomp-based layer.
   - Hardens every container except privileged ones and Kubernetes pods
     whose seccomp profile is `Unconfined`. `Unconfined` is the Kubernetes
     default, and a runtime can't tell it apart from an explicit choice.
+  - To harden every pod that does not ask for `Unconfined`, set the
+    kubelet's `seccompDefault: true`: pods without a profile then run
+    `RuntimeDefault`, which gcr hardens (README, Hardening). This keeps
+    CRI conformance.
+- `denied`:
+  - Also gives `Unconfined` pods the denied set (the first two rows
+    below), but none of the rows that look at arguments: sockets and
+    nested user namespaces stay as the pod asked.
+  - CRI conformance expects `Unconfined` pods to have no seccomp filter
+    at all (`Seccomp: 0`), so two of its tests fail.
 - `always`:
-  - Also hardens `Unconfined` Kubernetes pods. This is the operator
-    overriding what the pod asked for.
-  - Kubernetes conformance tests that expect an unconfined pod will notice.
+  - Also hardens `Unconfined` Kubernetes pods, with gcr's whole profile.
+    This is the operator overriding what the pod asked for.
+  - The same conformance tests fail.
 - `off`: gcr leaves the workload's seccomp profile as it is.
 
 What "hardened" means depends on whether the container brought a seccomp
 profile of its own:
 
-| | No profile (`ctr`; `Unconfined` pod under `always`) | Own profile (`RuntimeDefault`, `Localhost`, a spec's) |
+| | No profile (`ctr`; `Unconfined` pod under `always`; under `denied`, the first two rows) | Own profile (`RuntimeDefault`, `Localhost`, a spec's) |
 | --- | --- | --- |
 | Denied set, EPERM: `io_uring_*`, `bpf`, `perf_event_open`, `userfaultfd`, modules, kexec, `open_by_handle_at` | yes | yes, overriding the profile |
 | As absent, ENOSYS: the keyring (`add_key`, `keyctl`, `request_key`) and the new mount API (`fsopen`, `open_tree`, `mount_setattr`, ...) | yes | yes, overriding the profile |

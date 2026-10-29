@@ -284,13 +284,27 @@ hosts restrict unprivileged user namespaces with AppArmor
 (`kernel.apparmor_restrict_unprivileged_userns`), which takes the
 capabilities away inside unless a profile allows it, as with runc.
 
-Privileged containers are exempt. Kubernetes pods that run explicitly
-`Unconfined` (Kubernetes' default, which a runtime cannot tell from an
-explicit choice) stay unconfined, as conformance requires; pods with a
-profile (`RuntimeDefault`, `Localhost`) get the denied set merged in. Set
-the policy per runtime handler, in the runtime's options:
-`Hardening = 'standard'` (default), `'always'` (also unconfined pods), or
-`'off'`. A workload cannot weaken it.
+Privileged containers are exempt. Kubernetes pods with a profile
+(`RuntimeDefault`, `Localhost`) get the denied set merged in. Pods that run
+`Unconfined` stay unconfined by default, as CRI conformance requires
+(`Seccomp: 0`). That is Kubernetes' own default, which a runtime cannot
+tell from an explicit choice, so on nodes running gcr set the kubelet's
+`seccompDefault: true` (GA since Kubernetes 1.27):
+
+```yaml
+# KubeletConfiguration
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+seccompDefault: true
+```
+
+Every pod without a profile then runs `RuntimeDefault`, and gets gcr's
+denied set with it; only pods that ask for `Unconfined` stay unconfined.
+Set the policy per runtime handler, in the runtime's options:
+`Hardening = 'standard'` (default), `'denied'` (also gives unconfined pods
+the denied set), `'always'` (gives them gcr's whole profile), or `'off'`.
+`denied` and `always` fail CRI conformance's two tests of unconfined
+seccomp. A workload cannot weaken any of them.
 `test/e2e/hardening` probes every refused call.
 
 ### Netlink policy
