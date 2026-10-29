@@ -4,10 +4,14 @@ package migrate
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newTestReceiver(t *testing.T, idBase uint32, layers ...string) (*Receiver, string) {
@@ -94,5 +98,58 @@ func TestReceiverAbort(t *testing.T) {
 	}
 	if _, err := r.Wait(context.Background()); err == nil {
 		t.Fatal("Wait did not fail after an abort")
+	}
+}
+
+// A source whose pre-copy round failed restarts: the round it gave up on
+// is stopped, not waited for (CRIU may never have connected to it), and
+// the next is a full dump, since the memory the rounds before hold may be
+// incomplete.
+func TestReceiverRestart(t *testing.T) {
+	if _, err := exec.LookPath("criu"); err != nil || os.Geteuid() != 0 {
+		t.Skip("needs criu, as root")
+	}
+	r, url := newTestReceiver(t, 0)
+	round := func(restart bool) int {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, url+"/rounds", nil)
+		req.Header.Set("Authorization", "Bearer secret")
+		req.Header.Set(HeaderIDBase, "0")
+		if restart {
+			req.Header.Set(HeaderRestart, "1")
+		}
+		done := make(chan *http.Response, 1)
+		go func() {
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Error(err)
+			}
+			done <- resp
+		}()
+		select {
+		case resp := <-done:
+			defer resp.Body.Close()
+			var body struct{ Round int }
+			if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&body) != nil {
+				t.Fatalf("POST /rounds (restart %v): status %d", restart, resp.StatusCode)
+			}
+			return body.Round
+		case <-time.After(10 * time.Second):
+			t.Fatalf("POST /rounds (restart %v) hung on the round before", restart)
+			return 0
+		}
+	}
+	if n := round(false); n != 1 {
+		t.Fatalf("first round %d", n)
+	}
+	// Nobody connects to round 1's page server; a restart must not wait.
+	if n := round(true); n != 2 {
+		t.Fatalf("restarted round %d, want 2", n)
+	}
+	r.mu.Lock()
+	parent := r.ps.Parent
+	r.mu.Unlock()
+	if parent != "" {
+		t.Fatalf("the restarted round is incremental on %q, want a full dump", parent)
 	}
 }

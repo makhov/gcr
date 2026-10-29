@@ -470,10 +470,22 @@ Rewind replaces the processes and the writable layer in place; containerd
 keeps seeing one running task.
 
 What it costs (docs/tradeoffs.md has the numbers): every exec goes
-through gcr's supervisor (45–85 µs more), and each point freezes the
+through gcr's supervisor (45–85 µs more), and a full point freezes the
 container while its memory is dumped and its writable layer copied
 (about 90 ms at 64 MiB of memory, 260–390 ms at 1 GiB), and takes that
-much disk, for each of the points kept. It needs CRIU with `--seccomp-notify-socket`
+much disk.
+
+Where the kernel tracks which pages a process wrote (soft-dirty bits: x86,
+not arm64), points are incremental: each dumps only the memory written
+since the last, and a restore reads the rest from the points before it
+(CRIU's parent images). Every eighth point is full again, so old points
+can be deleted a chain at a time; between `keep` and `keep` + 7 are kept.
+A full point follows any other dump of the container (a snapshot, a
+checkpoint, a migration) and any rewind, which leave nothing to count
+from. A point of a 256 MiB container that wrote little since the last is
+a few hundred KiB, against 257 MiB for a full one.
+
+It needs CRIU with `--seccomp-notify-socket`
 ([makhov/criu#1](https://github.com/makhov/criu/pull/1)) installed as `criu`.
 
 ## Fork
@@ -503,6 +515,11 @@ created, and with `gcr.dev/fork-signal=SIGUSR2` (or another signal) gcr
 signals its init once it is restored, with the file in place, which is
 the moment to re-seed. The signal is opt-in: a process that does not
 handle SIGUSR2 dies of it.
+
+In Kubernetes, `gcr.dev/fork-from` is for handlers that allow it: a pod
+author could otherwise point it at any host directory. The handler lists
+it in `PodAnnotations`, and its `SnapshotRoots` say where snapshots may be
+(docs/configuration.md); `gcr.dev/migrate-in` is restricted the same way.
 
 Forks share the parent's user namespace range, because the snapshot's
 files carry host IDs from it: they are isolated from other containers,

@@ -249,11 +249,19 @@ func (s *Supervisor) serve(fd int) {
 		}
 		c := &Call{Pid: int(req.Pid), fd: sfd, id: req.ID, ctx: s.ctx}
 		copy(c.Args[:], req.Data.Args)
-		name, err := req.Data.Syscall.GetName()
-		if h, ok := s.handlers[name]; err == nil && ok {
-			c.Syscall = name
-			h(s.ctx, c)
+		// Named for the architecture it was made in: a 32-bit call's
+		// number is another call's on the native one (i386 mount is
+		// x86_64 access).
+		name, err := req.Data.Syscall.GetNameByArch(req.Data.Arch)
+		h, ok := s.handlers[name]
+		if err != nil || !ok {
+			// Only calls gcr supervises come here; one it cannot name
+			// is refused, not let through unchecked.
+			c.Reply(0, syscall.ENOSYS)
+			continue
 		}
+		c.Syscall = name
+		h(s.ctx, c)
 		c.Continue() // no-op if the handler answered
 	}
 }

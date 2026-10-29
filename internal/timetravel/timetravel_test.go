@@ -92,3 +92,51 @@ func TestTimeline(t *testing.T) {
 		t.Fatal("discarded point's directory still exists")
 	}
 }
+
+// Incremental points need their parents: old ones go a chain at a time,
+// never leaving fewer than Keep.
+func TestTimelineChains(t *testing.T) {
+	tl, err := NewTimeline(t.TempDir(), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit := func(parent int) int {
+		t.Helper()
+		id, _, err := tl.Reserve()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tl.Commit(Point{ID: id, Parent: parent}); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	ids := func() []int {
+		var out []int
+		for _, p := range tl.Points() {
+			out = append(out, p.ID)
+		}
+		return out
+	}
+	a := commit(0)
+	b := commit(a)
+	c := commit(b)
+	d := commit(c) // one chain of 4, keep 3: nothing can go
+	if got := ids(); !slices.Equal(got, []int{a, b, c, d}) {
+		t.Fatalf("one chain: %v", got)
+	}
+	e := commit(0)
+	f := commit(e)
+	if got := ids(); !slices.Equal(got, []int{a, b, c, d, e, f}) {
+		t.Fatalf("a second chain of 2: %v; the first must stay", got)
+	}
+	g := commit(f) // the second chain has 3: the first goes
+	if got := ids(); !slices.Equal(got, []int{e, f, g}) {
+		t.Fatalf("a second chain of 3: %v, want %v", got, []int{e, f, g})
+	}
+	for _, id := range []int{a, b, c, d} {
+		if _, err := os.Stat(tl.Dir(id)); !os.IsNotExist(err) {
+			t.Fatalf("point %d's directory kept: %v", id, err)
+		}
+	}
+}

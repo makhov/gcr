@@ -214,9 +214,14 @@ func Apply(spec *specs.Spec, o Options) Result {
 	sysAdmin := ocispec.HasCapability(spec, "CAP_SYS_ADMIN")
 	// With nested user namespaces, root in one can mount: the allowlist
 	// applies there too. Landlock refuses a confined container any mount.
-	supervise := sysAdmin ||
-		(sc == nil && o.NestedUserNamespaces == Guarded && !o.Landlocked)
+	//
+	// Only in a user namespace: without one the supervisor would mount
+	// with the init namespace's privilege, which the kernel's own checks
+	// and the container's LSM (AppArmor's deny mount, say) would have
+	// refused. There, the kernel and the LSM decide, as with runc.
 	userns := inUserNamespace(spec)
+	supervise := userns && (sysAdmin ||
+		(sc == nil && o.NestedUserNamespaces == Guarded && !o.Landlocked))
 	if supervise {
 		res.Supervised = []string{"mount"}
 		if userns && sysAdmin {

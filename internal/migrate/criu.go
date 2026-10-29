@@ -19,8 +19,11 @@ import (
 // pageServer is a CRIU page server receiving one dump into dir.
 type pageServer struct {
 	Port int
-	cmd  *exec.Cmd
-	done chan error
+	// Parent is the round directory this one is incremental on, "" if
+	// it is a full dump.
+	Parent string
+	cmd    *exec.Cmd
+	done   chan error
 }
 
 // startPageServer runs `criu page-server` on host:<free port> writing into
@@ -49,7 +52,7 @@ func startPageServer(ctx context.Context, host, dir, parent string) (*pageServer
 		return nil, fmt.Errorf("start page server: %w", err)
 	}
 	readyW.Close()
-	ps := &pageServer{Port: port, cmd: cmd, done: make(chan error, 1)}
+	ps := &pageServer{Port: port, Parent: parent, cmd: cmd, done: make(chan error, 1)}
 	go func() { ps.done <- cmd.Wait() }()
 
 	// CRIU writes \0 and closes the fd once it listens; EOF alone means it died.

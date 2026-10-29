@@ -123,6 +123,9 @@ type Prepared struct {
 	// identical memory elsewhere (AnnotationMemoryMerge): its init turns it
 	// on for a new container, criu's process for a restored one.
 	MemoryMerge bool
+	// TrackMemory makes every dump track the pages written after it, so
+	// a Point can dump only those (time travel, where the kernel can).
+	TrackMemory bool
 	// ForkFrom, when set, is a snapshot directory (Snapshot's output) this
 	// container starts from: its processes are restored from the
 	// snapshot's images, and its writable layer is the snapshot's, which
@@ -177,9 +180,11 @@ type Container struct {
 	exited     chan struct{}
 	onExit     func(*Container)
 	onOOM      func(*Container)
-	oomKills   uint64        // told of by onOOM; guarded by mu
-	cgroupDir  string        // read at start, for OOM kills at exit; guarded by mu
-	oomWatched chan struct{} // the watcher told of a kill; guarded by mu
+	oomKills   uint64 // told of by onOOM; guarded by mu
+	cgroupDir  string // read at start, for OOM kills at exit; guarded by mu
+	oomInvoked uint64 // the OOM killer's invocations seen; guarded by mu
+	// parentKills is the parent cgroup's OOM kills when the watch began.
+	parentKills uint64
 	// replacing is set while a rewind kills the processes; their exit
 	// is then reported on replaced instead of to containerd.
 	replacing bool
@@ -200,6 +205,11 @@ type Container struct {
 	// memoryMerge runs criu with memory merging on, which the tasks it
 	// restores inherit.
 	memoryMerge bool
+	// tracking: dumps track memory (TrackMemory); trackedSince is the
+	// point the tracked pages were written after, "" if none. Guarded
+	// by op.
+	tracking     bool
+	trackedSince string
 	// forkSignal is sent to the init once a fork is restored.
 	forkSignal unix.Signal
 	criu       CRIUConfig
@@ -369,6 +379,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		cgroupOwner:    prep.CgroupOwner,
 		lazyPages:      prep.LazyPages,
 		memoryMerge:    prep.MemoryMerge,
+		tracking:       prep.TrackMemory,
 		forkSignal:     prep.ForkSignal,
 		criu:           prep.CRIU,
 		gpu:            prep.GPU,
@@ -398,6 +409,9 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	if err := c.delegateCgroup(); err != nil {
 		return nil, err
 	}
+	// While the init waits to exec: a program killed by the OOM killer
+	// in its first milliseconds is seen too.
+	c.watchOOM()
 	if err := c.track(proc); err != nil {
 		return nil, err
 	}
@@ -418,7 +432,6 @@ func (c *Container) Start(ctx context.Context) error {
 			return fmt.Errorf("exec: %w", err)
 		}
 		c.setStatus(Running)
-		c.watchOOM()
 		return nil
 	}
 	if err := c.restore(c.checkpoint); err != nil {
@@ -436,6 +449,12 @@ func (c *Container) Start(ctx context.Context) error {
 
 // restore starts a new incarnation from CRIU images.
 func (c *Container) restore(images string) error {
+	c.trackedSince = ""
+	// The images may come from elsewhere (a snapshot, a migration): their
+	// user namespace must be this container's.
+	if err := userns.CheckImages(images, idExtents(c.cfg.UIDMappings), idExtents(c.cfg.GIDMappings)); err != nil {
+		return fmt.Errorf("restore: %w", err)
+	}
 	saved, err := gpu.Load(images)
 	if err != nil {
 		return err
@@ -495,6 +514,7 @@ func (c *Container) restore(images string) error {
 func (c *Container) Checkpoint(ctx context.Context, opts CheckpointOpts) error {
 	c.op.Lock()
 	defer c.op.Unlock()
+	c.trackedSince = ""
 	if c.gpuError != nil {
 		return fmt.Errorf("checkpoint: %w", c.gpuError)
 	}
@@ -548,9 +568,39 @@ func (c *Container) Running() bool {
 // Snapshot freezes the container, copies its writable layer to dir/upper and
 // dumps its processes to dir/images, then lets it continue. Freezing first
 // keeps the files and the memory image consistent with each other.
-func (c *Container) Snapshot(ctx context.Context, dir string) (retErr error) {
+func (c *Container) Snapshot(ctx context.Context, dir string) error {
+	return c.snapshot(ctx, dir, "")
+}
+
+// Point is Snapshot for a point on the timeline: with parent, the
+// directory of an earlier point, only the memory written since that one
+// is dumped, the rest read from it on a restore. Without memory tracking
+// (MemoryTracking), points are full.
+func (c *Container) Point(ctx context.Context, dir, parent string) error {
+	return c.snapshot(ctx, dir, parent)
+}
+
+// MemoryTracking says whether the kernel tracks which pages a process
+// wrote (soft-dirty bits), which incremental dumps need; arm64 does not.
+var MemoryTracking = sync.OnceValue(func() bool {
+	return exec.Command("criu", "check", "--feature", "mem_dirty_track").Run() == nil
+})
+
+func (c *Container) snapshot(ctx context.Context, dir, parent string) (retErr error) {
 	c.op.Lock()
 	defer c.op.Unlock()
+	// Pages written since parent are known only if it was the last dump:
+	// any other (a snapshot, a checkpoint, a migration's) or a restore
+	// started tracking afresh.
+	if !c.tracking || parent != c.trackedSince {
+		parent = ""
+	}
+	c.trackedSince = ""
+	defer func() {
+		if retErr == nil && c.tracking {
+			c.trackedSince = dir
+		}
+	}()
 	if !c.Running() || c.isMigrating() {
 		return fmt.Errorf("container is not running or is migrating: %w", errdefs.ErrFailedPrecondition)
 	}
@@ -573,11 +623,21 @@ func (c *Container) Snapshot(ctx context.Context, dir string) (retErr error) {
 	if err := os.MkdirAll(work, 0o700); err != nil {
 		return err
 	}
-	err = c.lc.Checkpoint(&libcontainer.CriuOpts{
+	opts := &libcontainer.CriuOpts{
 		ImagesDirectory: filepath.Join(dir, "images"),
 		WorkDirectory:   work,
 		LeaveRunning:    true,
-	})
+	}
+	if parent != "" {
+		// Relative to the images directory; CRIU links it as "parent"
+		// and follows it on a restore.
+		rel, err := filepath.Rel(opts.ImagesDirectory, filepath.Join(parent, "images"))
+		if err != nil {
+			return err
+		}
+		opts.ParentImage = rel // and track memory, for the next one
+	}
+	err = c.lc.Checkpoint(opts)
 	if err != nil {
 		return fmt.Errorf("checkpoint (criu log in %s): %w", work, err)
 	}
@@ -744,6 +804,7 @@ func (c *Container) FreezeDump(ctx context.Context, dir, parent, host string, po
 }
 
 func (c *Container) dump(dir, parent, host string, port int, pre bool) error {
+	c.trackedSince = ""
 	err := c.lc.Checkpoint(&libcontainer.CriuOpts{
 		ImagesDirectory: dir,
 		WorkDirectory:   dir,
@@ -1268,4 +1329,12 @@ var rlimits = map[string]int{
 func errRootfs(what string) error {
 	return fmt.Errorf("%s need the rootfs as overlay mounts from containerd, which gcr mounts itself; "+
 		"this container's was mounted by its caller (CRI-O does): %w", what, errdefs.ErrNotImplemented)
+}
+
+func idExtents(m []configs.IDMap) []userns.Extent {
+	out := make([]userns.Extent, len(m))
+	for i, e := range m {
+		out[i] = userns.Extent{ContainerID: uint32(e.ContainerID), HostID: uint32(e.HostID), Size: uint32(e.Size)}
+	}
+	return out
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -322,5 +323,24 @@ func TestClaimForSnapshot(t *testing.T) {
 	c, err := ClaimForSnapshot("/s/c", "pulled_y", free)
 	if err != nil || c.Base != free {
 		t.Fatalf("claiming a free range: %+v, %v", c, err)
+	}
+}
+
+// Keys become paths gcr writes and removes as root; one may come from a
+// snapshot's KeyFile.
+func TestKeyValidation(t *testing.T) {
+	stateDir = t.TempDir()
+	for _, key := range []string{"../../..", "..", ".", "a/b", "", "x\x00y", strings.Repeat("k", 256)} {
+		if _, err := Join(key, "c", firstBase); !errdefs.IsInvalidArgument(err) {
+			t.Errorf("Join(%q): %v", key, err)
+		}
+		if err := Release(Range{Base: firstBase, Key: key}, "c"); !errdefs.IsInvalidArgument(err) {
+			t.Errorf("Release(%q): %v", key, err)
+		}
+	}
+	for _, key := range []string{"default_parent-1", "k8s.io_pod_abc", "pulled_0123abcd", "ns_a.b:c@d+e"} {
+		if err := validKey(key); err != nil {
+			t.Errorf("valid key %q refused: %v", key, err)
+		}
 	}
 }

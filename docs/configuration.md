@@ -69,6 +69,8 @@ error that names the setting and the values it accepts.
 | `Landlock` | `standard`, `off` | `standard` |
 | `NetlinkPolicy` | `auto`, `off` | `auto` |
 | `MigrationTLS` | a table: `Cert`, `Key`, `CA` (file paths) | unset: plain HTTP |
+| `PodAnnotations` | restricted annotations pods may use | none |
+| `SnapshotRoots` | directories snapshots may be forked from | none |
 
 ### `UserNamespaces`
 
@@ -223,10 +225,47 @@ In a `ConfigPath` file the table is `[MigrationTLS]`. Set it on both
 hosts' handlers. The token
 (`gcr.dev/migrate-token`) is checked either way.
 
+### `PodAnnotations`
+
+Pod annotations come from whoever may create pods. Four of gcr's would
+give such a tenant more than its own container, so pods may use them
+only where the handler lists them:
+
+| Restricted | What a pod author could do with it |
+| --- | --- |
+| `gcr.dev/fork-from` | Choose a host directory for CRIU to restore from as root, and the layers a fork mounts. |
+| `gcr.dev/migrate-in` | Make the shim listen on any address of the node's network, and restore what is sent there. |
+| `gcr.dev/migrate-token` | Choose the token that listener accepts. |
+| `gcr.dev/userns-base` | Choose its host IDs, such as a range another tenant left files owned by. |
+
+```toml
+  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr-forks.options]
+    PodAnnotations = ['gcr.dev/fork-from']
+    SnapshotRoots = ['/var/lib/gcr/snapshots', '/var/lib/gcr/layers']
+```
+
+A pod using one its handler does not list fails to start with an error
+that names it. Containers created outside Kubernetes (`ctr`, the
+containerd client) are not restricted: whoever can reach containerd's
+socket is root already. Which pods may use a handler that lists them is
+a matter for Kubernetes (RuntimeClass, admission).
+
+### `SnapshotRoots`
+
+The directories snapshots may be forked from. With any set, a
+`gcr.dev/fork-from` path, and the snapshot of every layer it names, must
+be under one of them, reached without a symlink, and owned by root and
+writable by no one else from the root down: whoever could write a
+snapshot could choose what CRIU restores and what a fork mounts. Pods
+may fork only where this is set. Include the store `gcr snapshot-pull`
+puts layers in (`/var/lib/gcr/layers` by default).
+
 ## Annotations
 
 On Kubernetes they reach gcr only if the handler lists them in
-`pod_annotations` (`gcr.dev/*` above), and they are set on the pod.
+`pod_annotations` (`gcr.dev/*` above), and they are set on the pod. The
+restricted ones (`fork-from`, `migrate-in`, `migrate-token`,
+`userns-base`) also need the handler's `PodAnnotations`.
 
 | Annotation | Value | What it does |
 | --- | --- | --- |

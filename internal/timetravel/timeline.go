@@ -25,6 +25,9 @@ type Point struct {
 	// StoppedPid is the task stopped just after its execve, as a pid in
 	// the container's pid namespace; it is continued after a rewind.
 	StoppedPid int `json:"stoppedPid"`
+	// Parent is the point whose memory this one dumped only the changes
+	// to, 0 for a full point. A point needs its parents.
+	Parent int `json:"parent,omitempty"`
 }
 
 // Timeline stores points as directories: <root>/<id>/{images,upper,point.json}.
@@ -68,10 +71,17 @@ func (t *Timeline) Commit(p Point) error {
 	}
 	t.mu.Lock()
 	t.points = append(t.points, p)
+	// Old points go a chain at a time (a full point and those after it
+	// until the next full one), while Keep remain: a point never loses
+	// its parent.
 	var drop []Point
-	if len(t.points) > t.keep {
-		drop = slices.Clone(t.points[:len(t.points)-t.keep])
-		t.points = slices.Clone(t.points[len(t.points)-t.keep:])
+	for len(t.points) > t.keep {
+		next := slices.IndexFunc(t.points[1:], func(p Point) bool { return p.Parent == 0 }) + 1
+		if next == 0 || len(t.points)-next < t.keep {
+			break
+		}
+		drop = append(drop, t.points[:next]...)
+		t.points = slices.Clone(t.points[next:])
 	}
 	t.mu.Unlock()
 	for _, d := range drop {

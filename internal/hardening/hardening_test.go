@@ -125,17 +125,25 @@ func TestApplySkips(t *testing.T) {
 
 func TestApplySupervisesMountWithSysAdmin(t *testing.T) {
 	// CAP_SYS_ADMIN without access to all devices: not privileged, can mount.
-	s := &specs.Spec{
-		Process: &specs.Process{Capabilities: &specs.LinuxCapabilities{Bounding: []string{"CAP_SYS_ADMIN"}}},
-		Linux:   &specs.Linux{MaskedPaths: []string{"/proc/kcore"}},
+	sysAdmin := func(ns ...specs.LinuxNamespace) *specs.Spec {
+		return &specs.Spec{
+			Process: &specs.Process{Capabilities: &specs.LinuxCapabilities{Bounding: []string{"CAP_SYS_ADMIN"}}},
+			Linux:   &specs.Linux{MaskedPaths: []string{"/proc/kcore"}, Namespaces: ns},
+		}
 	}
+	// Without a user namespace the kernel and the LSM decide, not gcr
+	// with the init namespace's privilege.
+	if r := Apply(sysAdmin(), Options{Level: Standard}); len(r.Supervised) != 0 {
+		t.Fatalf("supervised without a user namespace: %+v", r)
+	}
+	s := sysAdmin(specs.LinuxNamespace{Type: specs.UserNamespace})
 	r := Apply(s, Options{Level: Standard})
-	if r.Skipped != "" || !slices.Equal(r.Supervised, []string{"mount"}) {
+	if r.Skipped != "" || !slices.Equal(r.Supervised, []string{"mount", "setns"}) {
 		t.Fatalf("Apply = %+v", r)
 	}
 	last := s.Linux.Seccomp.Syscalls[len(s.Linux.Seccomp.Syscalls)-1]
-	if !slices.Equal(last.Names, []string{"mount"}) || last.Action != specs.ActNotify {
-		t.Fatalf("mount rule %+v", last)
+	if !slices.Equal(last.Names, []string{"mount", "setns"}) || last.Action != specs.ActNotify {
+		t.Fatalf("supervised rule %+v", last)
 	}
 
 	// Merged into a profile that allows mount: the notify rule replaces it.
@@ -144,7 +152,7 @@ func TestApplySupervisesMountWithSysAdmin(t *testing.T) {
 		Linux: &specs.Linux{MaskedPaths: []string{"/proc/kcore"}, Seccomp: &specs.LinuxSeccomp{
 			DefaultAction: specs.ActErrno,
 			Syscalls:      []specs.LinuxSyscall{{Names: []string{"mount", "read"}, Action: specs.ActAllow}},
-		}},
+		}, Namespaces: []specs.LinuxNamespace{{Type: specs.UserNamespace}}},
 	}
 	Apply(s, Options{Level: Standard})
 	for _, rule := range s.Linux.Seccomp.Syscalls {
@@ -213,7 +221,10 @@ func rule(rules []specs.LinuxSyscall, name string, index uint, value uint64) *sp
 
 func TestNestedUserNamespacesGuarded(t *testing.T) {
 	plain := func(caps ...string) *specs.Spec {
-		return &specs.Spec{Process: &specs.Process{Capabilities: &specs.LinuxCapabilities{Bounding: caps}}}
+		return &specs.Spec{
+			Process: &specs.Process{Capabilities: &specs.LinuxCapabilities{Bounding: caps}},
+			Linux:   &specs.Linux{Namespaces: []specs.LinuxNamespace{{Type: specs.UserNamespace}}},
+		}
 	}
 	s := plain()
 	r := Apply(s, Options{Level: Standard})

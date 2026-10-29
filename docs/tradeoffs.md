@@ -199,9 +199,12 @@ tests check that each refused call is refused, by return value.
     memory, 140–160 ms at 256 MiB, 260–390 ms at 1 GiB, and about 30 ms
     more for 200 MiB written. These are writes to the page cache; a node
     short of memory or disk bandwidth freezes longer.
-  - Each point takes as much disk as the container's memory plus its
+  - A full point takes as much disk as the container's memory plus its
     writable layer: with the default of 20 points kept, a 1 GiB container
-    keeps about 20 GiB. Points are full, not incremental.
+    keeps about 20 GiB. On arm64 every point is full. On x86 the kernel
+    tracks written pages, and points between full ones (every eighth)
+    dump only what was written since the last: a few hundred KiB for a
+    256 MiB container that wrote little, and a shorter freeze.
 
   Points are taken at most once per interval (1 s by default), so the
   freeze is a fraction of that at most; a container that does not exec
