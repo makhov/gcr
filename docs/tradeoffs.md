@@ -129,10 +129,13 @@ tests check that each refused call is refused, by return value.
   pull one can read that memory. gcr moves them between hosts
   (`gcr snapshot-push`, `gcr snapshot-pull`); naming and expiring them is
   up to the platform.
-- **A pulled snapshot needs its user namespace range on the target.** Its
-  files and processes carry host IDs from that range, so a host where
-  another container has the range cannot fork it. The platform has to
-  plan ranges across hosts.
+- **A pulled snapshot may be moved to another user namespace range.** Its
+  files and processes carry host IDs from the range it was taken in.
+  Where that range is taken, a pull shifts the snapshot into a free one,
+  which costs a pass over its files and a copy of its layers. This
+  relies on CRIU recording every ID but the namespace's maps as the
+  container sees it: a kind of state that CRIU records otherwise would
+  come back with the wrong owner.
 - **A fork must use the image the snapshot was taken from.** Nothing
   outside the container's writable layer is captured: volumes and bind
   mounts must be there, in the same state, when a fork starts.

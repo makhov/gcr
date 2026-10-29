@@ -122,7 +122,14 @@ func run(ctx context.Context, ns string, args []string) error {
 			tag = "latest"
 		}
 		if args[0] == "snapshot-pull" {
-			return registry.Pull(ctx, repo, tag, fs.Arg(1), *store)
+			pulled, err := registry.Pull(ctx, repo, tag, fs.Arg(1), *store)
+			if err != nil {
+				return err
+			}
+			if pulled.From != 0 {
+				fmt.Printf("moved from user namespace range %d to %d (that one is in use here)\n", pulled.From, pulled.Range.Base)
+			}
+			return nil
 		}
 		desc, err := registry.Push(ctx, fs.Arg(0), repo, tag)
 		if err != nil {

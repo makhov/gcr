@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -18,13 +20,16 @@ import (
 	"github.com/makhov/gcr/internal/control"
 	"github.com/makhov/gcr/internal/snapshot"
 	"github.com/makhov/gcr/internal/snapshot/registry"
+	"github.com/makhov/gcr/internal/userns"
 	"github.com/makhov/gcr/test/e2e/framework"
 )
 
 // TestRegistry moves a snapshot of a fork through an OCI registry: it is
-// pushed with the layer it was forked from, everything here is removed
-// (containers, snapshots, and with them the user namespace range), and a
-// fork of the pulled snapshot carries on from it.
+// pushed with the layer it was forked from, and pulled twice. First while
+// the snapshots here hold its user namespace range, so it is moved into
+// another, as on a host where that range is taken; then once everything
+// here is removed, so it keeps its own. A fork of either carries on from
+// it, mapping the range it was given.
 func TestRegistry(t *testing.T) {
 	ns := framework.NewNamespace(t, "gcr-e2e")
 	addr := "127.0.0.1:" + strconv.Itoa(5100+os.Getpid()%400)
@@ -82,6 +87,25 @@ func TestRegistry(t *testing.T) {
 	}
 	t.Logf("pushed in %s", time.Since(begin).Round(time.Millisecond))
 
+	base := readBase(t, second)
+	store := filepath.Join(tmp, "layers")
+
+	// Its range is held here: the pull moves it.
+	moved := filepath.Join(tmp, "moved")
+	res, err := registry.Pull(t.Context(), repo, repo.Reference.Reference, moved, store)
+	if err != nil {
+		t.Fatalf("pull into a taken range: %v", err)
+	}
+	if res.From != base || res.Range.Base == base || readBase(t, moved) != res.Range.Base {
+		t.Fatalf("pulled while range %d is taken: %+v, snapshot says %d", base, res, readBase(t, moved))
+	}
+	t.Logf("moved from range %d to %d", base, res.Range.Base)
+	fm := forkOf("fork-moved", moved)
+	checkFork(t, fm, at, res.Range.Base)
+	// Gone again, with the layer it moved into the store.
+	fm.Remove()
+	removeAll(t, moved, store)
+
 	// Nothing of it is left here.
 	a.Remove()
 	parent.Remove()
@@ -92,34 +116,75 @@ func TestRegistry(t *testing.T) {
 	}
 
 	pulled := filepath.Join(tmp, "pulled")
-	store := filepath.Join(tmp, "layers")
 	begin = time.Now()
-	if err := registry.Pull(t.Context(), repo, repo.Reference.Reference, pulled, store); err != nil {
+	res, err = registry.Pull(t.Context(), repo, repo.Reference.Reference, pulled, store)
+	if err != nil {
 		t.Fatalf("pull: %v", err)
 	}
 	t.Logf("pulled in %s", time.Since(begin).Round(time.Millisecond))
-
+	if res.From != 0 || res.Range.Base != base {
+		t.Fatalf("pulled with range %d free: %+v", base, res)
+	}
 	b := forkOf("fork-b", pulled)
-	if s, err := b.ReadFile("/a"); err != nil || s != "a" {
-		t.Fatalf("fork of the pulled snapshot: /a is %q, %v", s, err)
-	}
-	if out, code := b.Exec("test", "-e", "/parent"); code == 0 {
-		t.Fatalf("fork of the pulled snapshot sees /parent, which fork a deleted: %s", out)
-	}
-	framework.Eventually(t, 10*time.Second, "the fork to count on", func() bool {
-		return b.ReadInt("/tmp/count") > at
-	})
+	checkFork(t, b, at, base)
 	if users, err := snapshot.Users(pulled); err != nil || len(users) != 1 {
 		t.Fatalf("users of the pulled snapshot: %v, %v; want the fork", users, err)
 	}
-	b.Remove()
-	if err := snapshot.Remove(pulled); err != nil {
-		t.Fatalf("remove the pulled snapshot: %v", err)
+}
+
+// checkFork checks that c, a fork of the snapshot of fork a, has a's
+// files and counter, and maps the range at base.
+func checkFork(t *testing.T, c *framework.Container, at int, base uint32) {
+	t.Helper()
+	if s, err := c.ReadFile("/a"); err != nil || s != "a" {
+		t.Fatalf("%s: /a is %q, %v", c.ID, s, err)
+	}
+	if out, code := c.Exec("test", "-e", "/parent"); code == 0 {
+		t.Fatalf("%s sees /parent, which fork a deleted: %s", c.ID, out)
+	}
+	framework.Eventually(t, 10*time.Second, c.ID+" to count on", func() bool {
+		return c.ReadInt("/tmp/count") > at
+	})
+	out, code := c.Exec("cat", "/proc/self/uid_map")
+	if f := strings.Fields(out); code != 0 || len(f) < 2 || f[1] != strconv.Itoa(int(base)) {
+		t.Fatalf("%s maps %q, want range %d", c.ID, out, base)
+	}
+	// What it writes is owned, on the host, by its range's root, as is
+	// what it found in the snapshot's layer.
+	if _, code := c.Exec("sh", "-c", "echo x > /new"); code != 0 {
+		t.Fatalf("%s: write", c.ID)
+	}
+	for _, f := range []string{"/new", "/a"} {
+		var st syscall.Stat_t
+		if err := syscall.Stat(c.Rootfs(f), &st); err != nil || st.Uid != base {
+			t.Fatalf("%s: %s is owned by %d on the host, want %d (%v)", c.ID, f, st.Uid, base, err)
+		}
+	}
+}
+
+// removeAll removes the snapshot in dir and the layers in store.
+func removeAll(t *testing.T, dir, store string) {
+	t.Helper()
+	if err := snapshot.Remove(dir); err != nil {
+		t.Fatalf("remove %s: %v", dir, err)
 	}
 	layers, _ := os.ReadDir(store)
 	for _, l := range layers {
 		if err := snapshot.Remove(filepath.Join(store, l.Name())); err != nil {
-			t.Fatalf("remove pulled layer: %v", err)
+			t.Fatalf("remove layer %s: %v", l.Name(), err)
 		}
 	}
+}
+
+func readBase(t *testing.T, dir string) uint32 {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, userns.BaseFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := userns.ParseBase(string(b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
 }

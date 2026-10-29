@@ -17,6 +17,7 @@ package registry
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -282,42 +283,82 @@ func (c *counter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// Pulled says how a snapshot was pulled.
+type Pulled struct {
+	// Range is the user namespace range the snapshot maps here (zero
+	// without one), and From the one it was taken in, if that differs:
+	// it was moved, being taken.
+	Range userns.Range
+	From  uint32
+}
+
 // Pull writes the snapshot ref names in source to dir, which must not
 // exist or be empty, and the layers beneath it to store. A fork of dir
 // can then be started on this host.
-func Pull(ctx context.Context, source oras.ReadOnlyTarget, ref, dir, store string) error {
+//
+// The snapshot keeps its user namespace range if that is free here, and
+// is moved into a free one otherwise (userns.ShiftTree, ShiftImages).
+// Snapshots taken from the same container, in the same range, share one
+// range here too, as forks of one snapshot do, and so their layers.
+func Pull(ctx context.Context, source oras.ReadOnlyTarget, ref, dir, store string) (_ Pulled, retErr error) {
+	var pulled Pulled
 	dir, err := filepath.Abs(dir)
 	if err != nil {
-		return err
+		return pulled, err
 	}
 	if entries, err := os.ReadDir(dir); err == nil && len(entries) > 0 {
-		return fmt.Errorf("%s is not empty: %w", dir, errdefs.ErrAlreadyExists)
+		return pulled, fmt.Errorf("%s is not empty: %w", dir, errdefs.ErrAlreadyExists)
 	}
 	manifestDesc, err := source.Resolve(ctx, ref)
 	if err != nil {
-		return err
+		return pulled, err
 	}
 	var manifest ocispec.Manifest
 	if err := fetchJSON(ctx, source, manifestDesc, &manifest); err != nil {
-		return fmt.Errorf("manifest: %w", err)
+		return pulled, fmt.Errorf("manifest: %w", err)
 	}
 	if manifest.ArtifactType != ArtifactType || manifest.Config.MediaType != ConfigMediaType {
-		return fmt.Errorf("%s is not a gcr snapshot (artifact type %q): %w", ref, manifest.ArtifactType, errdefs.ErrInvalidArgument)
+		return pulled, fmt.Errorf("%s is not a gcr snapshot (artifact type %q): %w", ref, manifest.ArtifactType, errdefs.ErrInvalidArgument)
 	}
 	var cfg Config
 	if err := fetchJSON(ctx, source, manifest.Config, &cfg); err != nil {
-		return fmt.Errorf("config: %w", err)
+		return pulled, fmt.Errorf("config: %w", err)
 	}
 	if cfg.Arch != runtime.GOARCH {
-		return fmt.Errorf("snapshot is for %s, this host is %s: %w", cfg.Arch, runtime.GOARCH, errdefs.ErrFailedPrecondition)
+		return pulled, fmt.Errorf("snapshot is for %s, this host is %s: %w", cfg.Arch, runtime.GOARCH, errdefs.ErrFailedPrecondition)
 	}
 	if len(manifest.Layers) != len(cfg.Layers)+2 || manifest.Layers[0].MediaType != ImagesMediaType {
-		return fmt.Errorf("%s: malformed snapshot manifest: %w", ref, errdefs.ErrInvalidArgument)
+		return pulled, fmt.Errorf("%s: malformed snapshot manifest: %w", ref, errdefs.ErrInvalidArgument)
 	}
 	uppers := manifest.Layers[1:]
 	for i, d := range uppers {
 		if d.MediaType != UpperMediaType || (i > 0 && d.Digest != cfg.Layers[i-1]) {
-			return fmt.Errorf("%s: malformed snapshot manifest: %w", ref, errdefs.ErrInvalidArgument)
+			return pulled, fmt.Errorf("%s: malformed snapshot manifest: %w", ref, errdefs.ErrInvalidArgument)
+		}
+	}
+
+	// The range first: the layers are written in it.
+	if cfg.UsernsBase != 0 {
+		// Keyed by the range the snapshot was taken in, on the host it
+		// was taken on, not that host's key, which may name something
+		// else here.
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%s@%d", cfg.UsernsKey, cfg.UsernsBase)))
+		key := "pulled_" + hex.EncodeToString(sum[:8])
+		r, err := userns.ClaimForSnapshot(dir, key, cfg.UsernsBase)
+		if errdefs.IsConflict(err) {
+			r, err = userns.ClaimForSnapshot(dir, key, 0)
+		}
+		if err != nil {
+			return pulled, fmt.Errorf("user namespace range: %w", err)
+		}
+		defer func() {
+			if retErr != nil {
+				_ = userns.ReleaseForSnapshot(dir, r)
+			}
+		}()
+		pulled.Range = r
+		if r.Base != cfg.UsernsBase {
+			pulled.From = cfg.UsernsBase
 		}
 	}
 
@@ -325,56 +366,70 @@ func Pull(ctx context.Context, source oras.ReadOnlyTarget, ref, dir, store strin
 	// the ones below it.
 	store, err = filepath.Abs(store)
 	if err != nil {
-		return err
+		return pulled, err
 	}
 	var below []string // top first
 	for i := len(uppers) - 1; i >= 1; i-- {
-		layerDir, err := pullLayer(ctx, source, uppers[i], below, store)
+		layerDir, err := pullLayer(ctx, source, uppers[i], below, store, pulled)
 		if err != nil {
-			return fmt.Errorf("layer %s: %w", uppers[i].Digest, err)
+			return pulled, fmt.Errorf("layer %s: %w", uppers[i].Digest, err)
 		}
 		below = append([]string{filepath.Join(layerDir, snapshot.Upper)}, below...)
 	}
 
 	tmp, err := os.MkdirTemp(filepath.Dir(dir), "."+filepath.Base(dir)+".gcr-pull-")
 	if err != nil {
-		return err
+		return pulled, err
 	}
 	defer os.RemoveAll(tmp)
 	if err := unpack(ctx, source, manifest.Layers[0], filepath.Join(tmp, "images")); err != nil {
-		return fmt.Errorf("images: %w", err)
+		return pulled, fmt.Errorf("images: %w", err)
 	}
 	if err := unpack(ctx, source, uppers[0], filepath.Join(tmp, snapshot.Upper)); err != nil {
-		return fmt.Errorf("writable layer: %w", err)
+		return pulled, fmt.Errorf("writable layer: %w", err)
 	}
-	if err := writeSnapshotFiles(tmp, below, blobs{Upper: &uppers[0], Images: &manifest.Layers[0]}); err != nil {
-		return err
-	}
-	if cfg.UsernsBase != 0 {
-		if err := os.WriteFile(filepath.Join(tmp, userns.BaseFile), []byte(strconv.Itoa(int(cfg.UsernsBase))), 0o600); err != nil {
-			return err
+	b := blobs{Upper: &uppers[0], Images: &manifest.Layers[0]}
+	if pulled.From != 0 {
+		if err := userns.ShiftTree(filepath.Join(tmp, snapshot.Upper), pulled.From, pulled.Range.Base); err != nil {
+			return pulled, fmt.Errorf("move writable layer to range %d: %w", pulled.Range.Base, err)
 		}
-		if err := os.WriteFile(filepath.Join(tmp, userns.KeyFile), []byte(cfg.UsernsKey), 0o600); err != nil {
-			return err
+		if err := userns.ShiftImages(filepath.Join(tmp, "images"), pulled.From, pulled.Range.Base); err != nil {
+			return pulled, fmt.Errorf("move images to range %d: %w", pulled.Range.Base, err)
+		}
+		b = blobs{} // they are not the registry's blobs any more
+	}
+	if err := writeSnapshotFiles(tmp, below, b); err != nil {
+		return pulled, err
+	}
+	if pulled.Range.Base != 0 {
+		if err := os.WriteFile(filepath.Join(tmp, userns.BaseFile), []byte(strconv.Itoa(int(pulled.Range.Base))), 0o600); err != nil {
+			return pulled, err
+		}
+		if err := os.WriteFile(filepath.Join(tmp, userns.KeyFile), []byte(pulled.Range.Key), 0o600); err != nil {
+			return pulled, err
 		}
 	}
 	_ = os.Remove(dir) // empty, if there
 	if err := os.Rename(tmp, dir); err != nil {
-		return err
+		return pulled, err
 	}
 	// Counted like a snapshot taken here: it holds the layers beneath,
 	// and its user namespace range, which no other container may have.
 	if err := snapshot.Record(dir, below); err != nil {
 		_ = os.RemoveAll(dir)
-		return err
+		return pulled, err
 	}
-	return nil
+	return pulled, nil
 }
 
 // pullLayer makes sure store has the layer desc (with below beneath it),
-// and returns its directory there.
-func pullLayer(ctx context.Context, source oras.ReadOnlyTarget, desc ocispec.Descriptor, below []string, store string) (string, error) {
-	layerDir := filepath.Join(store, desc.Digest.Algorithm().String()+"-"+desc.Digest.Encoded())
+// in the snapshot's range here, and returns its directory there.
+func pullLayer(ctx context.Context, source oras.ReadOnlyTarget, desc ocispec.Descriptor, below []string, store string, pulled Pulled) (string, error) {
+	name := desc.Digest.Algorithm().String() + "-" + desc.Digest.Encoded()
+	if pulled.Range.Base != 0 {
+		name += "-" + strconv.Itoa(int(pulled.Range.Base))
+	}
+	layerDir := filepath.Join(store, name)
 	if _, err := os.Stat(filepath.Join(layerDir, snapshot.Upper)); err == nil {
 		return layerDir, nil // pulled before, with another snapshot
 	}
@@ -389,7 +444,14 @@ func pullLayer(ctx context.Context, source oras.ReadOnlyTarget, desc ocispec.Des
 	if err := unpack(ctx, source, desc, filepath.Join(tmp, snapshot.Upper)); err != nil {
 		return "", err
 	}
-	if err := writeSnapshotFiles(tmp, below, blobs{Upper: &desc}); err != nil {
+	b := blobs{Upper: &desc}
+	if pulled.From != 0 {
+		if err := userns.ShiftTree(filepath.Join(tmp, snapshot.Upper), pulled.From, pulled.Range.Base); err != nil {
+			return "", fmt.Errorf("move to range %d: %w", pulled.Range.Base, err)
+		}
+		b = blobs{}
+	}
+	if err := writeSnapshotFiles(tmp, below, b); err != nil {
 		return "", err
 	}
 	if err := os.Rename(tmp, layerDir); err != nil {
