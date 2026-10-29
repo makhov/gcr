@@ -105,8 +105,8 @@ profile of its own:
 
 | | No profile (`ctr`; `Unconfined` pod under `always`) | Own profile (`RuntimeDefault`, `Localhost`, a spec's) |
 | --- | --- | --- |
-| Denied set, EPERM: `io_uring_*`, `bpf`, `perf_event_open`, `userfaultfd`, new mount API, modules, kexec, `open_by_handle_at` | yes | yes, overriding the profile |
-| Keyring as absent, ENOSYS: `add_key`, `keyctl`, `request_key` | yes | yes, overriding the profile |
+| Denied set, EPERM: `io_uring_*`, `bpf`, `perf_event_open`, `userfaultfd`, modules, kexec, `open_by_handle_at` | yes | yes, overriding the profile |
+| As absent, ENOSYS: the keyring (`add_key`, `keyctl`, `request_key`) and the new mount API (`fsopen`, `open_tree`, `mount_setattr`, ...) | yes | yes, overriding the profile |
 | `AF_PACKET`, `AF_VSOCK`, `AF_KEY`, `AF_ALG`, raw IP sockets refused | yes | no: the profile decides |
 | `clone3` as absent (ENOSYS), so libc uses `clone` | yes | no |
 | Nested user namespaces: guarded or denied (`NestedUserNamespaces`) | yes | no: the profile decides |
@@ -272,5 +272,5 @@ bpftool map dump pinned /sys/fs/bpf/gcr/netlink/stats   # key 0: checked, key 1:
 ```
 
 A refused call reaches the program as `EPERM` ("Operation not
-permitted"). The keyring calls and `clone3` return `ENOSYS` ("Function not
-implemented") instead.
+permitted"). The keyring calls, the new mount API and `clone3` return
+`ENOSYS` ("Function not implemented") instead.

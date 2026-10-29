@@ -186,13 +186,14 @@ Whatever seccomp profile a workload brings (or none, as Kubernetes pods
 default to), gcr refuses calls behind most container escapes and kernel
 exploits reachable from containers:
 
-- with EPERM: `io_uring_*`, `bpf`, `perf_event_open`, `userfaultfd`, the
-  new mount API (`fsopen`, `fsconfig`, `fsmount`, `fspick`, `open_tree`,
-  `move_mount`, `mount_setattr`), module loading and kexec,
-  `open_by_handle_at`;
+- with EPERM: `io_uring_*`, `bpf`, `perf_event_open`, `userfaultfd`,
+  module loading and kexec, `open_by_handle_at`;
 - with ENOSYS, as if the kernel lacked it: the keyring (`add_key`,
   `keyctl`, `request_key`), which is not namespaced (runc and other callers
-  carry on without a session keyring then);
+  carry on without a session keyring then), and the new mount API
+  (`fsopen`, `fsconfig`, `fsmount`, `fspick`, `open_tree`, `move_mount`,
+  `mount_setattr`): `mount(8)` from util-linux 2.40 on falls back to
+  `mount(2)`, which the supervisor checks, only on ENOSYS;
 - when the container has no profile of its own, also: `AF_PACKET`,
   `AF_VSOCK`, `AF_KEY` and `AF_ALG` sockets, and raw IP sockets (`ping` uses
   ICMP datagram sockets, which gcr opens); `clone3` returns ENOSYS so libc

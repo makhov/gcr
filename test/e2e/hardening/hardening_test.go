@@ -7,6 +7,7 @@
 package hardening
 
 import (
+	"cmp"
 	"os"
 	"strings"
 	"testing"
@@ -67,10 +68,10 @@ var withSysAdmin = []oci.SpecOpts{oci.WithAddedCapabilities([]string{"CAP_SYS_AD
 func TestRefused(t *testing.T) {
 	e := setup(t)
 	got := e.run(t, framework.Spec{})
-	expect(t, got, "EPERM", "io_uring_setup", "bpf", "perf_event_open", "userfaultfd", "fsopen",
-		"open_tree", "init_module", "open_by_handle_at",
+	expect(t, got, "EPERM", "io_uring_setup", "bpf", "perf_event_open", "userfaultfd",
+		"init_module", "open_by_handle_at",
 		"socket_packet", "socket_raw", "socket_vsock", "socket_alg")
-	expect(t, got, "ENOSYS", "clone3", "keyctl")
+	expect(t, got, "ENOSYS", "clone3", "keyctl", "fsopen", "open_tree")
 	expect(t, got, "OK", "control_socket_tcp", "control_socket_ping", "control_fork")
 }
 
@@ -105,7 +106,9 @@ func TestSupervisedMount(t *testing.T) {
 }
 
 // TestSupervisedMountShell mounts with busybox, which reads mount options
-// back from /proc/mounts for a remount.
+// back from /proc/mounts for a remount, and with util-linux 2.40+, which
+// tries the new mount API first and falls back to mount(2) only if the
+// kernel seems to lack it (ENOSYS).
 func TestSupervisedMountShell(t *testing.T) {
 	ns := framework.NewNamespace(t, "gcr-e2e")
 	script := `
@@ -118,13 +121,17 @@ func TestSupervisedMountShell(t *testing.T) {
 		# A bind remount: a plain remount would pass the options from
 		# /proc/mounts, where tmpfs shows its owner as an unmapped host ID.
 		try remount mount -o remount,bind,ro /mnt`
-	out, _ := ns.Output(framework.UniqueID("mnt"), framework.Spec{Args: []string{"sh", "-c", script}, SpecOpts: withSysAdmin})
-	t.Logf("\n%s", out)
-	expect(t, results(out), "OK", "tmpfs", "visible", "proc", "bind", "remount")
+	for _, image := range []string{"", "docker.io/library/debian:trixie"} {
+		out, _ := ns.Output(framework.UniqueID("mnt"), framework.Spec{
+			Image: image, Args: []string{"sh", "-c", script}, SpecOpts: withSysAdmin,
+		})
+		t.Logf("%s:\n%s", cmp.Or(image, "busybox"), out)
+		expect(t, results(out), "OK", "tmpfs", "visible", "proc", "bind", "remount")
+	}
 
 	// Without CAP_SYS_ADMIN the kernel refuses, and gcr does not mount for
 	// the container.
-	out, _ = ns.Output(framework.UniqueID("mnt"), framework.Spec{Args: []string{"sh", "-c", script}})
+	out, _ := ns.Output(framework.UniqueID("mnt"), framework.Spec{Args: []string{"sh", "-c", script}})
 	expect(t, results(out), "EPERM", "tmpfs")
 }
 
