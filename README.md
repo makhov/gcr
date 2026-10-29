@@ -416,6 +416,15 @@ writable layer on top: what one fork writes, no other fork and not the
 snapshot ever sees. The image the container is created with supplies the
 lower layers and must be the one the snapshot was taken from.
 
+Forks resume with identical memory, so whatever a program seeded or
+generated before the snapshot (random number generators, IDs, tokens) is
+the same in each. A fork can tell that it is one, and which:
+`/.gcr/fork.json` holds its container ID, the snapshot and when it was
+created, and with `gcr.dev/fork-signal=SIGUSR2` (or another signal) gcr
+signals its init once it is restored, with the file in place, which is
+the moment to re-seed. The signal is opt-in: a process that does not
+handle SIGUSR2 dies of it.
+
 Forks share the parent's user namespace range, because the snapshot's
 files carry host IDs from it: they are isolated from other containers,
 not from each other at the host-ID level, which suits fanning one

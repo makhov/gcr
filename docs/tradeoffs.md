@@ -101,9 +101,10 @@ tests check that each refused call is refused, by return value.
   number generators, the same IDs and tokens generated before the
   snapshot. The kernel's random source is unaffected,
   but programs that seeded their own before the snapshot will produce the
-  same "random" values in every fork. Re-seed after a fork, or take the
-  snapshot before such state exists. This is the same problem as cloning
-  a VM.
+  same "random" values in every fork. This is the same problem as cloning
+  a VM. gcr tells a fork it is one (`/.gcr/fork.json`, and
+  `gcr.dev/fork-signal` once it is restored), but the program has to
+  listen and re-seed: gcr cannot do it for it.
 - **A snapshot has to outlive its forks,** and any snapshots taken of
   them, since their layers are mounted from it. gcr does not track or
   delete snapshots: that is the platform's job.

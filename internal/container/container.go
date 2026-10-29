@@ -125,6 +125,9 @@ type Prepared struct {
 	// stays read-only underneath a fresh one (Layers). Forks of one
 	// snapshot therefore cost one empty layer each, and none changes it.
 	ForkFrom string
+	// ForkSignal, if not 0, is sent to a fork's init once it is restored
+	// (AnnotationForkSignal).
+	ForkSignal unix.Signal
 	// Layers are read-only layers mounted between the writable layer and
 	// the image's, top first (ForkLayers, or a checkpoint's ReadLayers).
 	Layers []string
@@ -188,10 +191,12 @@ type Container struct {
 	// memoryMerge runs criu with memory merging on, which the tasks it
 	// restores inherit.
 	memoryMerge bool
-	criu        CRIUConfig
-	gpu         *gpu.Info
-	gpuError    error
-	execs       map[string]*Exec
+	// forkSignal is sent to the init once a fork is restored.
+	forkSignal unix.Signal
+	criu       CRIUConfig
+	gpu        *gpu.Info
+	gpuError   error
+	execs      map[string]*Exec
 }
 
 // AnnotationLazyRestore makes a restore fill memory on demand instead of
@@ -247,6 +252,12 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	}
 	if prep.ForkFrom != "" {
 		o.Checkpoint = filepath.Join(prep.ForkFrom, "images")
+		// After idmapRootfs, which gives an empty writable layer to the
+		// container's root.
+		info := ForkInfo{ID: o.ID, Snapshot: prep.ForkFrom, Created: time.Now().UTC()}
+		if err := writeForkInfo(o.Rootfs, info, prep.IDMapRoot); err != nil {
+			return nil, fmt.Errorf("fork: %w", err)
+		}
 	}
 	rootfs := filepath.Join(o.Bundle, "rootfs")
 	if len(o.Rootfs) > 0 {
@@ -336,6 +347,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		cgroupOwner:    prep.CgroupOwner,
 		lazyPages:      prep.LazyPages,
 		memoryMerge:    prep.MemoryMerge,
+		forkSignal:     prep.ForkSignal,
 		criu:           prep.CRIU,
 		gpu:            prep.GPU,
 		gpuError:       prep.GPUError,
@@ -389,6 +401,11 @@ func (c *Container) Start(ctx context.Context) error {
 		return err
 	}
 	c.setStatus(Running)
+	if c.forkSignal != 0 {
+		if err := c.lc.Signal(c.forkSignal); err != nil {
+			return fmt.Errorf("fork signal: %w", err)
+		}
+	}
 	return nil
 }
 
