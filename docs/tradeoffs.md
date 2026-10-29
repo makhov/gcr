@@ -116,8 +116,13 @@ tests check that each refused call is refused, by return value.
   `gcr.dev/fork-signal` once it is restored), but the program has to
   listen and re-seed: gcr cannot do it for it.
 - **A snapshot has to outlive its forks,** and any snapshots taken of
-  them, since their layers are mounted from it. gcr does not track or
-  delete snapshots: that is the platform's job.
+  them, since their layers are mounted from it. gcr counts who uses each
+  one and refuses to remove one in use (`gcr snapshot-users`,
+  `gcr snapshot-rm`), but only on its own host: with snapshots on shared
+  storage, the platform has to ask every host. Deciding when a snapshot
+  is no longer wanted is the platform's job.
+- **A snapshot holds its user namespace range** until it is removed, so
+  a snapshot kept around keeps one of the host's 16,384 ranges.
 - **Snapshots are plain directories on the host,** holding the full memory
   of the container, secrets included. Protect them like the workload's
   data. Moving them between hosts, and naming and expiring them, is up to

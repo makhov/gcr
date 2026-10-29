@@ -3,6 +3,8 @@
 package userns
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -205,5 +207,88 @@ func TestDelegateCgroup(t *testing.T) {
 	}
 	if s := spec("CAP_SYS_ADMIN"); func() int { s.Linux.UIDMappings = nil; return DelegateCgroup(s) }() != 0 {
 		t.Fatal("delegated without a user namespace")
+	}
+}
+
+// A fork joins its snapshot's range: while the range is held, and again
+// once its holders are gone, unless another container got it meanwhile.
+func TestJoin(t *testing.T) {
+	stateDir = t.TempDir()
+	parent, err := Allocate(podSpec(nil), "default", "parent", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fork, err := Join(parent.Key, "fork", parent.Base)
+	if err != nil || fork != parent {
+		t.Fatalf("join a held range: %+v, %v", fork, err)
+	}
+	for _, id := range []string{"parent", "fork"} {
+		if err := Release(parent, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	again, err := Join(parent.Key, "fork2", parent.Base)
+	if err != nil || again != parent {
+		t.Fatalf("join a released range: %+v, %v", again, err)
+	}
+	if err := Release(again, "fork2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Allocate(podSpec(nil), "default", "other", parent.Base); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Join(parent.Key, "fork3", parent.Base); !errdefs.IsConflict(err) {
+		t.Fatalf("join a range given to another container: %v, want conflict", err)
+	}
+	if _, err := Join("default_unknown", "x", 0); err == nil {
+		t.Fatal("joined a key with no range and no base")
+	}
+}
+
+// A snapshot holds its range until it is released, or until it is gone
+// and a range is next allocated.
+func TestHoldForSnapshot(t *testing.T) {
+	stateDir = t.TempDir()
+	parent, err := Allocate(podSpec(nil), "default", "parent", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := t.TempDir()
+	if err := os.WriteFile(filepath.Join(snap, KeyFile), []byte(parent.Key), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := HoldForSnapshot(snap, parent); err != nil {
+		t.Fatal(err)
+	}
+	if err := Release(parent, "parent"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Allocate(podSpec(nil), "default", "x", parent.Base); !errdefs.IsConflict(err) {
+		t.Fatalf("range freed while a snapshot holds it: %v", err)
+	}
+	if err := ReleaseForSnapshot(snap, parent); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Allocate(podSpec(nil), "default", "x", parent.Base)
+	if err != nil || got.Base != parent.Base {
+		t.Fatalf("range not freed with the snapshot's release: %v", err)
+	}
+
+	// Deleted by hand: the next allocation notices.
+	snap2 := t.TempDir()
+	if err := os.WriteFile(filepath.Join(snap2, KeyFile), []byte(got.Key), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := HoldForSnapshot(snap2, got); err != nil {
+		t.Fatal(err)
+	}
+	if err := Release(got, "x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(snap2); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := Allocate(podSpec(nil), "default", "y", got.Base); err != nil || again.Base != got.Base {
+		t.Fatalf("range of a deleted snapshot not freed: %v", err)
 	}
 }

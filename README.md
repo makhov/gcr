@@ -443,10 +443,46 @@ files already carry the range's IDs); containerd's idmapped overlay would
 map it twice. A snapshot of a fork holds only what the fork changed, and
 records the snapshots beneath it (`gcr-layers`), so forks of forks stack
 layers rather than copy them. The price is that a snapshot must outlive
-the forks of it, and the snapshots taken of those. Checkpoints of a fork
+the forks of it, and the snapshots taken of those (Snapshot lifetime,
+below). Checkpoints of a fork
 record the same layers, and a fork migrates only to a fork of the same
 snapshot (shared storage at the same path); the target refuses anything
 else before the first page is sent.
+
+### Snapshot lifetime
+
+A snapshot has to outlive what mounts its layer: the forks of it, the
+snapshots taken of those, and their forks. gcr keeps count, so the
+platform can ask before it deletes one:
+
+```sh
+$ gcr snapshot-users /var/lib/gcr/snapshots/warm
+KIND       USER                                  SINCE
+container  default/fork-1                        2026-10-29 14:02:11
+snapshot   /var/lib/gcr/snapshots/warm-step-2    2026-10-29 14:05:40
+$ gcr snapshot-rm /var/lib/gcr/snapshots/warm
+gcr: snapshot /var/lib/gcr/snapshots/warm is in use by container default/fork-1, snapshot /var/lib/gcr/snapshots/warm-step-2: failed precondition
+```
+
+- A container holds a reference (`gcr-refs/` in the snapshot) from create
+  to delete, with a lock on it, so a shim that dies leaves nothing
+  behind: a reference nobody holds is cleared when next read.
+- A snapshot of a fork holds one on the snapshots beneath it for as long
+  as it exists.
+- `gcr snapshot-rm` refuses a snapshot in use, and a directory that does
+  not look like a snapshot. A fork of a removed snapshot fails to start
+  rather than run with files missing, and `gcr snapshot` refuses to write
+  over a directory that is not empty.
+- A snapshot holds its container's user namespace range until it is
+  removed, so no other container gets those host IDs while a fork could
+  still map them. A fork after a reboot, when the range is no longer
+  held, claims it again, and is refused if another container has it by
+  then. A snapshot deleted by hand rather than with `gcr snapshot-rm`
+  lets go of its range when gcr next allocates one.
+
+References are kept on the host the containers run on. With snapshots on
+shared storage, check each host before deleting one. Checkpoints of a
+fork (containerd's, not snapshots) hold no reference.
 
 ### Lazy restore
 

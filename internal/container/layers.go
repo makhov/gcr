@@ -14,12 +14,13 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/errdefs"
 	"golang.org/x/sys/unix"
+
+	"github.com/makhov/gcr/internal/snapshot"
 )
 
 // LayersFile lists, in a snapshot or a checkpoint, the read-only layers
-// the container had beneath its writable layer, one path a line, top
-// first: the writable layers of the snapshots it was forked from.
-const LayersFile = "gcr-layers"
+// the container had beneath its writable layer.
+const LayersFile = snapshot.LayersFile
 
 // ForkLayers returns the read-only layers a fork of the snapshot in dir
 // mounts beneath its own writable layer: the snapshot's writable layer,
@@ -31,7 +32,7 @@ func ForkLayers(dir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	upper := filepath.Join(dir, "upper")
+	upper := filepath.Join(dir, snapshot.Upper)
 	if err := checkLayer(upper); err != nil {
 		return nil, err
 	}
