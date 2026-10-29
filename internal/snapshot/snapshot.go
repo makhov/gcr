@@ -52,11 +52,13 @@ const (
 	LockFile = "gcr-lock"
 	// Upper is the snapshot's copy of the container's writable layer.
 	Upper = "upper"
+	// BlobsFile caches a snapshot's registry blobs (package registry).
+	BlobsFile = "gcr-blobs.json"
 )
 
 // known are the entries a snapshot directory has; Remove refuses a
 // directory with anything else in it, which is likely not a snapshot.
-var known = []string{Upper, "images", "work", LayersFile, RefsDir, LockFile, userns.BaseFile, userns.KeyFile}
+var known = []string{Upper, "images", "work", LayersFile, RefsDir, LockFile, BlobsFile, userns.BaseFile, userns.KeyFile}
 
 // Kind is what holds a reference.
 type Kind string

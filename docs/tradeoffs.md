@@ -125,8 +125,14 @@ tests check that each refused call is refused, by return value.
   a snapshot kept around keeps one of the host's 16,384 ranges.
 - **Snapshots are plain directories on the host,** holding the full memory
   of the container, secrets included. Protect them like the workload's
-  data. Moving them between hosts, and naming and expiring them, is up to
-  the platform.
+  data, and the registries they are pushed to as well: anyone who can
+  pull one can read that memory. gcr moves them between hosts
+  (`gcr snapshot-push`, `gcr snapshot-pull`); naming and expiring them is
+  up to the platform.
+- **A pulled snapshot needs its user namespace range on the target.** Its
+  files and processes carry host IDs from that range, so a host where
+  another container has the range cannot fork it. The platform has to
+  plan ranges across hosts.
 - **A fork must use the image the snapshot was taken from.** Nothing
   outside the container's writable layer is captured: volumes and bind
   mounts must be there, in the same state, when a fork starts.
