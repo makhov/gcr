@@ -498,6 +498,11 @@ signals its init once it is restored, with the file in place, which is
 the moment to re-seed. The signal is opt-in: a process that does not
 handle SIGUSR2 dies of it.
 
+In Kubernetes, `gcr.dev/fork-from` is for handlers that allow it: a pod
+author could otherwise point it at any host directory. The handler lists
+it in `PodAnnotations`, and its `SnapshotRoots` say where snapshots may be
+(docs/configuration.md); `gcr.dev/migrate-in` is restricted the same way.
+
 Forks share the parent's user namespace range, because the snapshot's
 files carry host IDs from it: they are isolated from other containers,
 not from each other at the host-ID level, which suits fanning one
