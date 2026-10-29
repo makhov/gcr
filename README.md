@@ -569,12 +569,24 @@ ctr run -d --runtime io.containerd.gcr.v2 \
 - **Credentials** come from Docker's config (`docker login`). Registries
   on loopback are spoken to over plain HTTP; `-plain-http` forces it for
   others.
-- **What the target needs.** Pulling claims the snapshot's user namespace
-  range on the target, which forks map, and fails if another container
-  there has it: plan ranges across hosts, or keep snapshots' ranges for
-  them. A fork also needs the image the snapshot was taken from, on the
-  same architecture (checked), and a CPU with the features the
-  processes were using (CRIU checks).
+- **User namespace ranges.** A snapshot's files and process images
+  carry host IDs from the range its container mapped, and its forks map
+  that range.
+  - A pull keeps the range if it is free on the target.
+  - If another container has it there, the pull moves the snapshot into
+    a free range: file owners and the IDs in capability and ACL xattrs
+    are shifted, and the user namespace maps in the CRIU images
+    (`userns-*.img`) are rewritten. CRIU records every other ID as the
+    container sees it. `gcr snapshot-pull` says when it did this.
+  - Snapshots taken from the same container in the same range share one
+    range on the target, as forks of one snapshot do, so their layers
+    in the store are shared too.
+  - A move costs a pass over the snapshot's files; a moved snapshot's
+    layers are a copy of their own in the store, and pushing it again
+    packs new blobs.
+- **What else the target needs.** The image the snapshot was taken
+  from, the same architecture (checked), and a CPU with the features
+  the processes were using (CRIU checks).
 
 A registry storing in S3, for example the distribution registry's own:
 

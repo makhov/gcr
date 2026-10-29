@@ -81,7 +81,7 @@ func TestPushPull(t *testing.T) {
 	dst := t.TempDir()
 	store := filepath.Join(dst, "layers")
 	c := filepath.Join(dst, "c")
-	if err := Pull(ctx, reg, "b", c, store); err != nil {
+	if _, err := Pull(ctx, reg, "b", c, store); err != nil {
 		t.Fatal(err)
 	}
 	if got := readFile(t, filepath.Join(c, snapshot.Upper, "fork")); got != "b" {
@@ -106,7 +106,7 @@ func TestPushPull(t *testing.T) {
 
 	// A second snapshot with the same layer beneath shares it.
 	d := filepath.Join(dst, "d")
-	if err := Pull(ctx, reg, "b", d, store); err != nil {
+	if _, err := Pull(ctx, reg, "b", d, store); err != nil {
 		t.Fatal(err)
 	}
 	if entries, _ := os.ReadDir(store); len(entries) != 1 {
@@ -127,10 +127,10 @@ func TestPushPull(t *testing.T) {
 		}
 	}
 
-	if err := Pull(ctx, reg, "b", src, store); !errdefs.IsAlreadyExists(err) {
+	if _, err := Pull(ctx, reg, "b", src, store); !errdefs.IsAlreadyExists(err) {
 		t.Fatalf("pull into a directory with files: %v", err)
 	}
-	if err := Pull(ctx, reg, "missing", filepath.Join(dst, "e"), store); err == nil {
+	if _, err := Pull(ctx, reg, "missing", filepath.Join(dst, "e"), store); err == nil {
 		t.Fatal("pulled a tag that is not there")
 	}
 }

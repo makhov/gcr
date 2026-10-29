@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/containerd/errdefs"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -191,40 +192,50 @@ func Allocate(spec *specs.Spec, namespace, id string, want uint32) (Range, error
 				return fmt.Errorf("pod already uses range %d, not %d: %w", r.Base, want, errdefs.ErrConflict)
 			}
 		} else {
-			pruneSnapshots()
-			for slot := 0; slot < slots; slot++ {
-				base := uint32(firstBase + slot*Size)
-				if want != 0 && base != want {
-					continue
-				}
-				f, err := os.OpenFile(filepath.Join(stateDir, "bases", strconv.Itoa(int(base))), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-				if errors.Is(err, os.ErrExist) {
-					continue
-				}
-				if err != nil {
-					return err
-				}
-				_, _ = f.WriteString(key)
-				f.Close()
-				r = Range{Base: base, Key: key}
-				break
-			}
-			if r.Base == 0 && want != 0 {
-				return fmt.Errorf("user namespace range %d is in use or invalid: %w", want, errdefs.ErrConflict)
-			}
-			if r.Base == 0 {
-				return fmt.Errorf("no free user namespace range: %w", errdefs.ErrResourceExhausted)
-			}
-			if err := os.MkdirAll(users, 0o700); err != nil {
+			base, err := claim(key, want)
+			if err != nil {
 				return err
 			}
-			if err := os.WriteFile(filepath.Join(users, "base"), []byte(strconv.Itoa(int(r.Base))), 0o600); err != nil {
-				return err
-			}
+			r = Range{Base: base, Key: key}
 		}
 		return os.WriteFile(filepath.Join(users, "user-"+id), nil, 0o600)
 	})
 	return r, err
+}
+
+// claim gives key a range of its own: want, or with want 0 the first
+// free one. Callers hold the lock.
+func claim(key string, want uint32) (uint32, error) {
+	pruneSnapshots()
+	var got uint32
+	for slot := 0; slot < slots; slot++ {
+		base := uint32(firstBase + slot*Size)
+		if want != 0 && base != want {
+			continue
+		}
+		f, err := os.OpenFile(filepath.Join(stateDir, "bases", strconv.Itoa(int(base))), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		_, _ = f.WriteString(key)
+		f.Close()
+		got = base
+		break
+	}
+	if got == 0 && want != 0 {
+		return 0, fmt.Errorf("user namespace range %d is in use or invalid: %w", want, errdefs.ErrConflict)
+	}
+	if got == 0 {
+		return 0, fmt.Errorf("no free user namespace range: %w", errdefs.ErrResourceExhausted)
+	}
+	users := filepath.Join(stateDir, "keys", key)
+	if err := os.MkdirAll(users, 0o700); err != nil {
+		return 0, err
+	}
+	return got, os.WriteFile(filepath.Join(users, "base"), []byte(strconv.Itoa(int(got))), 0o600)
 }
 
 // Release drops container id's use of r; the last user frees it.
@@ -251,7 +262,7 @@ const KeyFile = "gcr-userns-key"
 // are gone, or the host rebooted), Join claims base for it again, unless
 // something else has it since.
 func Join(key, id string, base uint32) (Range, error) {
-	return join(key, "user-"+id, base, "")
+	return join(key, "user-"+id, base, "", false)
 }
 
 // HoldForSnapshot makes the snapshot in dir a user of r, so the range
@@ -259,8 +270,16 @@ func Join(key, id string, base uint32) (Range, error) {
 // deleted without ReleaseForSnapshot stops holding it when a range is
 // next allocated.
 func HoldForSnapshot(dir string, r Range) error {
-	_, err := join(r.Key, snapshotUser(dir), r.Base, dir)
+	_, err := join(r.Key, snapshotUser(dir), r.Base, dir, false)
 	return err
+}
+
+// ClaimForSnapshot makes the snapshot in dir a user of key's range. If
+// key has none, it gets want, or with want 0 the first free range: a
+// pulled snapshot keeps its range where it can, and is shifted into
+// another (ShiftTree, ShiftImages) where it cannot.
+func ClaimForSnapshot(dir, key string, want uint32) (Range, error) {
+	return join(key, snapshotUser(dir), want, dir, want == 0)
 }
 
 // ReleaseForSnapshot drops the hold HoldForSnapshot took.
@@ -273,7 +292,7 @@ func snapshotUser(dir string) string {
 	return "user-snapshot-" + hex.EncodeToString(sum[:8])
 }
 
-func join(key, user string, base uint32, holder string) (Range, error) {
+func join(key, user string, base uint32, holder string, anyFree bool) (Range, error) {
 	var r Range
 	err := locked(func() error {
 		users := filepath.Join(stateDir, "keys", key)
@@ -283,22 +302,15 @@ func join(key, user string, base uint32, holder string) (Range, error) {
 			if base, err = ParseBase(string(b)); err != nil {
 				return err
 			}
-		case errors.Is(err, os.ErrNotExist) && base != 0:
-			f, err := os.OpenFile(filepath.Join(stateDir, "bases", strconv.Itoa(int(base))), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-			if errors.Is(err, os.ErrExist) {
+		case errors.Is(err, os.ErrNotExist) && (base != 0 || anyFree):
+			got, err := claim(key, base)
+			if errdefs.IsConflict(err) {
 				return fmt.Errorf("user namespace range %d of %q has been given to another container: %w", base, key, errdefs.ErrConflict)
 			}
 			if err != nil {
 				return err
 			}
-			_, _ = f.WriteString(key)
-			f.Close()
-			if err := os.MkdirAll(users, 0o700); err != nil {
-				return err
-			}
-			if err := os.WriteFile(filepath.Join(users, "base"), []byte(strconv.Itoa(int(base))), 0o600); err != nil {
-				return err
-			}
+			base = got
 		default:
 			return fmt.Errorf("user namespace range of %q: %w", key, err)
 		}
@@ -328,6 +340,9 @@ func release(r Range, user string) error {
 	return os.RemoveAll(users)
 }
 
+// pullGrace is how long a snapshot's hold stays without the snapshot.
+var pullGrace = 10 * time.Minute
+
 // pruneSnapshots drops the holds of snapshots that are gone: their
 // directory no longer records the range's key.
 func pruneSnapshots() {
@@ -336,6 +351,10 @@ func pruneSnapshots() {
 		users := filepath.Join(stateDir, "keys", k.Name())
 		holds, _ := filepath.Glob(filepath.Join(users, "user-snapshot-*"))
 		for _, h := range holds {
+			// A pull claims the range before its snapshot is in place.
+			if st, err := os.Stat(h); err != nil || time.Since(st.ModTime()) < pullGrace {
+				continue
+			}
 			dir, err := os.ReadFile(h)
 			if err != nil {
 				continue

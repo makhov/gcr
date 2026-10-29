@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/containerd/errdefs"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -275,7 +276,10 @@ func TestHoldForSnapshot(t *testing.T) {
 		t.Fatalf("range not freed with the snapshot's release: %v", err)
 	}
 
-	// Deleted by hand: the next allocation notices.
+	// Deleted by hand: the next allocation notices (once a pull could
+	// no longer be writing it).
+	pullGrace = 0
+	t.Cleanup(func() { pullGrace = 10 * time.Minute })
 	snap2 := t.TempDir()
 	if err := os.WriteFile(filepath.Join(snap2, KeyFile), []byte(got.Key), 0o600); err != nil {
 		t.Fatal(err)
@@ -291,5 +295,32 @@ func TestHoldForSnapshot(t *testing.T) {
 	}
 	if again, err := Allocate(podSpec(nil), "default", "y", got.Base); err != nil || again.Base != got.Base {
 		t.Fatalf("range of a deleted snapshot not freed: %v", err)
+	}
+}
+
+// A pulled snapshot's key gets the range asked for if it is free, any
+// free one if asked for none, and keeps it for the next snapshot of the
+// same lineage.
+func TestClaimForSnapshot(t *testing.T) {
+	stateDir = t.TempDir()
+	other, err := Allocate(podSpec(nil), "default", "other", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ClaimForSnapshot("/s/a", "pulled_x", other.Base); !errdefs.IsConflict(err) {
+		t.Fatalf("claiming a range another container has: %v", err)
+	}
+	a, err := ClaimForSnapshot("/s/a", "pulled_x", 0)
+	if err != nil || a.Base == other.Base || a.Key != "pulled_x" {
+		t.Fatalf("claiming any free range: %+v, %v", a, err)
+	}
+	b, err := ClaimForSnapshot("/s/b", "pulled_x", other.Base+Size*7)
+	if err != nil || b != a {
+		t.Fatalf("a second snapshot of the lineage: %+v, %v; want %+v", b, err, a)
+	}
+	free := uint32(firstBase + 9*Size)
+	c, err := ClaimForSnapshot("/s/c", "pulled_y", free)
+	if err != nil || c.Base != free {
+		t.Fatalf("claiming a free range: %+v, %v", c, err)
 	}
 }
