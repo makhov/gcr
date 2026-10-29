@@ -43,6 +43,7 @@ import (
 	"github.com/makhov/gcr/internal/landlock"
 	"github.com/makhov/gcr/internal/migrate"
 	"github.com/makhov/gcr/internal/netpolicy"
+	"github.com/makhov/gcr/internal/ocispec"
 	"github.com/makhov/gcr/internal/snapshot"
 	"github.com/makhov/gcr/internal/supervisor"
 	"github.com/makhov/gcr/internal/timetravel"
@@ -176,7 +177,10 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 	var hardened bool
 	opts.PrepareSpec = func(spec *specs.Spec) (container.Prepared, error) {
 		prep := container.Prepared{IOOwner: cfg.IOUID}
-		forkFrom, forkKey, err := forkSource(spec)
+		if err := podAnnotations(spec, cfg.PodAnnotations); err != nil {
+			return prep, err
+		}
+		forkFrom, forkKey, err := forkSource(spec, cfg.SnapshotRoots)
 		if err != nil {
 			return prep, err
 		}
@@ -813,6 +817,22 @@ func (s *service) migrateOut(ctx context.Context, c *container.Container, ex *ex
 	return res, err
 }
 
+// podAnnotations refuses a Kubernetes pod's restricted gcr.dev
+// annotations its handler does not list in PodAnnotations: the pod
+// author is not trusted with them (config.RestrictedAnnotations).
+func podAnnotations(spec *specs.Spec, allowed []string) error {
+	if !ocispec.PodContainer(spec) {
+		return nil // whoever can reach containerd is root already
+	}
+	for _, a := range config.RestrictedAnnotations {
+		if _, ok := spec.Annotations[a]; ok && !slices.Contains(allowed, a) {
+			return fmt.Errorf("%s is not allowed for Kubernetes pods on this runtime handler (PodAnnotations): %w",
+				a, errdefs.ErrPermissionDenied)
+		}
+	}
+	return nil
+}
+
 // getExec returns the exec process execID of container id.
 func (s *service) getExec(id, execID string) (*container.Exec, error) {
 	c, err := s.get(id, "")
@@ -894,7 +914,7 @@ func (e *extras) coverCgroup(c *container.Container) error {
 // forkSource reads the fork annotation: the snapshot directory a new
 // container starts from, and the allocator key of the user namespace
 // range its container mapped (empty when the snapshot had none).
-func forkSource(spec *specs.Spec) (dir, key string, err error) {
+func forkSource(spec *specs.Spec, roots []string) (dir, key string, err error) {
 	dir = spec.Annotations[container.AnnotationForkFrom]
 	if dir == "" {
 		return "", "", nil
@@ -902,6 +922,17 @@ func forkSource(spec *specs.Spec) (dir, key string, err error) {
 	if !filepath.IsAbs(dir) {
 		return "", "", fmt.Errorf("%s=%q must be an absolute path: %w",
 			container.AnnotationForkFrom, dir, errdefs.ErrInvalidArgument)
+	}
+	// What a pod forks from, its layers and its key file are chosen by
+	// whoever could write it: gcr's snapshots only.
+	if ocispec.PodContainer(spec) && len(roots) == 0 {
+		return "", "", fmt.Errorf("%s in a Kubernetes pod needs the handler's SnapshotRoots: %w",
+			container.AnnotationForkFrom, errdefs.ErrPermissionDenied)
+	}
+	if len(roots) > 0 {
+		if err := snapshot.Verify(dir, roots); err != nil {
+			return "", "", fmt.Errorf("%s: %w", container.AnnotationForkFrom, err)
+		}
 	}
 	for _, part := range []string{"images", "upper"} {
 		if _, err := os.Stat(filepath.Join(dir, part)); err != nil {

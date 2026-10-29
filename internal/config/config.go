@@ -8,6 +8,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
 
 	runcoptions "github.com/containerd/containerd/api/types/runc/options"
 	"github.com/containerd/containerd/api/types/runtimeoptions/v1"
@@ -16,12 +18,25 @@ import (
 	"github.com/pelletier/go-toml/v2"
 	"google.golang.org/protobuf/types/known/anypb"
 
+	"github.com/makhov/gcr/internal/container"
 	"github.com/makhov/gcr/internal/hardening"
 	"github.com/makhov/gcr/internal/landlock"
 	"github.com/makhov/gcr/internal/migrate"
 	"github.com/makhov/gcr/internal/netpolicy"
 	"github.com/makhov/gcr/internal/userns"
 )
+
+// RestrictedAnnotations are the gcr.dev annotations a Kubernetes pod may
+// use only where its handler lists them in PodAnnotations: with them a
+// pod author picks a host directory to restore from (fork-from), makes
+// the shim listen on the host's network for state to restore
+// (migrate-in, migrate-token), or picks its host IDs (userns-base).
+var RestrictedAnnotations = []string{
+	container.AnnotationForkFrom,
+	migrate.AnnotationIn,
+	migrate.AnnotationToken,
+	userns.AnnotationBase,
+}
 
 type Config struct {
 	// UserNamespaces is "auto" (default), "always" or "never"; see
@@ -39,6 +54,14 @@ type Config struct {
 	// MigrationTLS secures live migration to and from the handler's
 	// containers; see migrate.TLS. Unset, migrations are plain HTTP.
 	MigrationTLS migrate.TLS `toml:"MigrationTLS"`
+	// PodAnnotations are the restricted gcr.dev annotations (see
+	// RestrictedAnnotations) Kubernetes pods may use on this handler:
+	// none by default, as a pod author could reach the node with them.
+	PodAnnotations []string `toml:"PodAnnotations"`
+	// SnapshotRoots are the directories snapshots may be forked from
+	// (gcr.dev/fork-from), with every layer beneath them: required for
+	// pods to fork at all, and checked for any container if set.
+	SnapshotRoots []string `toml:"SnapshotRoots"`
 
 	// IOUID and IOGID own the container's stdio pipes. containerd sets
 	// them (in runc's options) for Kubernetes user namespace pods, so the
@@ -95,6 +118,17 @@ func FromOptions(a *anypb.Any) (Config, error) {
 	}
 	if err := c.MigrationTLS.Validate(); err != nil {
 		return c, err
+	}
+	for _, a := range c.PodAnnotations {
+		if !slices.Contains(RestrictedAnnotations, a) {
+			return c, fmt.Errorf("PodAnnotations: %q is not one of %v (the others need no listing): %w",
+				a, RestrictedAnnotations, errdefs.ErrInvalidArgument)
+		}
+	}
+	for _, r := range c.SnapshotRoots {
+		if !filepath.IsAbs(r) || filepath.Clean(r) == "/" {
+			return c, fmt.Errorf("SnapshotRoots: %q must be an absolute path below /: %w", r, errdefs.ErrInvalidArgument)
+		}
 	}
 	return c, nil
 }

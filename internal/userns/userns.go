@@ -203,9 +203,26 @@ func Allocate(spec *specs.Spec, namespace, id string, want uint32) (Range, error
 	return r, err
 }
 
+// validKey refuses a key that is not one directory name under keys/.
+// Keys name the files gcr writes and removes as root, and one may come
+// from a snapshot's KeyFile.
+func validKey(key string) error {
+	ok := key != "" && len(key) <= 255 && key[0] != '.'
+	for _, r := range key {
+		ok = ok && (r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._-:@+", r))
+	}
+	if !ok {
+		return fmt.Errorf("user namespace range key %q: %w", key, errdefs.ErrInvalidArgument)
+	}
+	return nil
+}
+
 // claim gives key a range of its own: want, or with want 0 the first
 // free one. Callers hold the lock.
 func claim(key string, want uint32) (uint32, error) {
+	if err := validKey(key); err != nil {
+		return 0, err
+	}
 	pruneSnapshots()
 	var got uint32
 	for slot := 0; slot < slots; slot++ {
@@ -293,6 +310,9 @@ func snapshotUser(dir string) string {
 }
 
 func join(key, user string, base uint32, holder string, anyFree bool) (Range, error) {
+	if err := validKey(key); err != nil {
+		return Range{}, err
+	}
 	var r Range
 	err := locked(func() error {
 		users := filepath.Join(stateDir, "keys", key)
@@ -325,6 +345,9 @@ func Release(r Range, id string) error {
 }
 
 func release(r Range, user string) error {
+	if err := validKey(r.Key); err != nil {
+		return err
+	}
 	users := filepath.Join(stateDir, "keys", r.Key)
 	_ = os.Remove(filepath.Join(users, user))
 	entries, err := os.ReadDir(users)
