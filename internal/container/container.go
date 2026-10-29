@@ -177,9 +177,11 @@ type Container struct {
 	exited     chan struct{}
 	onExit     func(*Container)
 	onOOM      func(*Container)
-	oomKills   uint64        // told of by onOOM; guarded by mu
-	cgroupDir  string        // read at start, for OOM kills at exit; guarded by mu
-	oomWatched chan struct{} // the watcher told of a kill; guarded by mu
+	oomKills   uint64 // told of by onOOM; guarded by mu
+	cgroupDir  string // read at start, for OOM kills at exit; guarded by mu
+	oomInvoked uint64 // the OOM killer's invocations seen; guarded by mu
+	// parentKills is the parent cgroup's OOM kills when the watch began.
+	parentKills uint64
 	// replacing is set while a rewind kills the processes; their exit
 	// is then reported on replaced instead of to containerd.
 	replacing bool
@@ -398,6 +400,9 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	if err := c.delegateCgroup(); err != nil {
 		return nil, err
 	}
+	// While the init waits to exec: a program killed by the OOM killer
+	// in its first milliseconds is seen too.
+	c.watchOOM()
 	if err := c.track(proc); err != nil {
 		return nil, err
 	}
@@ -418,7 +423,6 @@ func (c *Container) Start(ctx context.Context) error {
 			return fmt.Errorf("exec: %w", err)
 		}
 		c.setStatus(Running)
-		c.watchOOM()
 		return nil
 	}
 	if err := c.restore(c.checkpoint); err != nil {

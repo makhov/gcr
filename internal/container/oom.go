@@ -5,9 +5,11 @@ package container
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
-	"github.com/opencontainers/cgroups/fs2"
+	"golang.org/x/sys/unix"
 )
 
 // OOMFile is written into the bundle when the kernel's OOM killer kills
@@ -16,85 +18,146 @@ import (
 // event.
 const OOMFile = "oom"
 
-// watchOOM notes OOM kills while the container runs.
-func (c *Container) watchOOM() {
-	if dir, err := c.CgroupPath(); err == nil {
-		c.mu.Lock()
-		c.cgroupDir = dir
-		c.mu.Unlock()
-	}
-	ch, err := c.lc.NotifyOOM()
+// The kernel notifies memory.events at most every 10ms, and not at all
+// once the cgroup is gone: under the systemd cgroup driver that is as soon
+// as it is empty, which may be before the exit is handled. The first
+// notification comes when the limit is hit (max), and the kill only after
+// reclaim gives up, which takes as long as it takes. So after each
+// notification the watcher reads it on while the counts move, until they
+// have been still for oomQuiet. All of it can be over in a millisecond or
+// two: the kill, the last process exiting, the cgroup removed. The
+// parent's memory.events counts the kills in its children too and stays,
+// so the exit also counts a kill the parent counted since the watch began.
+const (
+	oomInterval = 2 * time.Millisecond
+	oomQuiet    = 100 * time.Millisecond
+)
+
+// memoryEvents reads the times the limit was hit, the OOM killer was
+// invoked and killed, from the cgroup's memory.events.
+func memoryEvents(dir string) (limit, oom, kills uint64, err error) {
+	b, err := os.ReadFile(filepath.Join(dir, "memory.events"))
 	if err != nil {
-		return // no cgroup v2 memory controller: noted at exit, if at all
+		return 0, 0, 0, err
 	}
-	watched := make(chan struct{}, 1)
+	for _, line := range strings.Split(string(b), "\n") {
+		k, v, _ := strings.Cut(line, " ")
+		n, _ := strconv.ParseUint(v, 10, 64)
+		switch k {
+		case "max":
+			limit = n
+		case "oom":
+			oom = n
+		case "oom_kill":
+			kills = n
+		}
+	}
+	return limit, oom, kills, nil
+}
+
+// watchOOM notes OOM kills while the container runs, from when its cgroup
+// is made (Create, or a restore).
+func (c *Container) watchOOM() {
+	dir, err := c.CgroupPath()
+	if err != nil {
+		return // noted at exit, if at all
+	}
+	fd, err := unix.InotifyInit1(unix.IN_CLOEXEC)
+	if err != nil {
+		return
+	}
+	if _, err := unix.InotifyAddWatch(fd, filepath.Join(dir, "memory.events"), unix.IN_MODIFY); err != nil {
+		unix.Close(fd)
+		return
+	}
+	_, _, parentKills, _ := memoryEvents(filepath.Dir(dir))
 	c.mu.Lock()
-	c.oomWatched = watched
+	c.cgroupDir, c.parentKills = dir, parentKills
 	c.mu.Unlock()
+	c.readOOM(dir) // from before the watch
 	go func() {
-		for range ch {
-			// libcontainer read the count as it changed. By now the
-			// cgroup may be gone (systemd removes a scope as soon as it is
-			// empty), but a kill it signalled happened.
-			c.noteOOM(true)
-			select {
-			case watched <- struct{}{}:
-			default:
+		defer unix.Close(fd)
+		var buf [4096]byte
+		for {
+			if _, err := unix.Read(fd, buf[:]); err == unix.EINTR {
+				continue
+			} else if err != nil {
+				return
+			}
+			var last [3]uint64
+			for still := time.Duration(0); still < oomQuiet; still += oomInterval {
+				limit, oom, kills, err := memoryEvents(dir)
+				if err != nil {
+					return // the cgroup is gone
+				}
+				if now := [3]uint64{limit, oom, kills}; now != last {
+					last, still = now, 0
+				}
+				c.noteCounts(oom, kills)
+				time.Sleep(oomInterval)
 			}
 		}
 	}()
 }
 
-// noteOOM tells of OOM kills the container's cgroup counts and were not
-// told yet, or of one if signalled and the cgroup is gone. It returns
-// whether any kill has been told of.
-func (c *Container) noteOOM(signalled bool) bool {
+// readOOM reads the cgroup's counts and tells of new kills. It returns
+// false if the cgroup is gone.
+func (c *Container) readOOM(dir string) bool {
+	_, oom, kills, err := memoryEvents(dir)
+	if err != nil {
+		return false
+	}
+	c.noteCounts(oom, kills)
+	return true
+}
+
+func (c *Container) noteCounts(oom, kills uint64) {
 	c.mu.Lock()
-	dir := c.cgroupDir
+	c.oomInvoked = max(c.oomInvoked, oom)
 	c.mu.Unlock()
-	var err error
-	if dir == "" {
-		dir, err = c.CgroupPath()
-	}
-	var n uint64
-	if err == nil {
-		n, err = fs2.OOMKillCount(dir)
-	}
+	c.tellOOM(kills)
+}
+
+// tellOOM tells of the kills in count not told of yet.
+func (c *Container) tellOOM(count uint64) {
 	c.mu.Lock()
 	seen := c.oomKills
-	if err != nil {
-		if !signalled {
-			c.mu.Unlock()
-			return seen > 0
-		}
-		n = seen + 1
-	}
-	if n > seen {
-		c.oomKills = n
+	if count > seen {
+		c.oomKills = count
 	}
 	c.mu.Unlock()
-	if n > seen {
-		_ = os.WriteFile(filepath.Join(c.Bundle, OOMFile), nil, 0o644)
-		if c.onOOM != nil {
-			c.onOOM(c)
-		}
+	if count <= seen {
+		return
 	}
-	return n > 0
+	_ = os.WriteFile(filepath.Join(c.Bundle, OOMFile), nil, 0o644)
+	if c.onOOM != nil {
+		c.onOOM(c)
+	}
 }
 
 // noteOOMAtExit runs before an exit is reported, so the OOM kill that
-// ended the init is told of first. A process killed by SIGKILL whose
-// cgroup is already gone may have been the OOM killer's, with the watcher
-// not yet woken: give it a moment.
+// ended it is told of first: read from the cgroup if it is still there.
+// If not, a process killed (SIGKILL) counts as killed by the OOM killer if
+// the watcher saw it invoked in the cgroup, or the parent counted a kill
+// since the watch began. (Another child of the parent killed by it at
+// that moment would be taken for this one.)
 func (c *Container) noteOOMAtExit(killed bool) {
 	c.mu.Lock()
-	watched := c.oomWatched
+	dir := c.cgroupDir
 	c.mu.Unlock()
-	if c.noteOOM(false) || !killed || watched == nil {
+	if dir == "" {
+		if d, err := c.CgroupPath(); err == nil {
+			dir = d
+		}
+	}
+	if c.readOOM(dir) || !killed {
 		return
 	}
-	select {
-	case <-watched:
-	case <-time.After(500 * time.Millisecond):
+	_, _, parentKills, perr := memoryEvents(filepath.Dir(dir))
+	c.mu.Lock()
+	unseen := c.oomKills == 0 && (c.oomInvoked > 0 || perr == nil && parentKills > c.parentKills)
+	c.mu.Unlock()
+	if unseen {
+		c.tellOOM(1)
 	}
 }
