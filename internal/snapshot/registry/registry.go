@@ -526,7 +526,8 @@ func unpack(ctx context.Context, source oras.ReadOnlyTarget, desc ocispec.Descri
 	}
 	defer rc.Close()
 	vr := content.NewVerifyReader(rc, desc)
-	zr, err := zstd.NewReader(vr)
+	// Decoding in this goroutine: the verifier is read by it alone.
+	zr, err := zstd.NewReader(vr, zstd.WithDecoderConcurrency(1))
 	if err != nil {
 		return err
 	}
@@ -534,7 +535,11 @@ func unpack(ctx context.Context, source oras.ReadOnlyTarget, desc ocispec.Descri
 	if err := extract(ctx, zr, dir); err != nil {
 		return err
 	}
-	// tar stops at the archive's end; the verifier needs all of it.
+	// The archive ends before the stream does; the verifier needs all
+	// of the blob.
+	if _, err := io.Copy(io.Discard, zr); err != nil {
+		return err
+	}
 	if _, err := io.Copy(io.Discard, vr); err != nil {
 		return err
 	}
