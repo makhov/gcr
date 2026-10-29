@@ -5,11 +5,14 @@
 //	gcr [-n namespace] timeline ID
 //	gcr [-n namespace] rewind ID POINT
 //	gcr [-n namespace] snapshot ID DIR
+//	gcr snapshot-users DIR
+//	gcr snapshot-rm DIR...
 //	gcr [-n namespace] migrate [-token TOKEN] ID TARGET-URL
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -19,6 +22,7 @@ import (
 	"time"
 
 	"github.com/makhov/gcr/internal/control"
+	"github.com/makhov/gcr/internal/snapshot"
 )
 
 func main() {
@@ -27,6 +31,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "usage: gcr [-n namespace] timeline ID\n"+
 			"       gcr [-n namespace] rewind ID POINT\n"+
 			"       gcr [-n namespace] snapshot ID DIR\n"+
+			"       gcr snapshot-users DIR\n"+
+			"       gcr snapshot-rm DIR...\n"+
 			"       gcr [-n namespace] migrate [-token TOKEN] ID TARGET-URL\n")
 	}
 	flag.Parse()
@@ -65,6 +71,29 @@ func run(ctx context.Context, ns string, args []string) error {
 		// The container keeps running; containers created with the
 		// annotation gcr.dev/fork-from=DIR start from the snapshot.
 		return control.NewClient(ns, args[1]).Snapshot(ctx, args[2])
+	case len(args) == 2 && args[0] == "snapshot-users":
+		// The containers that mount it and the snapshots taken of them.
+		users, err := snapshot.Users(args[1])
+		if err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+		fmt.Fprintln(w, "KIND\tUSER\tSINCE")
+		for _, u := range users {
+			name := u.Path
+			if u.Kind == snapshot.Container {
+				name = u.Namespace + "/" + u.ID
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\n", u.Kind, name, u.Since.Local().Format(time.DateTime))
+		}
+		return w.Flush()
+	case len(args) >= 2 && args[0] == "snapshot-rm":
+		// Refused while anything uses it.
+		var errs []error
+		for _, dir := range args[1:] {
+			errs = append(errs, snapshot.Remove(dir))
+		}
+		return errors.Join(errs...)
 	case len(args) >= 1 && args[0] == "migrate":
 		fs := flag.NewFlagSet("migrate", flag.ExitOnError)
 		token := fs.String("token", os.Getenv("GCR_MIGRATE_TOKEN"), "token the target expects (default $GCR_MIGRATE_TOKEN)")

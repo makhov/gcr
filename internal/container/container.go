@@ -31,6 +31,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/makhov/gcr/internal/gpu"
+	"github.com/makhov/gcr/internal/snapshot"
 	"github.com/makhov/gcr/internal/userns"
 )
 
@@ -153,6 +154,7 @@ type Container struct {
 	cfg            *configs.Config
 	rootfs         []mount.Mount
 	layers         []string // read-only, between rootfs's upper and lower layers
+	snapshots      *snapshot.Hold
 	spec           *specs.Spec
 	checkpoint     string
 	checkpointFrom func(context.Context) (string, error)
@@ -239,6 +241,18 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 			return nil, err
 		}
 	}
+
+	// The snapshots the layers are from must not go while the container
+	// mounts them.
+	hold, err := snapshot.Acquire(o.Namespace, o.ID, prep.Layers)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if retErr != nil {
+			hold.Release()
+		}
+	}()
 
 	if prep.IDMap != "" {
 		if o.Rootfs, err = idmapRootfs(o.Rootfs, prep.IDMap, prep.IDMapRoot); err != nil {
@@ -335,6 +349,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		cfg:            cfg,
 		rootfs:         o.Rootfs,
 		layers:         prep.Layers,
+		snapshots:      hold,
 		lc:             lc,
 		spec:           spec,
 		checkpoint:     o.Checkpoint,
@@ -977,6 +992,9 @@ func (c *Container) Delete(ctx context.Context) error {
 	}
 	if err := mount.UnmountRecursive(filepath.Join(c.Bundle, "rootfs"), 0); err != nil {
 		errs = append(errs, err)
+	} else {
+		// Kept while a layer may still be mounted.
+		c.snapshots.Release()
 	}
 	c.mu.Lock()
 	execs := c.execs

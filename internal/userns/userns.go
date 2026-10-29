@@ -5,6 +5,8 @@
 package userns
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -193,6 +195,7 @@ func Allocate(spec *specs.Spec, namespace, id string, want uint32) (Range, error
 				return fmt.Errorf("pod already uses range %d, not %d: %w", r.Base, want, errdefs.ErrConflict)
 			}
 		} else {
+			pruneSnapshots()
 			for slot := 0; slot < slots; slot++ {
 				base := uint32(firstBase + slot*Size)
 				if want != 0 && base != want {
@@ -246,43 +249,117 @@ const BaseFile = "gcr-userns-base"
 // writable layer holds host IDs from it.
 const KeyFile = "gcr-userns-key"
 
-// Join adds id as a user of the range key already holds, for a container
-// that must map the same host IDs as the one a snapshot came from. The
-// range lives until its last user is released.
-func Join(key, id string) (Range, error) {
+// Join adds id as a user of the range key holds, for a container that
+// must map the same host IDs as the one a snapshot came from. The range
+// lives until its last user is released. If key holds none (its users
+// are gone, or the host rebooted), Join claims base for it again, unless
+// something else has it since.
+func Join(key, id string, base uint32) (Range, error) {
+	return join(key, "user-"+id, base, "")
+}
+
+// HoldForSnapshot makes the snapshot in dir a user of r, so the range
+// stays its container's while forks may map it. A snapshot that is
+// deleted without ReleaseForSnapshot stops holding it when a range is
+// next allocated.
+func HoldForSnapshot(dir string, r Range) error {
+	_, err := join(r.Key, snapshotUser(dir), r.Base, dir)
+	return err
+}
+
+// ReleaseForSnapshot drops the hold HoldForSnapshot took.
+func ReleaseForSnapshot(dir string, r Range) error {
+	return locked(func() error { return release(r, snapshotUser(dir)) })
+}
+
+func snapshotUser(dir string) string {
+	sum := sha256.Sum256([]byte(dir))
+	return "user-snapshot-" + hex.EncodeToString(sum[:8])
+}
+
+func join(key, user string, base uint32, holder string) (Range, error) {
 	var r Range
 	err := locked(func() error {
 		users := filepath.Join(stateDir, "keys", key)
 		b, err := os.ReadFile(filepath.Join(users, "base"))
-		if err != nil {
+		switch {
+		case err == nil:
+			if base, err = ParseBase(string(b)); err != nil {
+				return err
+			}
+		case errors.Is(err, os.ErrNotExist) && base != 0:
+			f, err := os.OpenFile(filepath.Join(stateDir, "bases", strconv.Itoa(int(base))), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			if errors.Is(err, os.ErrExist) {
+				return fmt.Errorf("user namespace range %d of %q has been given to another container: %w", base, key, errdefs.ErrConflict)
+			}
+			if err != nil {
+				return err
+			}
+			_, _ = f.WriteString(key)
+			f.Close()
+			if err := os.MkdirAll(users, 0o700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(users, "base"), []byte(strconv.Itoa(int(base))), 0o600); err != nil {
+				return err
+			}
+		default:
 			return fmt.Errorf("user namespace range of %q: %w", key, err)
 		}
-		base, err := ParseBase(string(b))
-		if err != nil {
-			return err
-		}
 		r = Range{Base: base, Key: key}
-		return os.WriteFile(filepath.Join(users, "user-"+id), nil, 0o600)
+		return os.WriteFile(filepath.Join(users, user), []byte(holder), 0o600)
 	})
 	return r, err
 }
 
 func Release(r Range, id string) error {
-	return locked(func() error {
-		users := filepath.Join(stateDir, "keys", r.Key)
-		_ = os.Remove(filepath.Join(users, "user-"+id))
-		entries, err := os.ReadDir(users)
-		if err != nil {
-			return err
+	return locked(func() error { return release(r, "user-"+id) })
+}
+
+func release(r Range, user string) error {
+	users := filepath.Join(stateDir, "keys", r.Key)
+	_ = os.Remove(filepath.Join(users, user))
+	entries, err := os.ReadDir(users)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "user-") {
+			return nil
 		}
-		for _, e := range entries {
-			if strings.HasPrefix(e.Name(), "user-") {
-				return nil
+	}
+	_ = os.Remove(filepath.Join(stateDir, "bases", strconv.Itoa(int(r.Base))))
+	return os.RemoveAll(users)
+}
+
+// pruneSnapshots drops the holds of snapshots that are gone: their
+// directory no longer records the range's key.
+func pruneSnapshots() {
+	keys, _ := os.ReadDir(filepath.Join(stateDir, "keys"))
+	for _, k := range keys {
+		users := filepath.Join(stateDir, "keys", k.Name())
+		holds, _ := filepath.Glob(filepath.Join(users, "user-snapshot-*"))
+		for _, h := range holds {
+			dir, err := os.ReadFile(h)
+			if err != nil {
+				continue
 			}
+			if key, err := os.ReadFile(filepath.Join(string(dir), KeyFile)); err == nil && strings.TrimSpace(string(key)) == k.Name() {
+				continue
+			} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+				continue // not knowably gone (a storage error)
+			}
+			b, err := os.ReadFile(filepath.Join(users, "base"))
+			if err != nil {
+				continue
+			}
+			base, err := ParseBase(string(b))
+			if err != nil {
+				continue
+			}
+			_ = release(Range{Base: base, Key: k.Name()}, filepath.Base(h))
 		}
-		_ = os.Remove(filepath.Join(stateDir, "bases", strconv.Itoa(int(r.Base))))
-		return os.RemoveAll(users)
-	})
+	}
 }
 
 func locked(fn func() error) error {

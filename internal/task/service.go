@@ -42,6 +42,7 @@ import (
 	"github.com/makhov/gcr/internal/landlock"
 	"github.com/makhov/gcr/internal/migrate"
 	"github.com/makhov/gcr/internal/netpolicy"
+	"github.com/makhov/gcr/internal/snapshot"
 	"github.com/makhov/gcr/internal/supervisor"
 	"github.com/makhov/gcr/internal/timetravel"
 	"github.com/makhov/gcr/internal/userns"
@@ -233,7 +234,13 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			// The snapshot's writable layer, which the fork keeps
 			// underneath its own, holds host IDs from the range its
 			// container mapped; the fork maps the same one.
-			rng, err := userns.Join(forkKey, r.ID)
+			var base uint32
+			if b, err := os.ReadFile(filepath.Join(forkFrom, userns.BaseFile)); err == nil {
+				if base, err = userns.ParseBase(string(b)); err != nil {
+					return prep, fmt.Errorf("fork: %w", err)
+				}
+			}
+			rng, err := userns.Join(forkKey, r.ID, base)
 			if err != nil {
 				return prep, fmt.Errorf("fork: %w", err)
 			}
@@ -393,7 +400,18 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		Migrate: func(ctx context.Context, target, token string) (migrate.Result, error) {
 			return s.migrateOut(ctx, c, ex, target, token)
 		},
-		Snapshot: c.Snapshot,
+		Snapshot: func(ctx context.Context, dir string) error {
+			// Writing over a snapshot would change forks' files under them.
+			if entries, err := os.ReadDir(dir); err == nil && len(entries) > 0 {
+				return fmt.Errorf("%s is not empty: %w", dir, errdefs.ErrAlreadyExists)
+			}
+			if err := c.Snapshot(ctx, dir); err != nil {
+				return err
+			}
+			// Its layers are mounted by every fork of it, and its
+			// range is mapped by every one.
+			return snapshot.Record(dir, c.Layers())
+		},
 	}
 	if ex.recorder != nil {
 		ex.recorder.Attach(c)
