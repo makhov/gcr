@@ -18,26 +18,29 @@ another machine without a spare Linux node, use the
 
 ## Install
 
-From a release, for `linux-amd64` or `linux-arm64`: static binaries,
-nothing else to install for them.
+From a release, for `linux-amd64` or `linux-arm64`: static binaries of
+the shim, `gcr`, and the CRIU they need (gcr's own,
+[makhov/criu](https://github.com/makhov/criu)), nothing else to install.
 
 ```sh
 v=v0.1.0 arch=amd64
 curl -LO https://github.com/makhov/gcr/releases/download/$v/gcr-$v-linux-$arch.tar.gz
-tar -xzf gcr-$v-linux-$arch.tar.gz
-sudo install -m 0755 gcr-$v-linux-$arch/containerd-shim-gcr-v2 gcr-$v-linux-$arch/gcr /usr/local/bin/
+tar -xzf gcr-$v-linux-$arch.tar.gz && cd gcr-$v-linux-$arch
+sudo install -m 0755 containerd-shim-gcr-v2 gcr /usr/local/bin/
+sudo install -m 0755 criu /usr/local/sbin/
 gcr version
 ```
 
-Or build on the Linux host (cgo is required) and install both binaries:
+The release's CRIU loads no plugins, which a static binary cannot: GPU
+nodes, whose checkpoints need CRIU's CUDA plugin ([GPUs](gpus.md)), build
+CRIU instead.
+
+Or build on the Linux host (cgo is required):
 
 ```sh
 make install          # containerd-shim-gcr-v2 and gcr into /usr/local/bin
+make criu             # CRIU, with its CUDA plugin, from a makhov/criu checkout in ../criu
 ```
-
-Either way, checkpoints, forks, time travel and migration need CRIU, and
-some of it gcr's own ([makhov/criu](https://github.com/makhov/criu)):
-`make criu` builds and installs it from a checkout in `../criu`.
 
 containerd finds the shim by name on `PATH`: the runtime type
 `io.containerd.gcr.v2` maps to `containerd-shim-gcr-v2`.

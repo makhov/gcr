@@ -67,36 +67,19 @@ test-k8s: static
 vm:
 	$(IN_VM) make $(T)
 
-# Release archives: static binaries for each architecture, built on a Linux
-# host (the dev VM, `make vm T=release`) that can cross-compile with cgo:
-# amd64 from arm64 needs gcc-x86-64-linux-gnu and libseccomp-dev:amd64
-# (docs/development.md#releases), and the other way round their arm64
-# counterparts. The version is the git tag, or a describe of the commit.
+# Release archives (hack/release.sh): static binaries of the shim, gcr and
+# CRIU (from CRIU_SRC) for each architecture, built on a Linux host that
+# can cross-compile with cgo, such as the dev VM: `make vm T=release`
+# (docs/development.md#releases). The version is the git tag, or a
+# describe of the commit.
 VERSION ?= $(shell git describe --tags --always --dirty)
-REVISION := $(shell git rev-parse HEAD)
 RELEASE_ARCHES ?= amd64 arm64
 # containerd's own version variables: `containerd-shim-gcr-v2 -v` and
 # `gcr version` print them.
 VERSION_LDFLAGS := -X github.com/containerd/containerd/v2/version.Version=$(VERSION) \
-	-X github.com/containerd/containerd/v2/version.Revision=$(REVISION)
-CC_amd64 := x86_64-linux-gnu-gcc
-CC_arm64 := aarch64-linux-gnu-gcc
-HOST_ARCH := $(shell go env GOARCH)
+	-X github.com/containerd/containerd/v2/version.Revision=$(shell git rev-parse HEAD)
 release:
-	rm -rf dist && mkdir -p dist
-	set -e; for arch in $(RELEASE_ARCHES); do \
-		cc=$$( [ $$arch = $(HOST_ARCH) ] && echo gcc || { [ $$arch = amd64 ] && echo $(CC_amd64) || echo $(CC_arm64); } ); \
-		triplet=$$( [ $$arch = amd64 ] && echo x86_64-linux-gnu || echo aarch64-linux-gnu ); \
-		out=dist/gcr-$(VERSION)-linux-$$arch; mkdir -p $$out; \
-		for cmd in containerd-shim-gcr-v2 gcr; do \
-			CC=$$cc GOOS=linux GOARCH=$$arch CGO_ENABLED=1 PKG_CONFIG_LIBDIR=/usr/lib/$$triplet/pkgconfig \
-			go build -trimpath -tags "$(TAGS) netgo osusergo" \
-				-ldflags '-s -w $(VERSION_LDFLAGS) $(STATIC_LDFLAGS)' -o $$out/$$cmd ./cmd/$$cmd; \
-		done; \
-		cp README.md $$out/; \
-		tar -C dist -czf $$out.tar.gz $$(basename $$out); rm -rf $$out; \
-	done
-	cd dist && sha256sum *.tar.gz > SHA256SUMS
+	VERSION=$(VERSION) CRIU_SRC=$(CRIU_SRC) hack/release.sh $(RELEASE_ARCHES)
 
 # Publishes dist/ as a GitHub release for VERSION (a tag), as a draft to
 # look over before it is public.

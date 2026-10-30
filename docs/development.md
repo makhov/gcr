@@ -72,21 +72,27 @@ are willing to give everyone with write access.
 
 ## Releases
 
-`make release` builds static binaries of the shim and `gcr` for
-linux/amd64 and linux/arm64, each stamped with the version
-(`containerd-shim-gcr-v2 -v`, `gcr version`), into
-`dist/gcr-VERSION-linux-ARCH.tar.gz` with `dist/SHA256SUMS`. It needs no
-CI: it runs on a Linux host that can build with cgo for both, such as the
-dev VM. There, building amd64 from arm64 takes Ubuntu's cross compiler and
-amd64 libseccomp:
+`make release` (`hack/release.sh`) builds static binaries of the shim,
+`gcr` and CRIU for linux/amd64 and linux/arm64 into
+`dist/gcr-VERSION-linux-ARCH.tar.gz`, with `dist/SHA256SUMS`. gcr's are
+stamped with the version (`containerd-shim-gcr-v2 -v`, `gcr version`);
+CRIU comes from the makhov/criu checkout in `CRIU_SRC` (default `../criu`),
+built `STATIC=1 NO_GNUTLS=1 NO_NFTABLES=1`, without plugins. Each archive's
+`VERSIONS` says which commits they are.
+
+It needs no CI: it runs on a Linux host that can build with cgo for both,
+such as the dev VM. There, building amd64 from arm64 takes Ubuntu's cross
+compiler and the amd64 libraries:
 
 ```sh
 sudo dpkg --add-architecture amd64 && sudo apt-get update
-sudo apt-get install gcc-x86-64-linux-gnu libc6-dev-amd64-cross libseccomp-dev:amd64
+sudo apt-get install gcc-x86-64-linux-gnu libc6-dev-amd64-cross libseccomp-dev:amd64 \
+  libprotobuf-c-dev:amd64 libnl-3-dev:amd64 libnet1-dev:amd64 libcap-dev:amd64 libbsd-dev:amd64 \
+  libbpf-dev:amd64 uuid-dev:amd64 libelf-dev:amd64 zlib1g-dev:amd64 libzstd-dev:amd64 libmd-dev:amd64
 ```
 
-(on an amd64 host, `gcc-aarch64-linux-gnu`, `libc6-dev-arm64-cross` and
-`libseccomp-dev:arm64`). To cut one:
+(on an amd64 host, the same with `arm64`, and `gcc-aarch64-linux-gnu`,
+`libc6-dev-arm64-cross`). To cut one:
 
 ```sh
 git tag v0.1.0 && git push origin v0.1.0
@@ -94,6 +100,7 @@ make vm T='release VERSION=v0.1.0'    # or `make release VERSION=v0.1.0` on the 
 make release-publish VERSION=v0.1.0   # a draft GitHub release, to look over and publish
 ```
 
-`VERSION` defaults to `git describe`. The binaries are built with
-`-trimpath` and stripped. CRIU is not part of a release.
+`VERSION` defaults to `git describe`. gcr's binaries are built with
+`-trimpath` and stripped. Check out the makhov/criu branch the release
+should carry in `CRIU_SRC` first.
 
