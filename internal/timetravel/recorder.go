@@ -197,7 +197,21 @@ func (r *Recorder) point(ctx context.Context, snap Snapshotter, p Point) (Point,
 		parent = r.timeline.Dir(parentID)
 	}
 	start := time.Now()
-	if err := snap.Point(ctx, dir, parent); err != nil {
+	err = snap.Point(ctx, dir, parent)
+	if err != nil && parent != "" {
+		// CRIU can refuse an incremental dump (a page it takes for
+		// unchanged is not in the parent's images); a full one holds
+		// everything, and the task is still stopped where it was.
+		log.G(ctx).WithError(err).Warn("time travel: incremental point failed, taking a full one")
+		parentID = 0
+		if err = os.RemoveAll(dir); err == nil {
+			err = os.MkdirAll(filepath.Join(dir, "images"), 0o700)
+		}
+		if err == nil {
+			err = snap.Point(ctx, dir, "")
+		}
+	}
+	if err != nil {
 		r.timeline.Discard(id)
 		r.mu.Lock()
 		r.lastID = 0 // the next starts a chain

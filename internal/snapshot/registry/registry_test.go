@@ -58,6 +58,9 @@ func TestPushPull(t *testing.T) {
 		if err := nydus.Available(); err != nil {
 			t.Skip(err)
 		}
+		if os.Geteuid() != 0 {
+			t.Skip("a pull mounts the parts with nydusd: needs root")
+		}
 		testPushPull(t, FormatNydus)
 	})
 }
