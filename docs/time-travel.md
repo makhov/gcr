@@ -4,7 +4,8 @@ A container started with `gcr.dev/time-travel=execve` gets a point on its
 timeline just after each `execve` (at most one per `gcr.dev/time-travel-interval`,
 default `1s`; the last `gcr.dev/time-travel-keep`, default 20, are kept). A
 point is the processes (CRIU) plus the writable layer, taken with the new
-program stopped before its first instruction.
+program stopped before its first instruction. An `execve` of a file that
+does not exist, as a shell's search of `PATH` makes, is not a point.
 
 ```sh
 ctr run -d --runtime io.containerd.gcr.v2 --annotation gcr.dev/time-travel=execve IMAGE ID CMD...
