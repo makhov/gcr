@@ -13,7 +13,7 @@ gcr [-n namespace] snapshot ID DIR
 gcr snapshot-users DIR
 gcr snapshot-rm DIR...
 gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF
-gcr snapshot-pull [-plain-http] [-store DIR] REF DIR
+gcr snapshot-pull [-plain-http] [-store DIR] [-lazy] REF DIR
 gcr [-n namespace] migrate [-token TOKEN] ID TARGET-URL
 ```
 
@@ -76,7 +76,7 @@ Credentials come from Docker's config (`docker login`).
 - `-format`: `tar` (the default) or `nydus`
   ([formats](snapshot-registry.md#formats)).
 
-### `gcr snapshot-pull [-plain-http] [-store DIR] REF DIR`
+### `gcr snapshot-pull [-plain-http] [-store DIR] [-lazy] REF DIR`
 
 Pulls a snapshot to `DIR`, and the layers beneath it to the store, in
 whichever format it was pushed. If the
@@ -88,6 +88,8 @@ free one and `gcr` says so.
   Include it in the handler's `SnapshotRoots` if pods fork from pulled
   snapshots.
 - `-plain-http`: as for `snapshot-push`.
+- `-lazy`: for a snapshot pushed with `-format nydus`, mount its parts
+  instead of downloading them ([lazy pulls](snapshot-registry.md#lazy-pulls)).
 
 ## Live migration
 

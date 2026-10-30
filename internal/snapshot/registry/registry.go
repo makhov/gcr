@@ -309,8 +309,18 @@ func (c *counter) Write(p []byte) (int, error) {
 	return n, err
 }
 
+// PullOptions says how to pull a snapshot.
+type PullOptions struct {
+	// Lazy mounts a nydus snapshot's parts rather than downloading them:
+	// a nydusd per part reads from the registry what is read from it,
+	// until the snapshot is removed. Its user namespace range must be
+	// free here (it cannot be moved without reading everything).
+	Lazy bool
+}
+
 // Pulled says how a snapshot was pulled.
 type Pulled struct {
+	Lazy bool
 	// Range is the user namespace range the snapshot maps here (zero
 	// without one), and From the one it was taken in, if that differs:
 	// it was moved, being taken.
@@ -326,7 +336,7 @@ type Pulled struct {
 // is moved into a free one otherwise (userns.ShiftTree, ShiftImages).
 // Snapshots taken from the same container, in the same range, share one
 // range here too, as forks of one snapshot do, and so their layers.
-func Pull(ctx context.Context, source oras.ReadOnlyTarget, ref, dir, store string) (_ Pulled, retErr error) {
+func Pull(ctx context.Context, source oras.ReadOnlyTarget, ref, dir, store string, opts PullOptions) (_ Pulled, retErr error) {
 	var pulled Pulled
 	dir, err := filepath.Abs(dir)
 	if err != nil {
@@ -405,6 +415,20 @@ func Pull(ctx context.Context, source oras.ReadOnlyTarget, ref, dir, store strin
 			return pulled, fmt.Errorf("%s: malformed snapshot manifest: %w", ref, errdefs.ErrInvalidArgument)
 		}
 	}
+	var lazy *nydus.Registry
+	if opts.Lazy {
+		if cfg.Format != FormatNydus {
+			return pulled, fmt.Errorf("%s: a lazy pull needs a snapshot pushed in the nydus format: %w", ref, errdefs.ErrFailedPrecondition)
+		}
+		if err := nydus.Available(); err != nil {
+			return pulled, fmt.Errorf("%w: %w", err, errdefs.ErrFailedPrecondition)
+		}
+		reg, err := nydusRegistry(ctx, source)
+		if err != nil {
+			return pulled, err
+		}
+		lazy, pulled.Lazy = &reg, true
+	}
 
 	// The range first: the layers are written in it.
 	if cfg.UsernsBase != 0 {
@@ -416,6 +440,10 @@ func Pull(ctx context.Context, source oras.ReadOnlyTarget, ref, dir, store strin
 		sum := sha256.Sum256([]byte(fmt.Sprintf("%s@%d@%s", cfg.UsernsKey, cfg.UsernsBase, uppers[len(uppers)-1].desc.Digest)))
 		key := "pulled_" + hex.EncodeToString(sum[:8])
 		r, err := userns.ClaimForSnapshot(dir, key, cfg.UsernsBase)
+		if errdefs.IsConflict(err) && lazy != nil {
+			return pulled, fmt.Errorf("user namespace range %d is in use here, and a lazily pulled snapshot cannot be "+
+				"moved to another; pull it without -lazy: %w", cfg.UsernsBase, err)
+		}
 		if errdefs.IsConflict(err) {
 			r, err = userns.ClaimForSnapshot(dir, key, 0)
 		}
@@ -441,11 +469,21 @@ func Pull(ctx context.Context, source oras.ReadOnlyTarget, ref, dir, store strin
 	}
 	var below []string // top first
 	for i := len(uppers) - 1; i >= 1; i-- {
-		layerDir, err := pullLayer(ctx, source, uppers[i], below, store, pulled)
+		pull := pullLayer
+		if lazy != nil {
+			pull = func(ctx context.Context, source oras.ReadOnlyTarget, p part, below []string, store string, pulled Pulled) (string, error) {
+				return mountLayer(ctx, source, p, below, store, pulled, *lazy)
+			}
+		}
+		layerDir, err := pull(ctx, source, uppers[i], below, store, pulled)
 		if err != nil {
 			return pulled, fmt.Errorf("layer %s: %w", uppers[i].desc.Digest, err)
 		}
 		below = append([]string{filepath.Join(layerDir, snapshot.Upper)}, below...)
+	}
+
+	if lazy != nil {
+		return pulled, mountSnapshot(ctx, source, dir, images, uppers[0], below, pulled, *lazy)
 	}
 
 	tmp, err := os.MkdirTemp(filepath.Dir(dir), "."+filepath.Base(dir)+".gcr-pull-")

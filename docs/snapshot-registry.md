@@ -73,7 +73,47 @@ reads either.
   touches, instead of downloading all of it. Pushing and pulling need
   `nydus-image` and `nydusd` (nydus 2.4) in `PATH`.
 
-  A pull of a nydus snapshot still downloads it whole, checks each blob
+  A plain pull of a nydus snapshot downloads it whole, checks each blob
   against its digest, and lays it out as a `tar` one is: forks and
-  everything else work the same. Reading parts lazily is the next step.
+  everything else work the same.
+
+## Lazy pulls
+
+`gcr snapshot-pull -lazy` mounts a nydus snapshot instead of downloading
+it: its process images, its writable layer and the layers beneath it are
+each served by a `nydusd` that reads from the registry the chunks a reader
+touches, and keeps them. A fork of it reads the files it opens; with
+`gcr.dev/lazy-restore=true` its memory is read as its processes touch it,
+too, so a fork of a large snapshot starts after reading a fraction of it.
+
+What it buys, for a fork of a Python process holding 1 GiB of random data
+(incompressible), pulled from a registry on the same host (arm64 VM):
+
+| | pull | until the fork runs | total | read from the registry by then |
+| --- | --- | --- | --- | --- |
+| plain pull | 3.25 s | 0.58 s | 3.83 s | 1027 MiB |
+| `-lazy` | 0.07 s | 3.16 s | 3.23 s | 1027 MiB |
+| `-lazy`, `gcr.dev/lazy-restore=true` | 0.06 s | 0.35 s | **0.41 s** | **28 MiB** |
+
+Without lazy restore, CRIU reads all of the memory before the processes
+run, so the lazy pull only moves the wait. With it, the fork runs after
+the pages it touched; CRIU then copies the rest in the background until
+the fork has all its memory, so the whole snapshot is read within seconds
+either way. Over a real network the time saved grows with the snapshot.
+
+- **Lifetime.** The `nydusd`s run on their own and serve the snapshot
+  until `gcr snapshot-rm` removes it, which unmounts its parts and they
+  exit. They do not survive a reboot: pull the snapshot again after one.
+- **User namespace range.** A lazily pulled snapshot cannot be moved into
+  another range (that rewrites every file), so its range must be free on
+  the node; the pull says so if it is not, and a plain pull moves it.
+- **Integrity.** A plain pull checks each blob against its digest. A
+  lazy pull reads chunks as they are needed, and `nydusd` cannot check
+  RAFS v6 chunks: it trusts what the registry, over TLS, returns.
+- **Credentials.** `nydusd` gets the username and password from Docker's
+  config; registries that hand out only tokens are not supported yet.
+- **Kernels.** `nydusd` serves the mounts over FUSE, which every kernel
+  has. Kernels built with EROFS on-demand loading
+  (`CONFIG_EROFS_FS_ONDEMAND`, `CONFIG_CACHEFILES_ONDEMAND`) could serve
+  them faster through fscache; gcr does not use that yet.
 

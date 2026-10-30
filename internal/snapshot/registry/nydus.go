@@ -6,20 +6,27 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"golang.org/x/sys/unix"
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content"
+	"oras.land/oras-go/v2/registry/remote"
+	"oras.land/oras-go/v2/registry/remote/auth"
 
 	"github.com/makhov/gcr/internal/nydus"
+	"github.com/makhov/gcr/internal/snapshot"
+	"github.com/makhov/gcr/internal/userns"
 )
 
 // Formats a snapshot is pushed in. In the nydus format each part (the
@@ -268,4 +275,152 @@ func copyOut(ctx context.Context, src, dir string, sparse bool, extract func(con
 		return fmt.Errorf("tar %s: %w: %s", src, err, stderr.String())
 	}
 	return exErr
+}
+
+// lazyDir holds, in a lazily pulled snapshot or layer, each mounted part's
+// bootstrap and nydusd's configuration, log and cache.
+const lazyDir = snapshot.LazyDir
+
+// nydusRegistry is where a nydusd reads source's blobs from.
+func nydusRegistry(ctx context.Context, source oras.ReadOnlyTarget) (nydus.Registry, error) {
+	repo, ok := source.(*remote.Repository)
+	if !ok {
+		return nydus.Registry{}, fmt.Errorf("a lazy pull reads from a registry: %w", errdefs.ErrInvalidArgument)
+	}
+	reg := nydus.Registry{Scheme: "https", Host: repo.Reference.Registry, Repo: repo.Reference.Repository}
+	if repo.PlainHTTP {
+		reg.Scheme = "http"
+	}
+	if client, ok := repo.Client.(*auth.Client); ok && client.Credential != nil {
+		cred, err := client.Credential(ctx, repo.Reference.Host())
+		if err != nil {
+			return reg, err
+		}
+		if cred.Username == "" && (cred.RefreshToken != "" || cred.AccessToken != "") {
+			return reg, fmt.Errorf("a lazy pull needs a username and password for %s in Docker's config, not a token: %w",
+				reg.Host, errdefs.ErrNotImplemented)
+		}
+		reg.Username, reg.Password = cred.Username, cred.Password
+	}
+	return reg, nil
+}
+
+// mountLayer makes sure store has the layer p (with below beneath it),
+// mounted lazily if not pulled before, and returns its directory there.
+func mountLayer(ctx context.Context, source oras.ReadOnlyTarget, p part, below []string, store string, pulled Pulled, reg nydus.Registry) (string, error) {
+	name := p.desc.Digest.Algorithm().String() + "-" + p.desc.Digest.Encoded()
+	if pulled.Range.Base != 0 {
+		name += "-" + strconv.Itoa(int(pulled.Range.Base))
+	}
+	layerDir := filepath.Join(store, name)
+	if _, err := os.Stat(filepath.Join(layerDir, snapshot.Upper)); err == nil {
+		// Pulled before, with another snapshot; mounted again if it was
+		// lazily and its nydusd is gone (a reboot).
+		return layerDir, remount(layerDir, snapshot.Upper, reg)
+	}
+	if err := os.MkdirAll(store, 0o711); err != nil {
+		return "", err
+	}
+	tmp, err := os.MkdirTemp(store, ".pull-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(tmp)
+	if err := writeLazyPart(ctx, source, tmp, snapshot.Upper, p); err != nil {
+		return "", err
+	}
+	if err := writeSnapshotFiles(tmp, below, p.cached(false)); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp, layerDir); err != nil {
+		if errors.Is(err, os.ErrExist) || errors.Is(err, unix.ENOTEMPTY) {
+			return layerDir, remount(layerDir, snapshot.Upper, reg) // another pull got there first
+		}
+		return "", err
+	}
+	if err := mountPart(layerDir, snapshot.Upper, reg); err != nil {
+		_ = os.RemoveAll(layerDir)
+		return "", err
+	}
+	return layerDir, snapshot.Record(layerDir, below)
+}
+
+// mountSnapshot makes dir a snapshot whose images and writable layer are
+// mounted lazily, with below beneath it.
+func mountSnapshot(ctx context.Context, source oras.ReadOnlyTarget, dir string, images, upper part, below []string, pulled Pulled, reg nydus.Registry) (retErr error) {
+	tmp, err := os.MkdirTemp(filepath.Dir(dir), "."+filepath.Base(dir)+".gcr-pull-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	for name, p := range map[string]part{"images": images, snapshot.Upper: upper} {
+		if err := writeLazyPart(ctx, source, tmp, name, p); err != nil {
+			return err
+		}
+	}
+	b := upper.cached(false)
+	b.NydusImages = images.descriptors()
+	if err := writeSnapshotFiles(tmp, below, b); err != nil {
+		return err
+	}
+	if pulled.Range.Base != 0 {
+		if err := os.WriteFile(filepath.Join(tmp, userns.BaseFile), []byte(strconv.Itoa(int(pulled.Range.Base))), 0o600); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(tmp, userns.KeyFile), []byte(pulled.Range.Key), 0o600); err != nil {
+			return err
+		}
+	}
+	_ = os.Remove(dir) // empty, if there
+	if err := os.Rename(tmp, dir); err != nil {
+		return err
+	}
+	defer func() {
+		if retErr != nil {
+			for _, name := range []string{"images", snapshot.Upper} {
+				_ = nydus.Unmount(filepath.Join(dir, name))
+			}
+			_ = os.RemoveAll(dir)
+		}
+	}()
+	for _, name := range []string{"images", snapshot.Upper} {
+		if err := mountPart(dir, name, reg); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+	}
+	return snapshot.Record(dir, below)
+}
+
+// writeLazyPart fetches into dir the bootstrap of the part name is, and
+// makes the empty directory it is mounted on.
+func writeLazyPart(ctx context.Context, source oras.ReadOnlyTarget, dir, name string, p part) error {
+	work := filepath.Join(dir, lazyDir, name)
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		return err
+	}
+	if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
+		return err
+	}
+	if err := fetchFile(ctx, source, p.desc, filepath.Join(work, "bootstrap")); err != nil {
+		return fmt.Errorf("%s bootstrap: %w", name, err)
+	}
+	return nil
+}
+
+// mountPart mounts the part name of the snapshot or layer in dir.
+func mountPart(dir, name string, reg nydus.Registry) error {
+	work := filepath.Join(dir, lazyDir, name)
+	return nydus.MountRegistry(filepath.Join(work, "bootstrap"), reg, filepath.Join(dir, name), work)
+}
+
+// remount mounts the part name of dir again if it was pulled lazily and
+// is not mounted.
+func remount(dir, name string, reg nydus.Registry) error {
+	if _, err := os.Stat(filepath.Join(dir, lazyDir, name)); err != nil {
+		return nil // pulled whole
+	}
+	if nydus.Mounted(filepath.Join(dir, name)) {
+		return nil
+	}
+	return mountPart(dir, name, reg)
 }

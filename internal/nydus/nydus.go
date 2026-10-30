@@ -7,6 +7,7 @@ package nydus
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -113,13 +115,16 @@ func mount(bootstrap string, backend map[string]any, dir, work string) (*Mount, 
 	log := filepath.Join(work, "nydusd.log")
 	cmd := exec.Command("nydusd", "--config", cfgPath, "--bootstrap", bootstrap,
 		"--mountpoint", dir, "--log-level", "warn", "--log-file", log)
+	// A session of its own: a daemon left running is not in the caller's
+	// process group, nor killed with its terminal.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("nydusd: %w", err)
 	}
 	m := &Mount{Dir: dir, cmd: cmd, done: make(chan error, 1)}
 	go func() { m.done <- cmd.Wait() }()
 	for deadline := time.Now().Add(10 * time.Second); ; {
-		if mounted(dir) {
+		if Mounted(dir) {
 			return m, nil
 		}
 		select {
@@ -136,6 +141,44 @@ func mount(bootstrap string, backend map[string]any, dir, work string) (*Mount, 
 	}
 }
 
+// MountRegistry mounts the image bootstrap describes at dir, with a nydusd
+// that reads its blob from a registry, a chunk at a time as files are read,
+// and keeps what it read in work. nydusd runs on its own, and exits when
+// dir is unmounted (Unmount).
+func MountRegistry(bootstrap string, reg Registry, dir, work string) error {
+	cfg := map[string]any{
+		"scheme": reg.Scheme, "host": reg.Host, "repo": reg.Repo,
+		"timeout": 30, "connect_timeout": 10, "retry_limit": 3,
+	}
+	if reg.Username != "" {
+		cfg["auth"] = base64.StdEncoding.EncodeToString([]byte(reg.Username + ":" + reg.Password))
+	}
+	m, err := mount(bootstrap, map[string]any{"type": "registry", "config": cfg}, dir, work)
+	if err != nil {
+		return err
+	}
+	// Left running: it serves the mount after this process exits.
+	return m.cmd.Process.Release()
+}
+
+// Registry is where MountRegistry's nydusd reads blobs from.
+type Registry struct {
+	Scheme, Host, Repo string
+	Username, Password string
+}
+
+// Unmount unmounts dir if something is mounted there; a nydusd serving it
+// exits.
+func Unmount(dir string) error {
+	if !Mounted(dir) {
+		return nil
+	}
+	if err := unix.Unmount(dir, 0); err != nil {
+		return unix.Unmount(dir, unix.MNT_DETACH)
+	}
+	return nil
+}
+
 // Close unmounts the image; nydusd exits with its mount.
 func (m *Mount) Close() error {
 	if err := unix.Unmount(m.Dir, 0); err != nil && !errors.Is(err, unix.EINVAL) {
@@ -150,8 +193,8 @@ func (m *Mount) Close() error {
 	return nil
 }
 
-// mounted says whether dir is a FUSE mountpoint.
-func mounted(dir string) bool {
+// Mounted says whether dir is a FUSE mountpoint.
+func Mounted(dir string) bool {
 	f, err := os.Open("/proc/self/mountinfo")
 	if err != nil {
 		return false
