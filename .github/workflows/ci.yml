@@ -60,7 +60,17 @@ jobs:
         run: cd /tmp && sudo critest --runtime-handler gcr --ginkgo.no-color --ginkgo.timeout 40m ${SKIP:+--ginkgo.skip "$SKIP"}
       - name: logs
         if: failure()
-        run: sudo journalctl -u containerd --no-pager | tail -300
+        # Warnings and errors from the whole run: the shim's come long
+        # before the last lines. All of it as an artifact.
+        run: |
+          sudo journalctl -u containerd --no-pager -o short-precise > containerd.log
+          grep -E 'level=(warning|error|fatal)' containerd.log | grep -v 'netlink policy off' | tail -1000
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: containerd-${{ matrix.containerd }}.log
+          path: containerd.log
+          retention-days: 7
 
   crio:
     # gcr as a CRI-O runtime of type "vm", next to containerd (whose CNI
