@@ -311,18 +311,22 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			if err != nil {
 				return prep, fmt.Errorf("migration receiver: %w", err)
 			}
-			// A post-copy migration restores lazily; refused before the
-			// source freezes where that cannot work.
-			recv.PostCopyCheck = func() error {
+			// A post-copy migration restores lazily, refused before the
+			// source freezes where that cannot work; a pre-copy one
+			// does where it can.
+			recv.LazyCheck = func() error {
 				if c != nil && c.IDBase() != 0 && !container.LazyPagesAvailable() {
 					return fmt.Errorf("this node has vm.unprivileged_userfaultfd = 0, which a container in a user namespace needs to be restored lazily")
+				}
+				if c != nil && !c.CanPreDump() {
+					return fmt.Errorf("CRIU cannot restore GPU memory lazily")
 				}
 				return nil
 			}
 			ex.receiver = recv
 			prep.CheckpointFrom = func(ctx context.Context) (container.Incoming, error) {
 				in, err := recv.Wait(ctx)
-				return container.Incoming{Images: in.Dir, PageServer: in.PageServer}, err
+				return container.Incoming{Images: in.Dir, PageServer: in.PageServer, Lazy: in.Lazy}, err
 			}
 		}
 		// Calls the container's seccomp filter hands to its supervisor.

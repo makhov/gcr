@@ -78,9 +78,10 @@ type Receiver struct {
 	lazy     chan io.ReadWriteCloser
 	lazyLn   net.Listener
 
-	// PostCopyCheck, if set, says whether this node can restore lazily;
-	// a post-copy migration is refused before the source freezes.
-	PostCopyCheck func() error
+	// LazyCheck, if set, says whether this node can restore the
+	// container lazily. A post-copy migration is refused before the
+	// source freezes where it cannot; a pre-copy one restores in full.
+	LazyCheck func() error
 
 	ready   chan Incoming
 	result  chan error
@@ -140,9 +141,13 @@ func (r *Receiver) Addr() string { return r.ln.Addr().String() }
 
 // Incoming is what to restore: the images, and for a post-copy migration
 // the page server (on loopback, carried to the source) serving the memory.
+// Lazy, for a pre-copy one: restore without the memory, which a daemon
+// then loads from the images here, as the container touches it and in the
+// background, so the downtime does not grow with the memory.
 type Incoming struct {
 	Dir        string
 	PageServer string
+	Lazy       bool
 }
 
 // Wait blocks until the source asks for the restore and returns what to
@@ -260,8 +265,8 @@ func (r *Receiver) startRound(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	postCopy := req.Header.Get(HeaderPostCopy) != ""
-	if postCopy && r.PostCopyCheck != nil {
-		if err := r.PostCopyCheck(); err != nil {
+	if postCopy && r.LazyCheck != nil {
+		if err := r.LazyCheck(); err != nil {
 			http.Error(w, "post-copy: "+err.Error(), http.StatusConflict)
 			return
 		}
@@ -384,6 +389,8 @@ func (r *Receiver) restore(w http.ResponseWriter, req *http.Request) {
 		r.mu.Unlock()
 		go r.serveLazyPages(ln)
 		in.PageServer = ln.Addr().String()
+	} else {
+		in.Lazy = r.LazyCheck == nil || r.LazyCheck() == nil
 	}
 	select {
 	case r.ready <- in:
@@ -395,6 +402,8 @@ func (r *Receiver) restore(w http.ResponseWriter, req *http.Request) {
 	case err := <-r.result:
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+		} else {
+			_ = json.NewEncoder(w).Encode(map[string]bool{"lazy": in.Lazy})
 		}
 		// The migration is over either way: stop listening once this
 		// answer is out.

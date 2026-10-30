@@ -65,6 +65,9 @@ type Result struct {
 	// from the source in PostCopyTook (from the freeze).
 	PostCopy     bool          `json:"postCopy,omitempty"`
 	PostCopyTook time.Duration `json:"postCopyTook,omitempty"`
+	// LazyRestore: after pre-copy, the target ran before loading the
+	// memory from the images it received, which it then did as it ran.
+	LazyRestore bool `json:"lazyRestore,omitempty"`
 }
 
 // Options say how to migrate.
@@ -177,11 +180,13 @@ func Send(ctx context.Context, src Source, target, token string, t TLS, work str
 	if err := c.putDir(ctx, "/upper", upper); err != nil {
 		return res, fmt.Errorf("send writable layer: %w", err)
 	}
-	if err := c.post(ctx, "/restore", nil); err != nil {
+	var restored struct{ Lazy bool }
+	if err := c.post(ctx, "/restore", &restored); err != nil {
 		return res, fmt.Errorf("restore on target: %w", err)
 	}
 	handedOver = true
 	res.Downtime = time.Since(frozen)
+	res.LazyRestore = restored.Lazy
 	if err := src.Stop(); err != nil {
 		return res, fmt.Errorf("target is running but stopping the source failed: %w", err)
 	}

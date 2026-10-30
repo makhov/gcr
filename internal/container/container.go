@@ -530,9 +530,11 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 
 // Incoming is what an incoming migration restores from: CRIU images, and
 // for a post-copy one the page server (host:port) that serves its memory.
+// Lazy restores without the memory, loaded from the images after.
 type Incoming struct {
 	Images     string
 	PageServer string
+	Lazy       bool
 }
 
 // Start runs the created container, or restores it from its checkpoint.
@@ -543,6 +545,7 @@ func (c *Container) Start(ctx context.Context) error {
 			return err
 		}
 		c.checkpoint, c.remotePages = in.Images, in.PageServer
+		c.lazyPages = c.lazyPages || in.Lazy
 	}
 	switch {
 	case c.frozen:

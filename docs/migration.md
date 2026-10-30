@@ -24,6 +24,32 @@ the checkpoint and the writable layer, and the target restores. The source
 stays frozen until the target runs and is thawed if anything fails before;
 afterwards it is killed. Open TCP connections reset.
 
+## Pre-copy
+
+Each round sends the pages written since the round before, while the
+container runs: the first, all its memory. Rounds stop after five, or once
+one sends less than 10 MiB, or shrinks by less than a tenth from the one
+before (the container writes as fast as rounds send). The freeze then
+sends only what was written since the last round. `gcr migrate` prints the
+pages each round sent.
+
+The target then starts from the images without loading their memory: a
+CRIU lazy-pages daemon there loads each page from the images when the
+container touches it, and all the others in the background, from its own
+disk. The downtime is the freeze, the last round, and a restore of
+processes without their memory; it no longer grows with the memory. Unlike
+post-copy, the source is not needed once the target runs.
+
+The target restores in full instead (and `gcr migrate` does not say "the
+target loads its memory...") where it cannot restore lazily: a container in
+a user namespace on a node with `vm.unprivileged_userfaultfd` = 0, or one
+with GPUs.
+
+Where the kernel does not track dirty memory, there are no rounds: the
+freeze sends all the memory (stop-and-copy), and the target still starts
+without loading it. Post-copy (below) is the way to keep that downtime
+short.
+
 Everything goes over the one address the target listens on. Its page
 servers listen on loopback only, and each round's memory is carried to
 them over the migration's connection (an HTTP Upgrade), after the token
@@ -77,6 +103,8 @@ What it costs:
   ([fork](fork.md#lazy-restore) has why); a target without it refuses a
   post-copy migration before the source freezes.
 - **No GPUs.** CRIU's CUDA plugin cannot serve GPU memory lazily.
-- **No pre-copy rounds yet.** Post-copy starts from a full dump; pages
-  the target touches early wait on the network instead of on the freeze.
+- **No pre-copy rounds.** Post-copy starts from a full dump; pages the
+  target touches early wait on the network instead of on the freeze.
+  Where the kernel tracks dirty memory, pre-copy (above) keeps the downtime
+  as short without needing the source afterwards.
 

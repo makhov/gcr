@@ -184,7 +184,10 @@ func testMigrateMemory(t *testing.T, postCopy bool) {
 		t.Logf("post-copy of %s MiB: downtime %s, memory fetched by %s", mib,
 			res.Downtime.Round(time.Millisecond), res.PostCopyTook.Round(time.Millisecond))
 	} else {
-		t.Logf("%s MiB, pre-copy rounds %v: downtime %s", mib, res.PreCopyPages, res.Downtime.Round(time.Millisecond))
+		t.Logf("%s MiB, pre-copy rounds %v: downtime %s, lazy restore %v", mib, res.PreCopyPages, res.Downtime.Round(time.Millisecond), res.LazyRestore)
+		if !res.LazyRestore {
+			t.Errorf("the target restored its memory before running (gcr.dev/host-users: no user namespace, no GPU)")
+		}
 	}
 	if st := src.Status(); st != containerd.Stopped {
 		t.Fatalf("source is %s once the target has its memory", st)
