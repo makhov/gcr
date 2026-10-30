@@ -81,6 +81,41 @@ func writeLayers(dir string, layers []string) error {
 	return os.WriteFile(filepath.Join(dir, LayersFile), []byte(strings.Join(layers, "\n")+"\n"), 0o600)
 }
 
+// callerRootfs describes the overlay its caller mounted at dir (CRI-O
+// mounts a container's rootfs itself) as the mounts containerd would have
+// given gcr: its writable layer is then found the same way, and a fork
+// mounts it again with the snapshot's layers. nil if no overlay is
+// mounted at dir.
+func callerRootfs(dir string) []mount.Mount {
+	path, err := mount.CanonicalizePath(dir)
+	if err != nil {
+		return nil
+	}
+	info, err := mount.Lookup(path)
+	if err != nil || info.FSType != "overlay" || info.Mountpoint != path {
+		return nil
+	}
+	// The kernel shows the options the overlay was mounted with, in a form
+	// it accepts again.
+	var opts []string
+	var upper, lower bool
+	for _, o := range strings.Split(info.VFSOptions, ",") {
+		switch {
+		case o == "rw" || o == "ro":
+			continue
+		case strings.HasPrefix(o, "upperdir="):
+			upper = true
+		case strings.HasPrefix(o, "lowerdir="):
+			lower = true
+		}
+		opts = append(opts, o)
+	}
+	if !upper || !lower {
+		return nil
+	}
+	return []mount.Mount{{Type: "overlay", Source: info.Source, Options: opts}}
+}
+
 // mountRootfs mounts the rootfs with layers, read-only and top first,
 // between the overlay's writable layer and the image's layers.
 //

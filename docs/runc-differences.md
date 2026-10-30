@@ -28,9 +28,9 @@ container asks for them with an annotation.
 - **About 6 MiB of memory per pod** for the shim, against about 4 MiB
   for runc's. Start and stop are faster (no binary per operation):
   [the README](../README.md#compared-with-runc) has the numbers.
-- **Under CRI-O**: no port forwarding, no gcr user namespaces, and no
-  snapshots, forks, time travel, migration or CRI checkpoints
-  ([getting started](getting-started.md#with-cri-o)).
+- **Under CRI-O**: no port forwarding, no gcr user namespaces, no time
+  travel, no migration into a CRI-O container, and no CRI checkpoints.
+  Snapshots and forks work ([getting started](getting-started.md#with-cri-o)).
 - **Docker (dockerd)** has not been tried with gcr as its runtime.
 
 ## On by default

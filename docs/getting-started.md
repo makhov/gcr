@@ -116,18 +116,43 @@ runtime_root = "/run/gcr-crio"
 The RuntimeClass is the same as above. Pods run with gcr's hardening and
 Landlock; exec, logs, resource updates, stats and OOM kills work, and
 CRI conformance passes except for port forwarding, which CRI-O does not
-implement for `vm` runtimes. Not available under CRI-O:
+implement for `vm` runtimes.
+
+**Snapshots and forks work** (`gcr snapshot`, `gcr.dev/fork-from`, and
+moving snapshots through a registry). CRI-O mounts the container's
+overlay rootfs itself; gcr reads its writable layer from that mount, and
+for a fork mounts the same overlay again with the snapshot's layers
+beneath it. A fork is restored when CRI-O creates it, since CRI-O wants
+its process then, and is held frozen until CRI-O starts it. Pods fork
+from a handler that allows it, as under containerd
+([configuration](configuration.md#podannotations)):
+
+```toml
+[crio.runtime.runtimes.gcr-forks]
+runtime_path = "/usr/local/bin/containerd-shim-gcr-v2"
+runtime_type = "vm"
+runtime_root = "/run/gcr-crio"
+runtime_config_path = "/etc/gcr/forks.toml"   # PodAnnotations, SnapshotRoots
+```
+
+Not available under CRI-O, each refused with an error that says why:
 
 - **gcr's own [user namespaces](user-namespaces.md)** (`gcr.dev/host-users=false`,
-  `UserNamespaces = 'always'`). CRI-O mounts the container's rootfs
-  itself, and gcr idmaps the layers containerd hands it. Pods with
-  `hostUsers: false` get CRI-O's user namespace, as with any runtime.
-- **Snapshots, forks, time travel and live migration.** They need gcr to
-  mount the overlay rootfs (to read and replace its writable layer, and
-  to stack snapshot layers under it). gcr refuses them with an error
-  that says so.
+  `UserNamespaces = 'always'`). gcr idmaps the layers containerd hands
+  it, and CRI-O mounts them unmapped. Pods with `hostUsers: false` get
+  CRI-O's user namespace, as with any runtime; a fork's must then map
+  the same IDs as its snapshot's.
+- **Time travel.** CRI-O knows a container by its init's pid and start
+  time, and a rewind brings in another process, so CRI-O would take the
+  container for gone.
+- **Live migration into a container CRI-O runs.** CRI-O wants the
+  container's process when it creates it, before the source has sent
+  one. Migrating out of one has not been tried.
 - **Checkpoint and restore through the CRI**, which CRI-O does not
   implement for `vm` runtimes.
+- **Restarting CRI-O** with gcr pods running: CRI-O does not reconnect to
+  the shims of its `vm` runtimes, and stopping such a pod crashes it
+  (CRI-O 1.37). Drain the node first.
 
 ## A first fork
 

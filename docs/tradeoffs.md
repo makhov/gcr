@@ -14,7 +14,7 @@ the end-to-end tests (arm64 VM, Linux 7.0, unless said otherwise).
 | --- | --- |
 | Start many sandboxes from a warm state (interpreter up, model loaded) | Yes: fork, in tens of milliseconds, sharing files and (opt-in) memory |
 | Run code from people you do not trust, next to each other | Only with care: a shared kernel, hardened; see Isolation |
-| Drop-in for runc under containerd or Kubernetes | Yes: CRI conformance passes on containerd 1.7 to 2.4; some hardening is off under Kubernetes defaults. Under CRI-O, without gcr's user namespaces and process-state features |
+| Drop-in for runc under containerd or Kubernetes | Yes: CRI conformance passes on containerd 1.7 to 2.4; some hardening is off under Kubernetes defaults. Under CRI-O, with snapshots and forks but without gcr's user namespaces, time travel or migration in |
 | Move a running sandbox to another node | Yes, with pre-copy on x86; stop-and-copy on arm64; TCP connections reset |
 | Undo what a sandbox did | Yes: time travel, for its processes and writable layer, not its volumes |
 | GPUs | Yes, NVIDIA through CDI: checkpoint, restore and fork with GPU memory, tested on one Blackwell GPU |
@@ -250,10 +250,9 @@ tests check that each refused call is refused, by return value.
 ### Platform and maturity
 
 - **Linux 6.12+ with cgroup v2, run as root;** containerd 1.7 or later.
-  Under CRI-O, gcr runs pods with its hardening, but without its user
-  namespaces or any of its process-state features (snapshots, forks,
-  time travel, migration): CRI-O mounts the rootfs itself. No rootless
-  mode.
+  Under CRI-O, gcr runs pods with its hardening, snapshots and forks,
+  but without its user namespaces, time travel or migration into a
+  CRI-O container. No rootless mode.
 - **Developed on arm64 (Linux 7.0); CI runs on x86 (Ubuntu 24.04).** The
   whole end-to-end suite also passes on an x86 GPU node (Ubuntu 24.04
   with its 7.0 HWE kernel). Other kernels and distributions have not been

@@ -40,14 +40,16 @@ func TestPodContainer(t *testing.T) {
 		annotations map[string]string
 		pod         bool
 		sandbox     string
+		isSandbox   bool
 	}{
-		{nil, false, ""},
-		{map[string]string{"io.kubernetes.cri.container-type": "container", "io.kubernetes.cri.sandbox-id": "a"}, true, "a"},
-		{map[string]string{"io.kubernetes.cri-o.ContainerType": "sandbox", "io.kubernetes.cri-o.SandboxID": "b"}, true, "b"},
+		{nil, false, "", false},
+		{map[string]string{"io.kubernetes.cri.container-type": "container", "io.kubernetes.cri.sandbox-id": "a"}, true, "a", false},
+		{map[string]string{"io.kubernetes.cri.container-type": "sandbox", "io.kubernetes.cri.sandbox-id": "a"}, true, "a", true},
+		{map[string]string{"io.kubernetes.cri-o.ContainerType": "sandbox", "io.kubernetes.cri-o.SandboxID": "b"}, true, "b", true},
 	} {
 		spec := &specs.Spec{Annotations: tc.annotations}
-		if PodContainer(spec) != tc.pod || SandboxID(spec) != tc.sandbox {
-			t.Errorf("%v: pod %v, sandbox %q", tc.annotations, PodContainer(spec), SandboxID(spec))
+		if PodContainer(spec) != tc.pod || SandboxID(spec) != tc.sandbox || Sandbox(spec) != tc.isSandbox {
+			t.Errorf("%v: pod %v, sandbox %q, is sandbox %v", tc.annotations, PodContainer(spec), SandboxID(spec), Sandbox(spec))
 		}
 	}
 }

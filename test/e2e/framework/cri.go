@@ -72,9 +72,15 @@ type Pod struct {
 	Config *cri.PodSandboxConfig
 }
 
-// RunPod runs a pod. config's metadata gets a unique UID and its log
-// directory a temporary one.
+// RunPod runs a pod with gcr's runtime handler. config's metadata gets a
+// unique UID and its log directory a temporary one.
 func (c *CRI) RunPod(config *cri.PodSandboxConfig) *Pod {
+	c.t.Helper()
+	return c.RunPodWith(RuntimeHandler, config)
+}
+
+// RunPodWith runs a pod with another runtime handler, as RunPod.
+func (c *CRI) RunPodWith(handler string, config *cri.PodSandboxConfig) *Pod {
 	c.t.Helper()
 	if config.Metadata == nil {
 		config.Metadata = &cri.PodSandboxMetadata{}
@@ -84,7 +90,7 @@ func (c *CRI) RunPod(config *cri.PodSandboxConfig) *Pod {
 	}
 	config.Metadata.Uid = UniqueID(config.Metadata.Name)
 	config.LogDirectory = c.t.TempDir()
-	resp, err := c.Runtime.RunPodSandbox(c.Ctx, &cri.RunPodSandboxRequest{Config: config, RuntimeHandler: RuntimeHandler})
+	resp, err := c.Runtime.RunPodSandbox(c.Ctx, &cri.RunPodSandboxRequest{Config: config, RuntimeHandler: handler})
 	if err != nil {
 		c.t.Fatalf("run pod: %v", err)
 	}

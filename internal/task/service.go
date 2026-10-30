@@ -178,6 +178,13 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		if err := podAnnotations(spec, cfg.PodAnnotations); err != nil {
 			return prep, err
 		}
+		if ocispec.Sandbox(spec) {
+			// Pod annotations reach the pod's sandbox too, and those
+			// for its workload are not about the pause container.
+			for _, k := range workloadAnnotations {
+				delete(spec.Annotations, k)
+			}
+		}
 		forkFrom, forkKey, err := forkSource(spec, cfg.SnapshotRoots)
 		if err != nil {
 			return prep, err
@@ -362,6 +369,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 				return prep, fmt.Errorf("time travel: %w", err)
 			}
 			ex.recorder = rec
+			prep.Rewinds = true
 			if container.MemoryTracking() {
 				// Points after the first dump only what was written.
 				criuOpts = append(criuOpts, "track-mem")
@@ -926,6 +934,14 @@ func (e *extras) coverCgroup(c *container.Container) error {
 // forkSource reads the fork annotation: the snapshot directory a new
 // container starts from, and the allocator key of the user namespace
 // range its container mapped (empty when the snapshot had none).
+// workloadAnnotations are about a pod's containers, never its sandbox.
+var workloadAnnotations = []string{
+	container.AnnotationForkFrom, container.AnnotationForkSignal,
+	container.AnnotationLazyRestore, container.AnnotationMemoryMerge,
+	migrate.AnnotationIn, migrate.AnnotationToken,
+	timetravel.AnnotationTrigger, timetravel.AnnotationInterval, timetravel.AnnotationKeep,
+}
+
 func forkSource(spec *specs.Spec, roots []string) (dir, key string, err error) {
 	dir = spec.Annotations[container.AnnotationForkFrom]
 	if dir == "" {

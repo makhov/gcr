@@ -126,6 +126,9 @@ type Prepared struct {
 	// TrackMemory makes every dump track the pages written after it, so
 	// a Point can dump only those (time travel, where the kernel can).
 	TrackMemory bool
+	// Rewinds: the container's processes may be replaced in place (time
+	// travel).
+	Rewinds bool
 	// ForkFrom, when set, is a snapshot directory (Snapshot's output) this
 	// container starts from: its processes are restored from the
 	// snapshot's images, and its writable layer is the snapshot's, which
@@ -156,10 +159,16 @@ type Container struct {
 	ID     string
 	Bundle string
 
-	namespace      string
-	cfg            *configs.Config
-	rootfs         []mount.Mount
-	layers         []string // read-only, between rootfs's upper and lower layers
+	namespace string
+	cfg       *configs.Config
+	rootfs    []mount.Mount
+	layers    []string // read-only, between rootfs's upper and lower layers
+	// rootfsDir is where rootfs is mounted: the bundle's rootfs, or where
+	// the caller mounted it (callerMounted; CRI-O does).
+	rootfsDir     string
+	callerMounted bool
+	// frozen: restored when created and frozen until Start (CRI-O).
+	frozen         bool
 	snapshots      *snapshot.Hold
 	spec           *specs.Spec
 	checkpoint     string
@@ -259,6 +268,29 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		}
 	}
 
+	// CRI-O mounts the rootfs itself and passes none. gcr then works with
+	// the overlay it mounted: its writable layer, and for a fork the same
+	// overlay mounted again with the snapshot's layers.
+	rootfsDir := filepath.Join(o.Bundle, "rootfs")
+	callerMounted := false
+	if len(o.Rootfs) == 0 && spec.Root != nil && filepath.IsAbs(spec.Root.Path) {
+		if m := callerRootfs(spec.Root.Path); m != nil {
+			if prep.IDMap != "" {
+				// Its layers would have to be idmapped, and its writable
+				// layer given to the mapped root.
+				return nil, errRootfs("gcr's user namespaces")
+			}
+			if prep.Rewinds {
+				// CRI-O knows the container by its init's pid and start
+				// time, and a rewind brings another: CRI-O would take
+				// the container for gone.
+				return nil, fmt.Errorf("time travel in a container CRI-O runs: a rewind replaces the process "+
+					"CRI-O tracks the container by: %w", errdefs.ErrNotImplemented)
+			}
+			o.Rootfs, rootfsDir, callerMounted = m, spec.Root.Path, true
+		}
+	}
+
 	// The snapshots the layers are from must not go while the container
 	// mounts them.
 	hold, err := snapshot.Acquire(o.Namespace, o.ID, prep.Layers)
@@ -290,8 +322,17 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 			return nil, fmt.Errorf("fork: %w", err)
 		}
 	}
-	rootfs := filepath.Join(o.Bundle, "rootfs")
-	if len(o.Rootfs) > 0 {
+	rootfs := rootfsDir
+	if callerMounted && len(prep.Layers) > 0 {
+		if err := remountCaller(o.Rootfs, rootfs, prep.Layers); err != nil {
+			return nil, fmt.Errorf("mount rootfs: %w", err)
+		}
+		defer func() {
+			if retErr != nil {
+				_ = remountCaller(o.Rootfs, rootfs, nil)
+			}
+		}()
+	} else if len(o.Rootfs) > 0 && !callerMounted {
 		if err := os.MkdirAll(rootfs, 0o711); err != nil {
 			return nil, err
 		}
@@ -366,6 +407,8 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		cfg:            cfg,
 		rootfs:         o.Rootfs,
 		layers:         prep.Layers,
+		rootfsDir:      rootfsDir,
+		callerMounted:  callerMounted,
 		snapshots:      hold,
 		lc:             lc,
 		spec:           spec,
@@ -390,7 +433,26 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		onOOM:          o.OnOOM,
 	}
 	if o.Checkpoint != "" || prep.CheckpointFrom != nil {
-		// Restore happens in Start, the way containerd expects.
+		if !callerMounted {
+			// Restore happens in Start, the way containerd expects.
+			return c, nil
+		}
+		// CRI-O records the init's pid when it creates a container, and
+		// reads /proc for it at once: it gets the restored one, frozen
+		// until Start.
+		if prep.CheckpointFrom != nil {
+			return nil, fmt.Errorf("live migration into a container CRI-O runs: CRI-O needs the container's "+
+				"process when it creates it, before the source has sent one: %w", errdefs.ErrNotImplemented)
+		}
+		if err := c.restore(c.checkpoint); err != nil {
+			return nil, err
+		}
+		if err := c.lc.Pause(); err != nil {
+			_ = c.lc.Signal(unix.SIGKILL)
+			<-c.exited
+			return nil, fmt.Errorf("freeze restored container: %w", err)
+		}
+		c.frozen = true
 		return c, nil
 	}
 
@@ -427,15 +489,23 @@ func (c *Container) Start(ctx context.Context) error {
 		}
 		c.checkpoint = dir
 	}
-	if c.checkpoint == "" {
+	switch {
+	case c.frozen:
+		// Restored when created (callerMounted).
+		if err := c.lc.Resume(); err != nil {
+			return fmt.Errorf("thaw restored container: %w", err)
+		}
+		c.frozen = false
+	case c.checkpoint == "":
 		if err := c.lc.Exec(); err != nil {
 			return fmt.Errorf("exec: %w", err)
 		}
 		c.setStatus(Running)
 		return nil
-	}
-	if err := c.restore(c.checkpoint); err != nil {
-		return err
+	default:
+		if err := c.restore(c.checkpoint); err != nil {
+			return err
+		}
 	}
 	c.setStatus(Running)
 	c.watchOOM()
@@ -740,9 +810,14 @@ func (c *Container) replace(upper, dir string) error {
 	if err := c.lc.Destroy(); err != nil {
 		return fmt.Errorf("destroy old container: %w", err)
 	}
-	rootfs := filepath.Join(c.Bundle, "rootfs")
+	rootfs := c.rootfsDir
 	if err := mount.UnmountRecursive(rootfs, 0); err != nil {
 		return fmt.Errorf("unmount rootfs: %w", err)
+	}
+	if c.callerMounted {
+		if err := clearVolatile(c.rootfs); err != nil {
+			return err
+		}
 	}
 	if err := emptyDir(upper); err != nil {
 		return fmt.Errorf("clear writable layer: %w", err)
@@ -759,6 +834,65 @@ func (c *Container) replace(upper, dir string) error {
 	}
 	c.lc = lc
 	return c.restore(filepath.Join(dir, "images"))
+}
+
+// remountCaller mounts the overlay its caller mounted at dir again, with
+// layers between its writable layer and the image's (none: as the caller
+// had it).
+func remountCaller(mounts []mount.Mount, dir string, layers []string) error {
+	if err := unix.Unmount(dir, 0); err != nil {
+		return fmt.Errorf("unmount %s: %w", dir, err)
+	}
+	if err := clearVolatile(mounts); err != nil {
+		return err
+	}
+	if err := mountRootfs(mounts, dir, layers); err != nil {
+		if len(layers) > 0 {
+			_ = mountRootfs(mounts, dir, nil)
+		}
+		return err
+	}
+	return nil
+}
+
+// clearVolatile lets a volatile overlay (CRI-O mounts them so) be mounted
+// again. Its work directory keeps a mark that the kernel refuses to mount
+// over: after a crash the writable layer may be inconsistent, and whoever
+// mounts it must say it is not. An overlay just unmounted cleanly is not,
+// so the mark goes, as containers/storage removes it too.
+func clearVolatile(mounts []mount.Mount) error {
+	var work string
+	volatile := false
+	for _, o := range mounts[0].Options {
+		if v, ok := strings.CutPrefix(o, "workdir="); ok {
+			work = v
+		} else if o == "volatile" || o == "fsync=volatile" {
+			volatile = true
+		}
+	}
+	if !volatile || work == "" {
+		return nil
+	}
+	// The kernel's own directory, under the work directory only the
+	// kernel writes.
+	if err := os.RemoveAll(filepath.Join(work, "work", "incompat", "volatile")); err != nil {
+		return fmt.Errorf("clear volatile overlay mark: %w", err)
+	}
+	return nil
+}
+
+// unmountRootfs undoes what gcr mounted for the rootfs. Where the caller
+// mounted it, the caller unmounts it: gcr puts back the caller's own
+// mount if it mounted another there, and nothing if the caller has
+// unmounted it already (CRI-O does when the container stops).
+func (c *Container) unmountRootfs() error {
+	if !c.callerMounted {
+		return mount.UnmountRecursive(c.rootfsDir, 0)
+	}
+	if len(c.layers) == 0 || callerRootfs(c.rootfsDir) == nil {
+		return nil
+	}
+	return remountCaller(c.rootfs, c.rootfsDir, nil)
 }
 
 // SetMigrating marks the container as being migrated out (true) or not.
@@ -1072,7 +1206,7 @@ func (c *Container) Delete(ctx context.Context) error {
 	if err := c.lc.Destroy(); err != nil {
 		errs = append(errs, err)
 	}
-	if err := mount.UnmountRecursive(filepath.Join(c.Bundle, "rootfs"), 0); err != nil {
+	if err := c.unmountRootfs(); err != nil {
 		errs = append(errs, err)
 	} else {
 		// Kept while a layer may still be mounted.
@@ -1332,8 +1466,9 @@ var rlimits = map[string]int{
 }
 
 // errRootfs says that what needs gcr to mount the container's overlay
-// rootfs cannot have it: the caller passed none (CRI-O mounts the rootfs
-// itself), or one of another kind.
+// rootfs cannot have it: the caller mounted it (CRI-O does; snapshots and
+// forks work with the overlay it mounted, user namespaces do not), or it
+// is not an overlay.
 func errRootfs(what string) error {
 	return fmt.Errorf("%s need the rootfs as overlay mounts from containerd, which gcr mounts itself; "+
 		"this container's was mounted by its caller (CRI-O does): %w", what, errdefs.ErrNotImplemented)
