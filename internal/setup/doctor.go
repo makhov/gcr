@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -67,8 +68,13 @@ func Doctor() []Check {
 	}
 
 	// The runtime.
-	if path, err := exec.LookPath(payload.Shim); err != nil {
-		add("shim", Missing, "not in PATH", "gcr setup")
+	// Where the registration names it (setup -bin-dir), or on PATH.
+	path := registeredShim()
+	if path == "" {
+		path, _ = exec.LookPath(payload.Shim)
+	}
+	if path == "" {
+		add("shim", Missing, "not registered or in PATH", "gcr setup")
 	} else {
 		v, _ := exec.Command(path, "-v").Output()
 		add("shim", OK, path+" "+field(string(v), "Version:"), "")
@@ -182,6 +188,24 @@ func Doctor() []Check {
 		}
 	}
 	return cs
+}
+
+var runtimePath = regexp.MustCompile(`(?m)^\s*runtime_path\s*=\s*['"]([^'"]+)['"]`)
+
+// registeredShim is the shim gcr setup's drop-in names, if it exists.
+func registeredShim() string {
+	for _, f := range []string{"/etc/containerd/conf.d/gcr.toml", filepath.Join(filepath.Dir(k0sConfig), "containerd.d", "gcr.toml")} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		if m := runtimePath.FindSubmatch(b); m != nil {
+			if _, err := os.Stat(string(m[1])); err == nil {
+				return string(m[1])
+			}
+		}
+	}
+	return ""
 }
 
 // registered says whether containerd's configuration names the runtime.
