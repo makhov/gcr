@@ -88,7 +88,7 @@ release:
 # Publishes dist/ as a GitHub release for VERSION (a tag), as a draft to
 # look over before it is public.
 release-publish:
-	gh release create $(VERSION) dist/gcr-* dist/SHA256SUMS --draft --title $(VERSION) --generate-notes
+	gh release create $(VERSION) dist/gcr-* dist/gcr.yaml dist/SHA256SUMS --draft --title $(VERSION) --generate-notes
 
 # The installer image (deploy/), from a release in dist/, for the
 # architectures it has: PUSH=1 pushes it.

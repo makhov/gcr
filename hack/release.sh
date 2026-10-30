@@ -1,7 +1,8 @@
 #!/bin/bash
 # Builds a release into dist/: for each architecture one file,
 # gcr-VERSION-linux-ARCH, the gcr command carrying the shim, gcr's CRIU and
-# CRIU's CUDA plugin (internal/payload) for `gcr setup` to install; and
+# CRIU's CUDA plugin (internal/payload) for `gcr setup` to install;
+# gcr.yaml, the installer DaemonSet with this release's image; and
 # SHA256SUMS. The Go binaries are static; CRIU, built in an Ubuntu 22.04
 # container (hack/criu-build.sh), needs glibc 2.35 or later. Runs on a
 # Linux host with Docker that can build Go with cgo for each architecture
@@ -60,4 +61,6 @@ for arch in "$@"; do
 	done
 	gobuild "$arch" "dist/gcr-$VERSION-linux-$arch" ./cmd/gcr gcr_payload
 done
-(cd dist && sha256sum gcr-* >SHA256SUMS)
+# The installer DaemonSet for this release's image.
+sed "s#image: ghcr.io/makhov/gcr:.*#image: ghcr.io/makhov/gcr:$VERSION#" deploy/gcr.yaml >dist/gcr.yaml
+(cd dist && sha256sum gcr-* gcr.yaml >SHA256SUMS)
