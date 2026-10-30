@@ -13,6 +13,23 @@ ctr run -d --runtime io.containerd.gcr.v2 \
   --annotation gcr.dev/fork-from=/var/lib/gcr/snapshots/warm IMAGE fork-1 CMD
 ```
 
+## What you can do with it
+
+- **Give an agent undo.** Run each command in a sandbox after a point on
+  its timeline, and take any of them back: files, processes and their
+  memory. A dropped database comes back with its rows.
+- **Let an agent branch.** Fork its sandbox, running services and all,
+  try several approaches at once, keep the one that worked. A fork holds
+  only the memory it touches.
+- **Start warm.** Fork new containers from a snapshot of one that has
+  already loaded its model or interpreter, on this node or, through a
+  registry, on any other, reading only what each touches.
+- **Move what cannot restart.** Migrate a running container to another
+  node with a downtime that does not grow with its memory.
+
+[`examples/agent-sandbox`](examples/agent-sandbox) does the first two
+through Docker, with a small Python helper and nothing else.
+
 ## What it does
 
 - **Fork.** Start new containers from a snapshot of a running one, with
@@ -22,10 +39,10 @@ ctr run -d --runtime io.containerd.gcr.v2 \
 - **Snapshots between hosts** through any OCI registry, including ones
   backed by S3. [Moving snapshots](docs/snapshot-registry.md)
 - **Time travel.** A point on the container's timeline at every `exec`,
-  incremental where the kernel tracks dirty pages, and a rewind to any of
-  them in place. [Time travel](docs/time-travel.md)
-- **Live migration** to another host, with pre-copy where the kernel
-  tracks dirty memory, optionally over mutual TLS.
+  or on request, incremental where the kernel tracks dirty pages, and a
+  rewind to any of them in place. [Time travel](docs/time-travel.md)
+- **Live migration** to another host, pre-copy where the kernel tracks
+  dirty memory, or post-copy, optionally over mutual TLS.
   [Live migration](docs/migration.md)
 - **GPUs.** NVIDIA GPUs through CDI, with CUDA state in checkpoints and
   forks. [GPUs](docs/gpus.md)
@@ -36,7 +53,8 @@ ctr run -d --runtime io.containerd.gcr.v2 \
   [User namespaces](docs/user-namespaces.md), [hardening](docs/hardening.md)
 - **A drop-in runtime** for containerd 1.7 to 2.4 and Kubernetes: the
   whole task API, CRI conformance. CRI-O runs it too, with snapshots and
-  forks but without time travel or migration.
+  forks but without time travel or migration, and so does Docker
+  (`docker run --runtime gcr`). [Docker](docs/docker.md)
 
 Not yet: the NVIDIA ioctl proxy, restoring onto another GPU index,
 SELinux labels for supervised mounts, a Kubernetes operator.
