@@ -51,6 +51,11 @@ func PodContainer(spec *specs.Spec) bool {
 	return firstAnnotation(spec, containerTypeAnnotations) != ""
 }
 
+// Sandbox says whether spec is a pod's sandbox (its pause container).
+func Sandbox(spec *specs.Spec) bool {
+	return firstAnnotation(spec, containerTypeAnnotations) == "sandbox"
+}
+
 // SandboxID is the pod a container belongs to, "" outside one.
 func SandboxID(spec *specs.Spec) string {
 	return firstAnnotation(spec, sandboxIDAnnotations)

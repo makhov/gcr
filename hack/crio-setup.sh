@@ -34,9 +34,22 @@ monitor_path = "/opt/crio/bin/conmon"
 runtime_path = "$(command -v containerd-shim-gcr-v2)"
 runtime_type = "vm"
 runtime_root = "/run/gcr-crio"
+# Pods may fork from snapshots under /var/lib/gcr/snapshots.
+[crio.runtime.runtimes.gcr-forks]
+runtime_path = "$(command -v containerd-shim-gcr-v2)"
+runtime_type = "vm"
+runtime_root = "/run/gcr-crio"
+runtime_config_path = "/etc/gcr/crio-forks.toml"
 [crio.network]
 network_dir = "/etc/cni/net.d/"
 plugin_dirs = ["/opt/cni/bin/"]
+CONF
+
+mkdir -p /etc/gcr /var/lib/gcr/snapshots
+chmod 755 /var/lib/gcr /var/lib/gcr/snapshots
+cat >/etc/gcr/crio-forks.toml <<CONF
+PodAnnotations = ['gcr.dev/fork-from']
+SnapshotRoots = ['/var/lib/gcr/snapshots']
 CONF
 
 systemctl stop crio-gcr 2>/dev/null || true

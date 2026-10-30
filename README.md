@@ -35,8 +35,8 @@ ctr run -d --runtime io.containerd.gcr.v2 \
   root. Docker-in-Docker runs unprivileged.
   [User namespaces](docs/user-namespaces.md), [hardening](docs/hardening.md)
 - **A drop-in runtime** for containerd 1.7 to 2.4 and Kubernetes: the
-  whole task API, CRI conformance. CRI-O runs it too, without the
-  features that move process state.
+  whole task API, CRI conformance. CRI-O runs it too, with snapshots and
+  forks but without time travel or migration.
 
 Not yet: the NVIDIA ioctl proxy, restoring onto another GPU index,
 SELinux labels for supervised mounts, a Kubernetes operator.
