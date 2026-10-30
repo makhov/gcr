@@ -6,11 +6,11 @@ VM  := gcr
 # Run a command in the dev VM, in the same directory as here.
 IN_VM = limactl shell --workdir $(CURDIR) $(VM) --
 
-.PHONY: build static install vet test test-e2e test-k8s vm criu bpf
+.PHONY: build static install vet test test-e2e test-k8s vm criu bpf release release-publish
 
 build:
-	CGO_ENABLED=1 go build -tags $(TAGS) -o $(BIN) ./cmd/containerd-shim-gcr-v2
-	CGO_ENABLED=1 go build -tags $(TAGS) -o $(CLI) ./cmd/gcr
+	CGO_ENABLED=1 go build -tags $(TAGS) -ldflags '$(VERSION_LDFLAGS)' -o $(BIN) ./cmd/containerd-shim-gcr-v2
+	CGO_ENABLED=1 go build -tags $(TAGS) -ldflags '$(VERSION_LDFLAGS)' -o $(CLI) ./cmd/gcr
 
 # Static binaries, for nodes without glibc (k0s's image is Alpine).
 STATIC_LDFLAGS := -linkmode external -extldflags "-static"
@@ -66,3 +66,23 @@ test-k8s: static
 # From macOS: run any target inside the VM, e.g. `make vm T=test-e2e`.
 vm:
 	$(IN_VM) make $(T)
+
+# Release archives (hack/release.sh): static binaries of the shim, gcr and
+# CRIU (from CRIU_SRC) for each architecture, built on a Linux host that
+# can cross-compile with cgo, such as the dev VM: `make vm T=release`
+# (docs/development.md#releases). The version is the git tag, or a
+# describe of the commit.
+VERSION ?= $(shell git describe --tags --always --dirty)
+RELEASE_ARCHES ?= amd64 arm64
+# containerd's own version variables: `containerd-shim-gcr-v2 -v` and
+# `gcr version` print them.
+VERSION_LDFLAGS := -X github.com/containerd/containerd/v2/version.Version=$(VERSION) \
+	-X github.com/containerd/containerd/v2/version.Revision=$(shell git rev-parse HEAD)
+release:
+	VERSION=$(VERSION) CRIU_SRC=$(CRIU_SRC) hack/release.sh $(RELEASE_ARCHES)
+
+# Publishes dist/ as a GitHub release for VERSION (a tag), as a draft to
+# look over before it is public.
+release-publish:
+	gh release create $(VERSION) dist/*.tar.gz dist/SHA256SUMS --draft --title $(VERSION) --generate-notes
+
