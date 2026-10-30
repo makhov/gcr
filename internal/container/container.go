@@ -648,7 +648,7 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 	err = c.lc.Restore(proc, opts)
 	if err != nil {
 		c.io.detach() // restore requires pipes, never a terminal
-		return fmt.Errorf("restore (criu log in %s): %w", work, err)
+		return fmt.Errorf("restore (criu log in %s): %w%s", work, err, criuErrors(filepath.Join(work, "restore.log")))
 	}
 	if freshNetwork {
 		pid, err := proc.Pid()
@@ -703,7 +703,7 @@ func (c *Container) Checkpoint(ctx context.Context, opts CheckpointOpts) error {
 		FileLocks:               opts.FileLocks,
 	})
 	if err != nil {
-		return fmt.Errorf("checkpoint (criu log in %s): %w", work, err)
+		return fmt.Errorf("checkpoint (criu log in %s): %w%s", work, err, criuErrors(filepath.Join(work, "dump.log")))
 	}
 	if err := c.saveGPU(opts.ImagePath); err != nil {
 		return err
@@ -819,7 +819,7 @@ func (c *Container) snapshot(ctx context.Context, dir, parent string) (retErr er
 	}
 	err = c.lc.Checkpoint(opts)
 	if err != nil {
-		return fmt.Errorf("checkpoint (criu log in %s): %w", work, err)
+		return fmt.Errorf("checkpoint (criu log in %s): %w%s", work, err, criuErrors(filepath.Join(work, "dump.log")))
 	}
 	if err := c.saveRange(dir); err != nil {
 		return err
