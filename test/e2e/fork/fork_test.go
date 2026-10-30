@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -58,6 +59,73 @@ func withLazyRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.WriteFile(knob, old, 0o644) })
+}
+
+// TestSnapshotOfLazyFork snapshots a fork whose memory is still being
+// filled on demand, and forks that: the memory the lazy fork never
+// touched must be in its snapshot too, which the second fork checks as it
+// reads its pattern back from pages all over the chunk.
+func TestSnapshotOfLazyFork(t *testing.T) {
+	withLazyRestore(t)
+	const mib = "256"
+	ns := framework.NewNamespace(t, "gcr-e2e")
+	hog := framework.BuildStatic(t, "hog")
+	spec := func(annotations map[string]string) framework.Spec {
+		return framework.Spec{
+			Args:        []string{"/hog", mib},
+			Mounts:      []specs.Mount{framework.BindRO(hog, "/hog")},
+			Annotations: annotations,
+		}
+	}
+	parent := ns.Run(framework.UniqueID("hog"), spec(nil))
+	framework.Eventually(t, 2*time.Minute, "the parent to fill its memory", func() bool {
+		s, _ := parent.ReadFile("/tmp/ready")
+		return s == mib
+	})
+	tmp := framework.TempDir(t)
+	first := filepath.Join(tmp, "first")
+	if err := control.NewClient(ns.Name, parent.ID).Snapshot(t.Context(), first); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	a := ns.Run(framework.UniqueID("lazy"), spec(map[string]string{
+		container.AnnotationForkFrom:    first,
+		container.AnnotationLazyRestore: "true",
+	}))
+	framework.Eventually(t, time.Minute, "the lazy fork to count", func() bool {
+		n, err := strconv.Atoi(func() string { s, _ := a.ReadFile("/tmp/count"); return s }())
+		return err == nil && n > 0
+	})
+	second := filepath.Join(tmp, "second")
+	if err := control.NewClient(ns.Name, a.ID).Snapshot(t.Context(), second); err != nil {
+		t.Fatalf("snapshot of the lazy fork: %v", err)
+	}
+	b := ns.Run(framework.UniqueID("fork"), spec(map[string]string{container.AnnotationForkFrom: second}))
+	start := b.ReadInt("/tmp/count")
+	framework.Eventually(t, time.Minute, "the fork of the lazy fork to read 25 pages", func() bool {
+		s, _ := b.ReadFile("/tmp/count")
+		if strings.HasPrefix(s, "corrupt") {
+			t.Fatalf("the fork of a lazy fork read back wrong memory: %s", s)
+		}
+		n, err := strconv.Atoi(s)
+		return err == nil && n >= start+25
+	})
+}
+
+// residentMiB is the resident memory of pid.
+func residentMiB(t *testing.T, pid int) int {
+	t.Helper()
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(l, "VmRSS:"); ok {
+			kb, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimSpace(v), " kB"))
+			return kb >> 10
+		}
+	}
+	t.Fatalf("no VmRSS for pid %d", pid)
+	return 0
 }
 
 // TestForkLazy forks with memory filled on demand: a criu lazy-pages
@@ -120,6 +188,23 @@ func TestForkLatency(t *testing.T) {
 				return err == nil && n > 0
 			})
 			t.Logf("%s fork of %s MiB: start %s, counting at %d", name, mib, started.Round(time.Millisecond), count)
+			if !lazy {
+				return
+			}
+			// With a CRIU that copies pages only on faults, the fork
+			// holds what it touched (a page each count), not the
+			// snapshot's memory.
+			out, _ := exec.Command("criu", "--help").CombinedOutput()
+			if !strings.Contains(string(out), "--lazy-pages-on-demand") {
+				t.Log("criu copies the rest of the memory in the background (no --lazy-pages-on-demand)")
+				return
+			}
+			time.Sleep(3 * time.Second)
+			rss := residentMiB(t, int(c.Task.Pid()))
+			t.Logf("lazy fork resident after 3s: %d MiB", rss)
+			if limit, _ := strconv.Atoi(mib); rss > limit/4 {
+				t.Fatalf("the lazy fork holds %d MiB of the snapshot's %s: pages were copied it did not touch", rss, mib)
+			}
 		})
 	}
 }

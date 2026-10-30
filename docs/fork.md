@@ -102,10 +102,32 @@ ctr run -d --runtime io.containerd.gcr.v2 \
 
 A fork of a snapshot holding 384 MiB of touched memory takes 175 ms to
 start this way against 459 ms eagerly, and the gap grows with the
-snapshot. What it costs: the daemon has to outlive the restore, and a
-container whose daemon dies before it has touched every page gets SIGBUS
-on the next one (gcr logs that the daemon stopped early). Each page is
-still a fork's own copy once it arrives; see below for sharing them.
+snapshot.
+
+**A fork holds only what it touches.** With gcr's CRIU
+([makhov/criu](https://github.com/makhov/criu), `--lazy-pages-on-demand`),
+the daemon of a fork copies in only the pages the fork touches, for as
+long as it runs, and gcr stops it when the fork is deleted. A fork of a 1
+GiB Python process runs with 8 MiB resident, and still does seconds later;
+an eager fork, or a lazy one with upstream CRIU (whose daemon copies the
+rest in the background), holds the whole gigabyte. Ten forks of one
+snapshot then cost ten times what each touched, not ten times the
+snapshot. Restores from a checkpoint keep the background copy: their
+images may not outlive the restore, while a fork holds its snapshot.
+
+- **Dumps fill the memory first.** A snapshot, a checkpoint, a time
+  travel point or a migration of a container whose memory is still being
+  filled first has its daemon copy in the rest, and waits: CRIU would
+  take a page nobody copied in for one never written, and leave it out.
+  So the first snapshot of a lazy fork costs reading the rest of its
+  memory.
+- **The daemon must outlive the container's use of its pages.** A
+  container whose daemon dies gets SIGBUS on the next page it had not
+  touched (gcr logs that the daemon stopped early). With on-demand
+  pages, that is for the container's lifetime.
+
+Each page is still a fork's own copy once it arrives; see below for
+sharing them.
 
 **The node has to allow it.** The restored tasks open the userfaultfd
 themselves, from inside the container's user namespace, and the kernel

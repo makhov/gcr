@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -220,6 +221,13 @@ type Container struct {
 	// lazyPages restores memory on demand, through a criu lazy-pages
 	// daemon this container starts for each restore.
 	lazyPages bool
+	// forkImages are the images of the snapshot a fork restores, which
+	// stay while it runs (it holds the snapshot): their lazy-pages daemon
+	// serves only the pages the fork touches, for as long as it runs.
+	forkImages string
+	// lazyDaemon fills the container's memory, until it has (or, on
+	// demand, for as long as the container runs); nil once it has.
+	lazyDaemon *lazyDaemon
 	// memoryMerge runs criu with memory merging on, which the tasks it
 	// restores inherit.
 	memoryMerge bool
@@ -456,6 +464,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		ioOwner:        max(prep.IDMapRoot, prep.IOOwner),
 		cgroupOwner:    prep.CgroupOwner,
 		lazyPages:      prep.LazyPages,
+		forkImages:     forkImages(prep),
 		memoryMerge:    prep.MemoryMerge,
 		tracking:       prep.TrackMemory,
 		forkSignal:     prep.ForkSignal,
@@ -598,15 +607,19 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 	if err != nil {
 		return err
 	}
+	keepWork := false // the log of a lazy-pages daemon that runs on
 	if c.lazyPages {
 		// Must be serving before the restore asks it for a page, and it
 		// keeps going afterwards: the container faults pages in as it
-		// runs, and the daemon exits once it has sent the last one.
-		stop, err := startLazyPages(images, work)
+		// runs. It exits once it has sent the last one, or, serving only
+		// faults (a fork), when the container is deleted.
+		onDemand := images == c.forkImages && lazyPagesOnDemand()
+		d, err := startLazyPages(images, work, onDemand)
 		if err != nil {
 			return err
 		}
-		defer stop()
+		c.lazyDaemon.stop()
+		c.lazyDaemon, keepWork = d, onDemand
 	}
 	opts := &libcontainer.CriuOpts{
 		ImagesDirectory: images,
@@ -632,7 +645,9 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 			return fmt.Errorf("restore: %w", err)
 		}
 	}
-	_ = os.RemoveAll(work)
+	if !keepWork {
+		_ = os.RemoveAll(work)
+	}
 	// libcontainer leaves a restored container in a state that refuses
 	// pause and checkpoint; loading it from disk gives the running state,
 	// as a later runc command would see it.
@@ -651,6 +666,9 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 func (c *Container) Checkpoint(ctx context.Context, opts CheckpointOpts) error {
 	c.op.Lock()
 	defer c.op.Unlock()
+	if err := c.fillMemory(); err != nil {
+		return err
+	}
 	c.trackedSince = ""
 	if c.gpuError != nil {
 		return fmt.Errorf("checkpoint: %w", c.gpuError)
@@ -726,6 +744,9 @@ var MemoryTracking = sync.OnceValue(func() bool {
 func (c *Container) snapshot(ctx context.Context, dir, parent string) (retErr error) {
 	c.op.Lock()
 	defer c.op.Unlock()
+	if err := c.fillMemory(); err != nil {
+		return err
+	}
 	// Pages written since parent are known only if it was the last dump:
 	// any other (a snapshot, a checkpoint, a migration's) or a restore
 	// started tracking afresh.
@@ -887,6 +908,9 @@ func (c *Container) Rewind(ctx context.Context, dir string) error {
 }
 
 func (c *Container) replace(upper, dir string) error {
+	// Its pages are the old processes'.
+	c.lazyDaemon.stop()
+	c.lazyDaemon = nil
 	if err := c.lc.Destroy(); err != nil {
 		return fmt.Errorf("destroy old container: %w", err)
 	}
@@ -1055,6 +1079,9 @@ func (c *Container) PreDump(ctx context.Context, dir, parent, host string, port 
 	if !c.CanPreDump() {
 		return fmt.Errorf("pre-dump of a container with GPUs: %w", errdefs.ErrNotImplemented)
 	}
+	if err := c.fillMemory(); err != nil {
+		return err
+	}
 	return c.dump(dir, parent, host, port, true)
 }
 
@@ -1065,6 +1092,9 @@ func (c *Container) FreezeDump(ctx context.Context, dir, parent, host string, po
 	defer c.op.Unlock()
 	if c.gpuError != nil {
 		return fmt.Errorf("checkpoint: %w", c.gpuError)
+	}
+	if err := c.fillMemory(); err != nil {
+		return err
 	}
 	if err := c.lc.Pause(); err != nil {
 		return fmt.Errorf("freeze: %w", err)
@@ -1109,19 +1139,94 @@ func LazyPagesAvailable() bool {
 	return err == nil && strings.TrimSpace(string(b)) == "1"
 }
 
+// forkImages are the images a fork restores, "" for other containers.
+func forkImages(prep Prepared) string {
+	if prep.ForkFrom == "" {
+		return ""
+	}
+	return filepath.Join(prep.ForkFrom, "images")
+}
+
+// lazyPagesOnDemand says whether criu's lazy-pages daemon can serve only
+// faults (makhov/criu: --lazy-pages-on-demand).
+var lazyPagesOnDemand = sync.OnceValue(func() bool {
+	out, _ := exec.Command("criu", "--help").CombinedOutput()
+	return strings.Contains(string(out), "--lazy-pages-on-demand")
+})
+
+// lazyDaemon is a criu lazy-pages daemon.
+type lazyDaemon struct {
+	cmd      *exec.Cmd
+	onDemand bool
+	done     chan struct{}
+	err      error // how it exited, once done
+	stopping atomic.Bool
+}
+
+// drain has the daemon copy the pages it has not, and waits until it has
+// and exited. A daemon serving faults only is asked to (SIGUSR1); one
+// that copies in the background is let finish.
+func (d *lazyDaemon) drain(timeout time.Duration) error {
+	if d.onDemand {
+		if err := d.cmd.Process.Signal(unix.SIGUSR1); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+	}
+	select {
+	case <-d.done:
+		return d.err
+	case <-time.After(timeout):
+		return fmt.Errorf("lazy pages: not done after %s", timeout)
+	}
+}
+
+// fillMemory has the container's lazy-pages daemon copy in the pages the
+// container has not touched, and waits until it has. A dump must come
+// after: CRIU takes a page nobody copied in for one never written, and
+// leaves it out.
+func (c *Container) fillMemory() error {
+	if c.lazyDaemon == nil {
+		return nil
+	}
+	if err := c.lazyDaemon.drain(10 * time.Minute); err != nil {
+		return fmt.Errorf("fill the container's memory before dumping it: %w", err)
+	}
+	c.lazyDaemon = nil
+	return nil
+}
+
+// stop stops the daemon, if it still runs; nil does nothing.
+func (d *lazyDaemon) stop() {
+	if d == nil {
+		return
+	}
+	d.stopping.Store(true)
+	_ = d.cmd.Process.Signal(unix.SIGTERM)
+	select {
+	case <-d.done:
+	case <-time.After(2 * time.Second):
+		_ = d.cmd.Process.Kill()
+		<-d.done
+	}
+}
+
 // startLazyPages runs a criu lazy-pages daemon that serves the images'
-// pages to a restore, and returns a function that stops waiting on it.
-// Both sides find each other through a socket named relative to the work
-// directory, so they must share one. The returned function does not kill
-// the daemon: it has to outlive the restore, until the container has
-// touched every page it needs.
-func startLazyPages(images, work string) (func(), error) {
+// pages to a restore. Both sides find each other through a socket named
+// relative to the work directory, so they must share one. The daemon
+// outlives the restore: it copies the pages the restored processes do not
+// touch in the background, and exits once it has sent the last; or, with
+// onDemand, it copies none, and runs until stopped or drained.
+func startLazyPages(images, work string, onDemand bool) (*lazyDaemon, error) {
 	ready, signal, err := os.Pipe()
 	if err != nil {
 		return nil, err
 	}
 	defer signal.Close()
-	cmd := exec.Command("criu", "lazy-pages", "--images-dir", images, "--work-dir", work, "--status-fd", "3")
+	args := []string{"lazy-pages", "--images-dir", images, "--work-dir", work, "--status-fd", "3"}
+	if onDemand {
+		args = append(args, "--lazy-pages-on-demand")
+	}
+	cmd := exec.Command("criu", args...)
 	cmd.ExtraFiles = []*os.File{signal}
 	cmd.Stderr = nil
 	if err := cmd.Start(); err != nil {
@@ -1139,22 +1244,18 @@ func startLazyPages(images, work string) (func(), error) {
 		return nil, fmt.Errorf("lazy pages: not serving: %w%s", err, criuErrors(filepath.Join(work, "lazy-pages.log")))
 	}
 	ready.Close()
-	done := make(chan struct{})
+	d := &lazyDaemon{cmd: cmd, onDemand: onDemand, done: make(chan struct{})}
 	go func() {
-		defer close(done)
-		if err := cmd.Wait(); err != nil {
+		defer close(d.done)
+		d.err = cmd.Wait()
+		if err := d.err; err != nil && !d.stopping.Load() {
 			// The container is left with pages nobody will send it; it
 			// gets SIGBUS when it touches one.
 			log.G(context.Background()).WithError(err).
 				WithField("log", filepath.Join(work, "lazy-pages.log")).Error("lazy pages daemon stopped early")
 		}
 	}()
-	return func() {
-		select {
-		case <-done:
-		default:
-		}
-	}, nil
+	return d, nil
 }
 
 // criuErrors returns the error lines of a CRIU log, for error messages.
@@ -1432,6 +1533,8 @@ func (c *Container) Delete(ctx context.Context) error {
 	if err := c.lc.Destroy(); err != nil {
 		errs = append(errs, err)
 	}
+	c.lazyDaemon.stop()
+	c.lazyDaemon = nil
 	if err := c.unmountRootfs(); err != nil {
 		errs = append(errs, err)
 	} else {
