@@ -35,7 +35,7 @@ func TestControlRoundTrip(t *testing.T) {
 	tl := &fakeTimeline{}
 	srv, err := Serve(ctx, "ns", "c1", Handlers{
 		Timeline: tl,
-		Migrate: func(ctx context.Context, target, token string) (migrate.Result, error) {
+		Migrate: func(ctx context.Context, target, token string, opts migrate.Options) (migrate.Result, error) {
 			if token != "t" {
 				return migrate.Result{}, errors.New("bad token")
 			}
@@ -58,11 +58,11 @@ func TestControlRoundTrip(t *testing.T) {
 	if err := c.Rewind(ctx, 8); err == nil {
 		t.Fatal("rewind to a missing point succeeded")
 	}
-	res, err := c.Migrate(ctx, "http://target", "t")
+	res, err := c.Migrate(ctx, "http://target", "t", migrate.Options{})
 	if err != nil || res.Downtime != 42*time.Millisecond {
 		t.Fatalf("migrate %+v, %v", res, err)
 	}
-	if _, err := c.Migrate(ctx, "http://target", "x"); err == nil || !strings.Contains(err.Error(), "bad token") {
+	if _, err := c.Migrate(ctx, "http://target", "x", migrate.Options{}); err == nil || !strings.Contains(err.Error(), "bad token") {
 		t.Fatalf("migrate error not passed through: %v", err)
 	}
 }

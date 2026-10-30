@@ -14,7 +14,7 @@ gcr snapshot-users DIR
 gcr snapshot-rm DIR...
 gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF
 gcr snapshot-pull [-plain-http] [-store DIR] [-lazy] REF DIR
-gcr [-n namespace] migrate [-token TOKEN] ID TARGET-URL
+gcr [-n namespace] migrate [-token TOKEN] [-post-copy] ID TARGET-URL
 ```
 
 Errors go to standard error with `gcr:` in front, and the exit status is
@@ -93,7 +93,7 @@ free one and `gcr` says so.
 
 ## Live migration
 
-### `gcr migrate [-token TOKEN] ID TARGET-URL`
+### `gcr migrate [-token TOKEN] [-post-copy] ID TARGET-URL`
 
 Moves a running container to a target container created with
 `gcr.dev/migrate-in` ([live migration](migration.md)). `TARGET-URL` is
@@ -102,6 +102,9 @@ Moves a running container to a target container created with
 
 - `-token TOKEN`: the target's `gcr.dev/migrate-token`. Defaults to
   `$GCR_MIGRATE_TOKEN`, which keeps it out of the process list.
+- `-post-copy`: restore the target before its memory arrives; it fetches
+  the memory from the source as it runs ([post-copy](migration.md#post-copy)).
+  Prints the downtime and when the target had all its memory.
 
 It prints the pre-copy rounds and the pages each sent (or that the kernel
 cannot track dirty memory, and the migration was stop-and-copy), and the
