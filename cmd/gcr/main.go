@@ -228,6 +228,9 @@ func run(ctx context.Context, ns string, args []string) error {
 			fmt.Println("stop-and-copy (kernel cannot track dirty memory)")
 		}
 		fmt.Printf("downtime: %s\n", res.Downtime.Round(time.Millisecond))
+		for _, p := range res.Phases {
+			fmt.Printf("  %-15s %s\n", p.Name, p.Took.Round(time.Millisecond))
+		}
 		if res.LazyRestore {
 			fmt.Println("the target loads its memory from the images it received, as it runs")
 		}
