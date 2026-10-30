@@ -311,8 +311,19 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			if err != nil {
 				return prep, fmt.Errorf("migration receiver: %w", err)
 			}
+			// A post-copy migration restores lazily; refused before the
+			// source freezes where that cannot work.
+			recv.PostCopyCheck = func() error {
+				if c != nil && c.IDBase() != 0 && !container.LazyPagesAvailable() {
+					return fmt.Errorf("this node has vm.unprivileged_userfaultfd = 0, which a container in a user namespace needs to be restored lazily")
+				}
+				return nil
+			}
 			ex.receiver = recv
-			prep.CheckpointFrom = recv.Wait
+			prep.CheckpointFrom = func(ctx context.Context) (container.Incoming, error) {
+				in, err := recv.Wait(ctx)
+				return container.Incoming{Images: in.Dir, PageServer: in.PageServer}, err
+			}
 		}
 		// Calls the container's seccomp filter hands to its supervisor.
 		handlers := map[string]supervisor.Handler{}
@@ -433,8 +444,8 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 	}
 
 	h := control.Handlers{
-		Migrate: func(ctx context.Context, target, token string) (migrate.Result, error) {
-			return s.migrateOut(ctx, c, ex, target, token)
+		Migrate: func(ctx context.Context, target, token string, opts migrate.Options) (migrate.Result, error) {
+			return s.migrateOut(ctx, c, ex, target, token, opts)
 		},
 		Snapshot: func(ctx context.Context, dir string) error {
 			// Writing over a snapshot would change forks' files under them.
@@ -830,7 +841,7 @@ func (s *service) Stats(ctx context.Context, r *taskAPI.StatsRequest) (*taskAPI.
 }
 
 // migrateOut sends container c to the receiver at target.
-func (s *service) migrateOut(ctx context.Context, c *container.Container, ex *extras, target, token string) (migrate.Result, error) {
+func (s *service) migrateOut(ctx context.Context, c *container.Container, ex *extras, target, token string, opts migrate.Options) (migrate.Result, error) {
 	if !c.Running() {
 		return migrate.Result{}, fmt.Errorf("container is not running: %w", errdefs.ErrFailedPrecondition)
 	}
@@ -840,7 +851,7 @@ func (s *service) migrateOut(ctx context.Context, c *container.Container, ex *ex
 	defer c.SetMigrating(false)
 	work := filepath.Join(ex.stateDir, "migrate-out")
 	_ = os.RemoveAll(work)
-	res, err := migrate.Send(ctx, c, target, token, ex.migrateTLS, work)
+	res, err := migrate.Send(ctx, c, target, token, ex.migrateTLS, work, opts)
 	if err == nil {
 		// Kept on failure: it holds the CRIU logs.
 		_ = os.RemoveAll(work)

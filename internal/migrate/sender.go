@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -34,6 +35,10 @@ type Source interface {
 	CanPreDump() bool
 	// FreezeDump freezes the container and dumps it; it stays frozen.
 	FreezeDump(ctx context.Context, dir, parent, host string, port int) error
+	// LazyDump freezes the container and dumps all but its memory, which
+	// CRIU then serves at host:port. wait returns once every page was
+	// fetched (the processes are then gone); abort thaws the container.
+	LazyDump(ctx context.Context, dir, host string, port int) (wait, abort func() error, err error)
 	// Thaw lets a frozen container continue (the migration failed).
 	Thaw() error
 	// Stop ends the frozen source after the target took over.
@@ -56,13 +61,27 @@ type Result struct {
 	// PreCopyFailed is why a pre-copy round failed, after which the
 	// migration went on stop-and-copy.
 	PreCopyFailed string `json:"preCopyFailed,omitempty"`
+	// PostCopy: the target ran before it had the memory, and fetched it
+	// from the source in PostCopyTook (from the freeze).
+	PostCopy     bool          `json:"postCopy,omitempty"`
+	PostCopyTook time.Duration `json:"postCopyTook,omitempty"`
+}
+
+// Options say how to migrate.
+type Options struct {
+	// PostCopy restores the target before its memory arrives: it fetches
+	// pages from the source as it touches them and in the background, so
+	// the downtime does not grow with the memory. Until the target has
+	// all of it, the container needs both hosts: if the source goes, the
+	// target's processes get SIGBUS on the next page they lack.
+	PostCopy bool
 }
 
 // Send migrates src to the receiver at target, over TLS for an https://
 // target (t says how). work holds the local round directories. If
 // anything fails after the freeze, src is thawed and keeps running, and
 // the target is told to abort.
-func Send(ctx context.Context, src Source, target, token string, t TLS, work string) (res Result, retErr error) {
+func Send(ctx context.Context, src Source, target, token string, t TLS, work string, opts Options) (res Result, retErr error) {
 	u, err := url.Parse(target)
 	if err != nil {
 		return res, err
@@ -84,6 +103,10 @@ func Send(ctx context.Context, src Source, target, token string, t TLS, work str
 			_ = c.post(context.WithoutCancel(ctx), "/abort", nil)
 		}
 	}()
+
+	if opts.PostCopy {
+		return c.postCopy(ctx, src, work, &handedOver)
+	}
 
 	res.MemoryTracking = memoryTracking()
 	parent := ""
@@ -161,6 +184,75 @@ func Send(ctx context.Context, src Source, target, token string, t TLS, work str
 	res.Downtime = time.Since(frozen)
 	if err := src.Stop(); err != nil {
 		return res, fmt.Errorf("target is running but stopping the source failed: %w", err)
+	}
+	return res, nil
+}
+
+// postCopy freezes src, sends all of it but its memory, and has the target
+// restore and fetch the memory from src's page server as it runs.
+func (c *client) postCopy(ctx context.Context, src Source, work string, handedOver *bool) (res Result, retErr error) {
+	res.PostCopy = true
+	var r struct{ Round int }
+	if err := c.doHeader(ctx, http.MethodPost, "/rounds", nil, &r, http.Header{HeaderPostCopy: {"1"}}); err != nil {
+		return res, err
+	}
+	dir := filepath.Join(work, strconv.Itoa(r.Round))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return res, err
+	}
+	port, err := freePort(loopback)
+	if err != nil {
+		return res, err
+	}
+	frozen := time.Now()
+	wait, abort, err := src.LazyDump(ctx, dir, loopback, port)
+	if err != nil {
+		return res, fmt.Errorf("dump: %w", err)
+	}
+	defer func() {
+		if retErr != nil && !*handedOver {
+			if err := abort(); err != nil {
+				retErr = fmt.Errorf("%w (and thawing the source failed: %v)", retErr, err)
+			}
+		}
+	}()
+	if err := c.putDir(ctx, "/images", dir); err != nil {
+		return res, fmt.Errorf("send images: %w", err)
+	}
+	upper, err := src.UpperDir()
+	if err != nil {
+		return res, err
+	}
+	if err := c.putDir(ctx, "/upper", upper); err != nil {
+		return res, fmt.Errorf("send writable layer: %w", err)
+	}
+	// The stream the target's lazy-pages daemon fetches pages over, to
+	// the dump's page server here.
+	remote, err := c.openLazyPages(ctx)
+	if err != nil {
+		return res, err
+	}
+	local, err := net.Dial("tcp", net.JoinHostPort(loopback, strconv.Itoa(port)))
+	if err != nil {
+		remote.Close()
+		return res, err
+	}
+	go splice(local, remote)
+	if err := c.doHeader(ctx, http.MethodPost, "/restore", nil, nil, http.Header{HeaderPostCopy: {"1"}}); err != nil {
+		return res, fmt.Errorf("restore on target: %w", err)
+	}
+	*handedOver = true
+	res.Downtime = time.Since(frozen)
+	// The target runs; the source serves it the rest of the memory, then
+	// CRIU ends its processes. A failure now leaves the target missing
+	// pages: nothing can bring the source back.
+	err = wait()
+	res.PostCopyTook = time.Since(frozen)
+	if serr := src.Stop(); err == nil && serr != nil {
+		err = serr
+	}
+	if err != nil {
+		return res, fmt.Errorf("target is running but serving it its memory failed: %w", err)
 	}
 	return res, nil
 }

@@ -9,7 +9,7 @@
 //	gcr snapshot-rm DIR...
 //	gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF
 //	gcr snapshot-pull [-plain-http] [-store DIR] [-lazy] REF DIR
-//	gcr [-n namespace] migrate [-token TOKEN] ID TARGET-URL
+//	gcr [-n namespace] migrate [-token TOKEN] [-post-copy] ID TARGET-URL
 package main
 
 import (
@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/makhov/gcr/internal/control"
+	"github.com/makhov/gcr/internal/migrate"
 	"github.com/makhov/gcr/internal/snapshot"
 	"github.com/makhov/gcr/internal/snapshot/registry"
 )
@@ -38,7 +39,7 @@ func main() {
 			"       gcr snapshot-rm DIR...\n"+
 			"       gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF\n"+
 			"       gcr snapshot-pull [-plain-http] [-store DIR] [-lazy] REF DIR\n"+
-			"       gcr [-n namespace] migrate [-token TOKEN] ID TARGET-URL\n")
+			"       gcr [-n namespace] migrate [-token TOKEN] [-post-copy] ID TARGET-URL\n")
 	}
 	flag.Parse()
 	args := flag.Args()
@@ -145,14 +146,19 @@ func run(ctx context.Context, ns string, args []string) error {
 	case len(args) >= 1 && args[0] == "migrate":
 		fs := flag.NewFlagSet("migrate", flag.ExitOnError)
 		token := fs.String("token", os.Getenv("GCR_MIGRATE_TOKEN"), "token the target expects (default $GCR_MIGRATE_TOKEN)")
+		postCopy := fs.Bool("post-copy", false, "restore the target before its memory arrives; it fetches the memory from the source as it runs")
 		_ = fs.Parse(args[1:])
 		if fs.NArg() != 2 {
 			flag.Usage()
 			os.Exit(2)
 		}
-		res, err := control.NewClient(ns, fs.Arg(0)).Migrate(ctx, fs.Arg(1), *token)
+		res, err := control.NewClient(ns, fs.Arg(0)).Migrate(ctx, fs.Arg(1), *token, migrate.Options{PostCopy: *postCopy})
 		if err != nil {
 			return err
+		}
+		if res.PostCopy {
+			fmt.Printf("post-copy: downtime %s, memory fetched by %s\n", res.Downtime.Round(time.Millisecond), res.PostCopyTook.Round(time.Millisecond))
+			return nil
 		}
 		if res.PreCopyFailed != "" {
 			fmt.Printf("pre-copy failed, went on stop-and-copy: %s\n", res.PreCopyFailed)
