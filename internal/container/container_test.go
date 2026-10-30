@@ -14,13 +14,33 @@ import (
 )
 
 func TestIDMapRootfs(t *testing.T) {
-	// A non-empty upper layer is left as it is (no chown, so no root needed).
+	if _, err := idmapRootfs([]mount.Mount{{Type: "bind"}}, "0:1:1", 0); err == nil {
+		t.Fatal("non-overlay rootfs accepted")
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("the writable layer is shifted into the range with chown: needs root")
+	}
+
+	// What the caller put in the writable layer (Docker: mountpoints) is
+	// owned by host IDs below the range and moves into it, setuid bits
+	// kept; what is in the range already (a restarted container's) stays.
+	const root = 1 << 30
 	upper := t.TempDir()
-	_ = os.WriteFile(filepath.Join(upper, "f"), nil, 0o600)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(os.WriteFile(filepath.Join(upper, "host"), nil, 0o600))
+	must(os.Chown(filepath.Join(upper, "host"), 0, 5))
+	must(unix.Chmod(filepath.Join(upper, "host"), 0o4755))
+	must(os.WriteFile(filepath.Join(upper, "mine"), nil, 0o600))
+	must(os.Chown(filepath.Join(upper, "mine"), root+7, root+7))
 	in := []mount.Mount{{Type: "overlay", Source: "overlay", Options: []string{"lowerdir=/l", "upperdir=" + upper, "workdir=/w"}}}
 	orig := slices.Clone(in[0].Options)
 
-	out, err := idmapRootfs(in, "0:1073741824:65536", os.Getuid())
+	out, err := idmapRootfs(in, "0:1073741824:65536", root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,9 +50,16 @@ func TestIDMapRootfs(t *testing.T) {
 	if !slices.Equal(in[0].Options, orig) {
 		t.Fatalf("input options changed: %v", in[0].Options)
 	}
-
-	if _, err := idmapRootfs([]mount.Mount{{Type: "bind"}}, "0:1:1", 0); err == nil {
-		t.Fatal("non-overlay rootfs accepted")
+	for name, want := range map[string][3]uint32{
+		".":    {root, root, 0},
+		"host": {root, root + 5, 0o4755},
+		"mine": {root + 7, root + 7, 0},
+	} {
+		var st unix.Stat_t
+		must(unix.Lstat(filepath.Join(upper, name), &st))
+		if st.Uid != want[0] || st.Gid != want[1] || (want[2] != 0 && st.Mode&0o7777 != want[2]) {
+			t.Errorf("%s: %d:%d %o, want %d:%d %o", name, st.Uid, st.Gid, st.Mode&0o7777, want[0], want[1], want[2])
+		}
 	}
 }
 
