@@ -5,6 +5,7 @@ package ocispec
 
 import (
 	"slices"
+	"strings"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
@@ -54,6 +55,16 @@ func PodContainer(spec *specs.Spec) bool {
 // Sandbox says whether spec is a pod's sandbox (its pause container).
 func Sandbox(spec *specs.Spec) bool {
 	return firstAnnotation(spec, containerTypeAnnotations) == "sandbox"
+}
+
+// CRIO says whether CRI-O created the container.
+func CRIO(spec *specs.Spec) bool {
+	for k := range spec.Annotations {
+		if strings.HasPrefix(k, "io.kubernetes.cri-o.") {
+			return true
+		}
+	}
+	return false
 }
 
 // SandboxID is the pod a container belongs to, "" outside one.

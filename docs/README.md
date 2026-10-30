@@ -3,7 +3,10 @@
 **Start here**
 
 - [Getting started](getting-started.md): requirements, install, running
-  containers with `ctr`, Kubernetes (containerd) and CRI-O, a first fork
+  containers with `ctr`, Docker, Kubernetes (containerd) and CRI-O, a
+  first fork
+- [Docker](docker.md): `docker run --runtime gcr`, and snapshots, forks
+  and time travel on Docker's containers
 - [What gcr is good for, and where it falls short](tradeoffs.md)
 - [Differences from runc](runc-differences.md): what will not work as on
   runc, what is on by default, and a runc-compatible handler

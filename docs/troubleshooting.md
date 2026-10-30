@@ -56,6 +56,7 @@ has `Hardening = 'off'` and `Landlock = 'off'`.
 | `time travel every ... keeping ... points: the handler allows at most ...` | the annotations ask for more than `TimeTravel` allows | ask for less, or raise the handler's limits |
 | `time travel in a container CRI-O runs` | CRI-O tracks a container by its process, which a rewind replaces | run it under containerd ([getting started](getting-started.md#with-cri-o)) |
 | `live migration into a container CRI-O runs` | CRI-O wants the process when it creates the container, before the source has sent one | make the target a containerd container |
+| `rewind of a container on a network its caller set up` | time travel under Docker on a bridge network | run it with `--network none` or `host` ([Docker](docker.md#networking)) |
 | `gcr's user namespaces need the rootfs as overlay mounts from containerd` | `gcr.dev/host-users=false` or `UserNamespaces = 'always'` under CRI-O | use `hostUsers: false` (CRI-O's user namespaces) |
 | `time travel for containers with GPUs` | CRIU's CUDA plugin cannot pre-dump, so every point would copy GPU memory | none yet |
 | `time travel needs a container without a terminal` | | run without `-t` |

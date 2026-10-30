@@ -97,6 +97,7 @@ type extras struct {
 	userns     *userns.Range          // the container's user namespace range
 	control    *control.Server
 	stateDir   string
+	exposed    []string // bind mount sources gcr bound for the container's root
 	id         string
 	// netPolicy covers cgroupID, if not 0.
 	netPolicy *netpolicy.Policy
@@ -119,6 +120,7 @@ func (e *extras) Close() {
 	if e.recorder != nil {
 		_ = e.recorder.Close()
 	}
+	userns.Unexpose(e.exposed)
 	if e.userns != nil {
 		_ = userns.Release(*e.userns, e.id)
 	}
@@ -258,6 +260,9 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			}
 			ex.userns = &rng
 			userns.Apply(spec, rng)
+			if ex.exposed, err = userns.ExposeMounts(spec, filepath.Join(r.Bundle, "mounts"), int(rng.Base)); err != nil {
+				return prep, fmt.Errorf("user namespace: %w", err)
+			}
 			if err := userns.OpenNetwork(spec); err != nil {
 				return prep, fmt.Errorf("fork: pod network: %w", err)
 			}
@@ -285,6 +290,9 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			}
 			ex.userns = &rng
 			userns.Apply(spec, rng)
+			if ex.exposed, err = userns.ExposeMounts(spec, filepath.Join(r.Bundle, "mounts"), int(rng.Base)); err != nil {
+				return prep, fmt.Errorf("user namespace: %w", err)
+			}
 			if err := userns.OpenNetwork(spec); err != nil {
 				return prep, fmt.Errorf("user namespace: pod network: %w", err)
 			}
@@ -434,6 +442,9 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 				return fmt.Errorf("%s is not empty: %w", dir, errdefs.ErrAlreadyExists)
 			}
 			if err := c.Snapshot(ctx, dir); err != nil {
+				// What a failed snapshot wrote is not one, and a fork
+				// must not start from it.
+				_ = os.RemoveAll(dir)
 				return err
 			}
 			// Its layers are mounted by every fork of it, and its
