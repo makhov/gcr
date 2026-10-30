@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -130,5 +131,77 @@ func TestLimits(t *testing.T) {
 	})
 	if err := c.Start(); err != nil {
 		t.Fatalf("allowed by the handler: %v", err)
+	}
+}
+
+// TestInitExec: the container's own process (pid 1) execs, looking the
+// program up in PATH, as `sh -c "exec ..."` does. The lookup's failed
+// execs are not points and are not held, the exec that succeeds is a
+// point, and the container stops as promptly as any other, its exit
+// reported.
+func TestInitExec(t *testing.T) {
+	ns := framework.NewNamespace(t, "gcr-e2e")
+	c := ns.Run(framework.UniqueID("tt-init"), framework.Spec{
+		Annotations: map[string]string{
+			timetravel.AnnotationTrigger:  "execve",
+			timetravel.AnnotationInterval: "100ms",
+		},
+		// The sleep before the exec lets the recorder see the container
+		// running.
+		Args: []string{"sh", "-c", `sleep 0.5; exec sh -c "echo ready > /ready; exec sleep 3600"`},
+	})
+	start := time.Now()
+	framework.Eventually(t, 30*time.Second, "the exec'd shell to run", func() bool {
+		_, err := c.ReadFile("/ready")
+		return err == nil
+	})
+	if d := time.Since(start); d > 3*time.Second {
+		t.Errorf("pid 1's execs took %v", d.Round(time.Millisecond))
+	}
+	ctl := control.NewClient(ns.Name, c.ID)
+	points, err := ctl.Timeline(ns.Ctx)
+	if err != nil {
+		t.Fatalf("timeline: %v", err)
+	}
+	initPoint := 0
+	for _, p := range points {
+		if !strings.HasPrefix(p.Path, "/bin/") && !strings.HasPrefix(p.Path, "/usr/bin/") {
+			t.Errorf("point #%d of an exec that failed: %s", p.ID, p.Path)
+		}
+		if p.StoppedPid == 1 && len(p.Argv) > 0 && p.Argv[0] == "sh" {
+			initPoint = p.ID
+		}
+	}
+	if initPoint == 0 {
+		t.Fatalf("no point at pid 1's exec: %+v", points)
+	}
+
+	// Rewound to it, the exec'd shell runs again from its first
+	// instruction: /ready, written after the point, is written again.
+	if err := ctl.Rewind(ns.Ctx, initPoint); err != nil {
+		t.Fatalf("rewind to pid 1's exec: %v", err)
+	}
+	framework.Eventually(t, 10*time.Second, "the exec'd shell to run again", func() bool {
+		_, err := c.ReadFile("/ready")
+		return err == nil
+	})
+	if st := c.Status(); st != containerd.Running {
+		t.Fatalf("task is %s after rewind", st)
+	}
+
+	exit, err := c.Task.Wait(ns.Ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Task.Kill(ns.Ctx, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case st := <-exit:
+		if code, _, _ := st.Result(); code != 128+uint32(syscall.SIGKILL) {
+			t.Errorf("exit %d after SIGKILL", code)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the container did not exit after SIGKILL")
 	}
 }

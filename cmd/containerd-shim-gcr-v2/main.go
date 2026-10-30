@@ -18,6 +18,7 @@ import (
 	"github.com/makhov/gcr/internal/landlock"
 	"github.com/makhov/gcr/internal/manager"
 	_ "github.com/makhov/gcr/internal/task"
+	"github.com/makhov/gcr/internal/timetravel"
 )
 
 func init() {
@@ -32,6 +33,10 @@ func init() {
 		err := container.ExecMerged(os.Args[2:])
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+	// Time travel traces a task from a process of its own.
+	if len(os.Args) > 1 && os.Args[1] == timetravel.StopExecArg {
+		timetravel.StopExecMain(os.Args[2:])
 	}
 }
 

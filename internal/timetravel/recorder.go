@@ -127,18 +127,20 @@ func readTrigger(c *supervisor.Call) (Trigger, bool) {
 func (r *Recorder) handle(ctx context.Context, t Trigger, allow func()) {
 	r.mu.Lock()
 	snap := r.snap
-	take := snap != nil && r.seenInit && time.Since(r.last) >= r.policy.Interval
+	due := snap != nil && r.seenInit && time.Since(r.last) >= r.policy.Interval
 	r.seenInit = true
-	if take {
-		// Count attempts, not successes, so a failing point cannot
-		// hold the container in a retry loop.
-		r.last = time.Now()
-	}
 	r.mu.Unlock()
-	if !take || !snap.Running() {
+	// An exec that cannot find its file fails: it is not a point, and
+	// does not count against the interval.
+	if !due || !snap.Running() || (t.Syscall == "execve" && !executable(t.Pid, t.Path)) {
 		allow()
 		return
 	}
+	r.mu.Lock()
+	// Count attempts, not successes, so a failing point cannot hold the
+	// container in a retry loop.
+	r.last = time.Now()
+	r.mu.Unlock()
 
 	nspid, err := nsPid(t.Pid)
 	if err != nil {
