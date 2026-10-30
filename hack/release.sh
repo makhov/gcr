@@ -7,11 +7,14 @@
 # Linux host with Docker that can build Go with cgo for each architecture
 # (docs/development.md#releases).
 #
-#   VERSION=v0.1.0 CRIU_SRC=../criu hack/release.sh amd64 arm64
+# CRIU is makhov/criu at the tag in hack/criu-version, or, to try a change,
+# the tree in CRIU_SRC.
+#
+#   VERSION=v0.1.0 hack/release.sh amd64 arm64
 set -euo pipefail
 
 VERSION=${VERSION:?set VERSION}
-CRIU_SRC=$(cd "${CRIU_SRC:-../criu}" && pwd)
+CRIU_VERSION=$(cat hack/criu-version)
 CRIU_IMAGE=${CRIU_IMAGE:-ubuntu:22.04}
 DOCKER=${DOCKER:-docker}
 HOST=$(go env GOARCH)
@@ -35,6 +38,13 @@ rm -rf dist && mkdir -p dist
 work=$(mktemp -d)
 trap 'rm -rf "$work"; find "$PAYLOAD" -name "*.zst" -delete' EXIT
 
+if [ -n "${CRIU_SRC:-}" ]; then
+	CRIU_SRC=$(cd "$CRIU_SRC" && pwd)
+else
+	CRIU_SRC=$work/criu-src
+	git clone -q --depth 1 --branch "$CRIU_VERSION" https://github.com/makhov/criu.git "$CRIU_SRC"
+fi
+
 for arch in "$@"; do
 	find "$PAYLOAD" -name "*.zst" -delete
 	gobuild "$arch" "$work/containerd-shim-gcr-v2" ./cmd/containerd-shim-gcr-v2 ""
@@ -43,7 +53,7 @@ for arch in "$@"; do
 		"$CRIU_IMAGE" /hack/criu-build.sh "$arch" /src /out
 	{
 		echo "gcr $VERSION ($REVISION)"
-		echo "criu $(git -C "$CRIU_SRC" describe --always --dirty), built on $CRIU_IMAGE"
+		echo "criu $(git -C "$CRIU_SRC" describe --tags --always --dirty), built on $CRIU_IMAGE"
 	} >"$work/VERSIONS"
 	for f in "$work/containerd-shim-gcr-v2" "$work/criu-$arch/criu" "$work/criu-$arch/cuda_plugin.so" "$work/VERSIONS"; do
 		zstd -q -19 -T0 "$f" -o "$PAYLOAD/$(basename "$f").zst"

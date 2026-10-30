@@ -38,8 +38,9 @@ bpf:
 test:
 	go test -tags $(TAGS) ./...
 
-# Builds and installs our CRIU fork (seccomp listener restore) as `criu`,
-# with its CUDA plugin, from a checkout next to this repo.
+# Builds and installs gcr's CRIU as `criu`, with its CUDA plugin, from a
+# makhov/criu checkout next to this repo: the tag in hack/criu-version, or
+# a change to it.
 CRIU_SRC ?= ../criu
 criu:
 	$(MAKE) -C $(CRIU_SRC) criu cuda_plugin
@@ -79,8 +80,10 @@ RELEASE_ARCHES ?= amd64 arm64
 VERSION_LDFLAGS := -X github.com/containerd/containerd/v2/version.Version=$(VERSION) \
 	-X github.com/containerd/containerd/v2/version.Revision=$(shell git rev-parse HEAD)
 DOCKER ?= docker
+# CRIU comes from makhov/criu at the tag in hack/criu-version; CRIU_SRC=DIR
+# builds a tree instead, to try a change to it.
 release:
-	VERSION=$(VERSION) CRIU_SRC=$(CRIU_SRC) DOCKER="$(DOCKER)" hack/release.sh $(RELEASE_ARCHES)
+	VERSION=$(VERSION) DOCKER="$(DOCKER)" $(if $(RELEASE_CRIU_SRC),CRIU_SRC=$(RELEASE_CRIU_SRC)) hack/release.sh $(RELEASE_ARCHES)
 
 # Publishes dist/ as a GitHub release for VERSION (a tag), as a draft to
 # look over before it is public.

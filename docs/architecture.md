@@ -61,13 +61,19 @@ process before it starts (memory merging again).
 Every feature that moves process state goes through CRIU, which
 libcontainer drives over RPC. Options the RPC has no field for go in a
 CRIU configuration file the container rewrites before each dump and
-restore. gcr's CRIU fork, `makhov/criu`, adds:
+restore. gcr's CRIU, the `gcr` branch of
+[makhov/criu](https://github.com/makhov/criu) (upstream CRIU and gcr's
+changes, released as tags like `v4.2.1+gcr.0`; `hack/criu-version` pins
+the one gcr builds), adds:
 
 - `--seccomp-notify-socket`: a restored container's seccomp listener is
   handed to the new shim's supervisor, so time travel and supervised
   mounts keep working after a restore;
 - `--landlock-fs`: the restored processes are confined again (the kernel
-  cannot report a Landlock domain, so CRIU cannot dump one).
+  cannot report a Landlock domain, so CRIU cannot dump one);
+- `--lazy-pages-on-demand`: a fork's lazy-pages daemon copies only the
+  pages it touches, and copies the rest on SIGUSR1 before a dump;
+- `STATIC=libs` and `STATIC=1` builds, which releases use.
 
 What each feature adds on top:
 

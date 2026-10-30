@@ -68,7 +68,7 @@ Or build on the Linux host (cgo is required):
 
 ```sh
 make install          # containerd-shim-gcr-v2 and gcr into /usr/local/bin
-make criu             # CRIU, with its CUDA plugin, from a makhov/criu checkout in ../criu
+make criu             # CRIU and its CUDA plugin, from a makhov/criu clone in ../criu at hack/criu-version's tag
 sudo gcr setup        # registers the runtime; this gcr carries nothing to install
 ```
 

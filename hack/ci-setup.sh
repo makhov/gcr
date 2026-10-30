@@ -8,8 +8,8 @@ CONTAINERD_VERSION=${CONTAINERD_VERSION:-2.4.2}
 CNI_VERSION=${CNI_VERSION:-v1.9.1}
 CRI_TOOLS_VERSION=${CRI_TOOLS_VERSION:-v1.37.0}
 CRIU_REPO=${CRIU_REPO:-https://github.com/makhov/criu.git}
-# makhov/criu#2 (--landlock-fs), on top of seccomp-notify-restore.
-CRIU_REF=${CRIU_REF:-landlock-restore}
+# gcr's CRIU: the makhov/criu tag in hack/criu-version, from its gcr branch.
+CRIU_REF=${CRIU_REF:-$(cat "$(dirname "$0")/criu-version")}
 ARCH=$(dpkg --print-architecture)
 export DEBIAN_FRONTEND=noninteractive
 

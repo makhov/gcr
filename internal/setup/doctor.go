@@ -107,6 +107,9 @@ func Doctor() []Check {
 			}
 		}
 		detail := criu + " " + field(string(v), "Version:")
+		if id := field(string(v), "GitID:"); id != "" {
+			detail += " (" + id + ")"
+		}
 		if len(lacks) > 0 {
 			add("CRIU", Optional, detail+", not gcr's: no "+strings.Join(lacks, ", "), "a release's gcr setup installs gcr's; or make criu from makhov/criu")
 		} else if out, err := exec.Command(criu, "check").CombinedOutput(); err != nil {

@@ -11,9 +11,12 @@ make vm T=criu                            # once: build and install the CRIU for
 make vm T=test-e2e                        # build, install, run the end-to-end tests
 ```
 
-The CRIU fork is expected next to this repository (`../criu`), from
-[makhov/criu](https://github.com/makhov/criu); the runc fork comes in
-through `go.mod`. [Architecture](architecture.md) says what each package
+The CRIU fork is expected next to this repository (`../criu`): a clone of
+[makhov/criu](https://github.com/makhov/criu) at the tag in
+`hack/criu-version` (`git -C ../criu checkout v4.2.1+gcr.0`), or on its
+`gcr` branch to change it. Changes go to that branch as pull requests, and
+a new tag (`v4.2.1+gcr.1`, ...) in `hack/criu-version` releases them. The
+runc fork comes in through `go.mod`. [Architecture](architecture.md) says what each package
 does.
 
 For the CRI conformance suite:
@@ -79,8 +82,8 @@ linux/arm64, one file each, `dist/gcr-VERSION-linux-ARCH`, and
 and gcr's CRIU with its CUDA plugin. All are stamped with the version;
 `gcr version` says which CRIU commit a release carries.
 
-- **CRIU** comes from the makhov/criu checkout in `CRIU_SRC` (default
-  `../criu`; check out the branch the release should carry). It is built in
+- **CRIU** is makhov/criu at the tag in `hack/criu-version`
+  (`RELEASE_CRIU_SRC=DIR` builds a tree instead, to try a change). It is built in
   an Ubuntu 22.04 container (`hack/criu-build.sh`, `CRIU_IMAGE`) with its
   libraries linked in and glibc dynamic (`STATIC=libs`), so it runs on
   glibc 2.35 and later and loads its plugins.
