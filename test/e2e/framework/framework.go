@@ -213,9 +213,13 @@ func (n *Namespace) Output(id string, s Spec) (string, int) {
 	return out.String(), int(st.ExitCode())
 }
 
-// Remove kills and deletes the container, if it is still there.
+// Remove kills and deletes the container, if it is still there. After a
+// failed test it first logs what the container's processes are doing.
 func (c *Container) Remove() {
 	ctx := c.ns.Ctx
+	if c.Task != nil && c.ns.t.Failed() {
+		c.diagnose()
+	}
 	if c.Task != nil {
 		_ = c.Task.Kill(ctx, syscall.SIGKILL)
 		if exit, err := c.Task.Wait(ctx); err == nil {
@@ -456,4 +460,40 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// diagnose logs, for each process in the container's cgroup, each
+// thread's state, what it waits in, and its kernel stack, and whether the
+// cgroup is frozen: what a container that stopped making progress is
+// stuck on.
+func (c *Container) diagnose() {
+	t := c.ns.t
+	pid := int(c.Task.Pid())
+	cg, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
+	if err != nil {
+		t.Logf("diagnose %s: %v", c.ID, err)
+		return
+	}
+	dir := filepath.Join("/sys/fs/cgroup", strings.TrimPrefix(strings.TrimSpace(string(cg)), "0::"))
+	events, _ := os.ReadFile(filepath.Join(dir, "cgroup.events"))
+	t.Logf("diagnose %s: cgroup %s: %s", c.ID, dir, strings.Join(strings.Fields(string(events)), " "))
+	procs, _ := os.ReadFile(filepath.Join(dir, "cgroup.procs"))
+	for _, p := range strings.Fields(string(procs)) {
+		tids, _ := os.ReadDir(filepath.Join("/proc", p, "task"))
+		for _, tid := range tids {
+			base := filepath.Join("/proc", p, "task", tid.Name())
+			stat, _ := os.ReadFile(filepath.Join(base, "stat"))
+			state := "?"
+			if i := strings.LastIndexByte(string(stat), ')'); i > 0 && i+2 < len(stat) {
+				state = string(stat[i+2])
+			}
+			wchan, _ := os.ReadFile(filepath.Join(base, "wchan"))
+			stack, _ := os.ReadFile(filepath.Join(base, "stack"))
+			lines := strings.Split(strings.TrimSpace(string(stack)), "\n")
+			if len(lines) > 8 {
+				lines = lines[:8]
+			}
+			t.Logf("diagnose %s: pid %s tid %s state %s wchan %s stack: %s", c.ID, p, tid.Name(), state, wchan, strings.Join(lines, " <- "))
+		}
+	}
 }
