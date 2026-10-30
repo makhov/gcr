@@ -6,7 +6,7 @@ VM  := gcr
 # Run a command in the dev VM, in the same directory as here.
 IN_VM = limactl shell --workdir $(CURDIR) $(VM) --
 
-.PHONY: build static install vet test test-e2e test-k8s vm criu bpf release release-publish
+.PHONY: build static install vet test test-e2e test-k8s test-install vm criu bpf release release-publish image
 
 build:
 	CGO_ENABLED=1 go build -tags $(TAGS) -ldflags '$(VERSION_LDFLAGS)' -o $(BIN) ./cmd/containerd-shim-gcr-v2
@@ -89,4 +89,16 @@ release:
 # look over before it is public.
 release-publish:
 	gh release create $(VERSION) dist/gcr-* dist/SHA256SUMS --draft --title $(VERSION) --generate-notes
+
+# The installer image (deploy/), from a release in dist/, for the
+# architectures it has: PUSH=1 pushes it.
+IMAGE ?= ghcr.io/makhov/gcr
+comma := ,
+image:
+	$(DOCKER) buildx build --platform $(subst $(eval) ,$(comma),$(addprefix linux/,$(RELEASE_ARCHES))) \
+		--build-arg VERSION=$(VERSION) -f deploy/Dockerfile -t $(IMAGE):$(VERSION) $(if $(PUSH),--push,--load) .
+
+# The installer DaemonSet on a one-node k0da cluster (hack/e2e-install.sh).
+test-install:
+	DOCKER="$(DOCKER)" hack/e2e-install.sh
 

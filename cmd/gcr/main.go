@@ -2,7 +2,7 @@
 
 // gcr is the command line for gcr runtime features outside containerd's API.
 //
-//	gcr setup [-docker] [-no-restart] [-bin-dir DIR] [-containerd-config FILE]
+//	gcr setup [-docker] [-no-restart] [-bin-dir DIR] [-containerd-config FILE] [-containerd-unit UNIT]
 //	gcr doctor
 //	gcr version
 //	gcr [-n namespace] timeline ID
@@ -30,6 +30,7 @@ import (
 	"github.com/containerd/containerd/v2/version"
 
 	"github.com/makhov/gcr/internal/control"
+	"github.com/makhov/gcr/internal/kube"
 	"github.com/makhov/gcr/internal/migrate"
 	"github.com/makhov/gcr/internal/payload"
 	"github.com/makhov/gcr/internal/setup"
@@ -40,7 +41,7 @@ import (
 func main() {
 	ns := flag.String("n", "default", "containerd namespace")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: gcr setup [-docker] [-no-restart] [-bin-dir DIR] [-containerd-config FILE]\n"+
+		fmt.Fprintf(os.Stderr, "usage: gcr setup [-docker] [-no-restart] [-bin-dir DIR] [-containerd-config FILE] [-containerd-unit UNIT]\n"+
 			"       gcr doctor\n"+
 			"       gcr version\n"+
 			"       gcr [-n namespace] timeline ID\n"+
@@ -68,6 +69,7 @@ func run(ctx context.Context, ns string, args []string) error {
 		o := setup.Options{Out: os.Stdout}
 		fs.StringVar(&o.BinDir, "bin-dir", "/usr/local/bin", "where gcr and the shim go")
 		fs.StringVar(&o.ContainerdConfig, "containerd-config", "/etc/containerd/config.toml", "containerd's configuration; gcr's goes in conf.d beside it")
+		fs.StringVar(&o.ContainerdUnit, "containerd-unit", "containerd", "the systemd unit running containerd, restarted to apply the configuration")
 		fs.BoolVar(&o.Docker, "docker", false, "register gcr with dockerd too, as runtime gcr")
 		fs.BoolVar(&o.NoRestart, "no-restart", false, "do not restart containerd (or dockerd); the configuration applies on their next start")
 		_ = fs.Parse(args[1:])
@@ -78,6 +80,14 @@ func run(ctx context.Context, ns string, args []string) error {
 		return doctor()
 	case len(args) == 1 && args[0] == "doctor":
 		return doctor()
+	case len(args) == 3 && args[0] == "kube-label":
+		// For the installer DaemonSet (deploy/): label its node, from a pod
+		// with a service account allowed to patch nodes.
+		key, value, set := strings.Cut(args[2], "=")
+		if !set {
+			key = strings.TrimSuffix(key, "-")
+		}
+		return kube.LabelNode(ctx, args[1], key, value, set)
 	case len(args) == 1 && args[0] == "version":
 		fmt.Printf("gcr %s (%s)\n", version.Version, version.Revision)
 		if v, err := payload.Read(payload.Versions); err == nil {

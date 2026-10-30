@@ -7,8 +7,9 @@ Containers are named by their containerd ID, in the namespace `-n` gives
 (default `default`; Kubernetes pods are in `k8s.io`).
 
 ```
-gcr setup [-docker] [-no-restart] [-bin-dir DIR] [-containerd-config FILE]
+gcr setup [-docker] [-no-restart] [-bin-dir DIR] [-containerd-config FILE] [-containerd-unit UNIT]
 gcr doctor
+gcr kube-label NODE KEY=VALUE|KEY-
 gcr version
 gcr [-n namespace] timeline ID
 gcr [-n namespace] rewind ID POINT
@@ -32,10 +33,14 @@ Installs gcr on the node and registers the runtime
 ([install](getting-started.md#install)): `gcr` and the shim into
 `-bin-dir` (`/usr/local/bin`), and, from a release, gcr's CRIU and its CUDA
 plugin into `/var/lib/gcr`; a containerd drop-in in `conf.d` beside
-`-containerd-config`, which it makes containerd import; with `-docker`,
-runtime `gcr` in `/etc/docker/daemon.json`. It restarts what it
-reconfigured unless `-no-restart`, and ends with `gcr doctor`. Running it
-again is safe, and with a newer `gcr` upgrades.
+`-containerd-config`, in the configuration's own format version, which it
+makes containerd import; with `-docker`, runtime `gcr` in
+`/etc/docker/daemon.json`. It restarts what it reconfigured (`-containerd-unit`,
+default `containerd`) unless `-no-restart`, and if containerd does not
+come back with the new configuration, puts the old one back. On k0s it
+writes `/etc/k0s/containerd.d/gcr.toml` instead, which k0s applies itself.
+It ends with `gcr doctor`. Running it again is safe, and with a newer `gcr`
+upgrades.
 
 ### `gcr doctor`
 
@@ -45,6 +50,11 @@ Landlock, the netlink policy (BPF LSM), lazy restore, dirty memory
 tracking, memory merging, nydus, GPUs. Each line is `ok`, `off` (a feature
 this node does not have) or `MISSING` (gcr does not work as it should),
 with what to do about it. It exits non-zero if anything is missing.
+
+### `gcr kube-label NODE KEY=VALUE|KEY-`
+
+Sets or removes (`KEY-`) a label on a node, as the pod's service account:
+the installer DaemonSet marks its node `gcr.dev/runtime=ready` with it.
 
 ### `gcr version`
 

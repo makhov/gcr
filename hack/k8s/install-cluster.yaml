@@ -1,0 +1,9 @@
+# A stock k0s node, without gcr: the installer DaemonSet (deploy/gcr.yaml)
+# puts it there (hack/e2e-install.sh).
+apiVersion: k0da.k0sproject.io/v1alpha1
+kind: Cluster
+spec:
+  k0s:
+    version: v1.37.1-k0s.0
+  nodes:
+    - role: controller

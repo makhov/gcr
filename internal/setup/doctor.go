@@ -73,10 +73,19 @@ func Doctor() []Check {
 		v, _ := exec.Command(path, "-v").Output()
 		add("shim", OK, path+" "+field(string(v), "Version:"), "")
 	}
-	if out, err := exec.Command("containerd", "--version").Output(); err != nil {
+	// containerd github.com/containerd/containerd/v2 v2.4.2 <revision>
+	out, err := exec.Command("containerd", "--version").Output()
+	which := ""
+	if f := strings.Fields(string(out)); len(f) >= 3 {
+		which = f[2]
+	}
+	if _, k0s := os.Stat(k0sConfig); k0s == nil {
+		which, err = "k0s's", nil // its own, off PATH
+	}
+	if err != nil {
 		add("containerd", Missing, "not found", "install containerd 1.7 or later")
 	} else if registered() {
-		add("containerd", OK, strings.TrimSpace(strings.SplitN(string(out), " ", 3)[2])+", runtime gcr registered", "")
+		add("containerd", OK, which+", runtime gcr registered", "")
 	} else {
 		add("containerd", Missing, "runtime gcr not registered for Kubernetes", "gcr setup (ctr needs nothing: --runtime "+RuntimeType+")")
 	}
@@ -95,8 +104,14 @@ func Doctor() []Check {
 	case err != nil:
 		add("CRIU", Missing, "not found: no checkpoints, forks, time travel or migration", "a release's gcr setup installs gcr's; or make criu from makhov/criu")
 	default:
+		v, verr := exec.Command(criu, "--version").Output()
+		if verr != nil {
+			// gcr's needs glibc: it does not start on musl (Alpine).
+			add("CRIU", Optional, criu+" does not run here: no checkpoints, forks, time travel or migration",
+				"it needs glibc 2.35 or later; on other nodes, build CRIU for them (make criu)")
+			break
+		}
 		help, _ := exec.Command(criu, "--help").CombinedOutput()
-		v, _ := exec.Command(criu, "--version").Output()
 		var lacks []string
 		for flag, what := range map[string]string{
 			"--seccomp-notify-socket": "time travel", "--landlock-fs": "Landlock across restores",
@@ -128,9 +143,11 @@ func Doctor() []Check {
 	if netpolicy.Available() {
 		add("netlink policy", OK, "BPF LSM", "")
 	} else {
-		lsm, _ := os.ReadFile("/sys/kernel/security/lsm")
-		add("netlink policy", Optional, "no BPF LSM: containers' network configuration is limited by seccomp alone",
-			"add bpf to the kernel's lsm= list ("+strings.TrimSpace(string(lsm))+") and reboot")
+		fix := "add bpf to the kernel's lsm= list and reboot"
+		if lsm, _ := os.ReadFile("/sys/kernel/security/lsm"); len(bytes.TrimSpace(lsm)) > 0 {
+			fix = "add bpf to the kernel's lsm= list (" + strings.TrimSpace(string(lsm)) + ") and reboot"
+		}
+		add("netlink policy", Optional, "no BPF LSM: containers' network configuration is limited by seccomp alone", fix)
 	}
 
 	// Features that depend on the node.
@@ -170,7 +187,8 @@ func Doctor() []Check {
 // registered says whether containerd's configuration names the runtime.
 func registered() bool {
 	files, _ := filepath.Glob("/etc/containerd/conf.d/*.toml")
-	for _, f := range append(files, "/etc/containerd/config.toml") {
+	k0s, _ := filepath.Glob("/etc/k0s/containerd.d/*.toml")
+	for _, f := range append(append(files, k0s...), "/etc/containerd/config.toml", k0sConfig) {
 		if b, err := os.ReadFile(f); err == nil && bytes.Contains(b, []byte(RuntimeType)) {
 			return true
 		}

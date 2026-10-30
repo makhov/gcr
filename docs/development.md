@@ -105,5 +105,12 @@ It needs no CI. To cut one:
 git tag v0.1.0 && git push origin v0.1.0
 make vm T='release VERSION=v0.1.0 DOCKER="sudo docker"'
 make release-publish VERSION=v0.1.0   # a draft GitHub release, to look over and publish
+make vm T='image VERSION=v0.1.0 DOCKER="sudo docker" PUSH=1'   # the installer image, both architectures
 ```
+
+`make image` builds the installer image (`deploy/Dockerfile`: busybox and
+the release's `gcr`) from `dist/` with buildx; it copies files only, so it
+builds both architectures anywhere. `make test-install` builds a release
+and image for the host's architecture and has the DaemonSet install them
+on a one-node k0da cluster (`hack/e2e-install.sh`).
 
