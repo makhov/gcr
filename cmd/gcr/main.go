@@ -7,7 +7,7 @@
 //	gcr [-n namespace] snapshot ID DIR
 //	gcr snapshot-users DIR
 //	gcr snapshot-rm DIR...
-//	gcr snapshot-push [-plain-http] DIR REF
+//	gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF
 //	gcr snapshot-pull [-plain-http] [-store DIR] REF DIR
 //	gcr [-n namespace] migrate [-token TOKEN] ID TARGET-URL
 package main
@@ -36,7 +36,7 @@ func main() {
 			"       gcr [-n namespace] snapshot ID DIR\n"+
 			"       gcr snapshot-users DIR\n"+
 			"       gcr snapshot-rm DIR...\n"+
-			"       gcr snapshot-push [-plain-http] DIR REF\n"+
+			"       gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF\n"+
 			"       gcr snapshot-pull [-plain-http] [-store DIR] REF DIR\n"+
 			"       gcr [-n namespace] migrate [-token TOKEN] ID TARGET-URL\n")
 	}
@@ -104,6 +104,7 @@ func run(ctx context.Context, ns string, args []string) error {
 		fs := flag.NewFlagSet(args[0], flag.ExitOnError)
 		plainHTTP := fs.Bool("plain-http", false, "speak HTTP, not HTTPS, to the registry (always for loopback)")
 		store := fs.String("store", registry.DefaultStore, "where the layers beneath pulled snapshots go")
+		format := fs.String("format", registry.FormatTar, "snapshot-push: tar, or nydus (nodes can then read parts lazily; needs nydus-image and nydusd)")
 		_ = fs.Parse(args[1:])
 		if fs.NArg() != 2 {
 			flag.Usage()
@@ -131,7 +132,7 @@ func run(ctx context.Context, ns string, args []string) error {
 			}
 			return nil
 		}
-		desc, err := registry.Push(ctx, fs.Arg(0), repo, tag)
+		desc, err := registry.Push(ctx, fs.Arg(0), repo, tag, *format)
 		if err != nil {
 			return err
 		}

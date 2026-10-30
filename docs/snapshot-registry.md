@@ -15,10 +15,9 @@ ctr run -d --runtime io.containerd.gcr.v2 \
 - **What gets pushed.** A snapshot is one artifact: its process images,
   and the writable layers a fork mounts (its own, and those of the
   snapshots it was forked from).
-  - Each part is a zstd-compressed tar, packed deterministically, so a
-    layer that several snapshots share is stored once in the registry
-    and uploaded once.
-  - The tars keep numeric owners, xattrs and overlay's whiteouts.
+  - Each part is packed deterministically, so a layer that several
+    snapshots share is stored once in the registry and uploaded once.
+  - Parts keep numeric owners, xattrs and overlay's whiteouts.
 - **Where a pull puts things.**
   - The snapshot goes to the directory given.
   - The layers beneath it go to a store (`-store`, default
@@ -60,3 +59,21 @@ storage:
 http:
   addr: :5000
 ```
+
+## Formats
+
+`gcr snapshot-push -format` chooses how the parts are packed; a pull
+reads either.
+
+- **`tar`** (the default): each part is a zstd-compressed tar.
+- **`nydus`**: each part is a [nydus](https://github.com/dragonflyoss/nydus)
+  image (RAFS v6, which EROFS can read): a bootstrap, the part's metadata,
+  and a blob of its file data in compressed chunks, deduplicated within the
+  part. A node can mount such a part with `nydusd` and read only what it
+  touches, instead of downloading all of it. Pushing and pulling need
+  `nydus-image` and `nydusd` (nydus 2.4) in `PATH`.
+
+  A pull of a nydus snapshot still downloads it whole, checks each blob
+  against its digest, and lays it out as a `tar` one is: forks and
+  everything else work the same. Reading parts lazily is the next step.
+

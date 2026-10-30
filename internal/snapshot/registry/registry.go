@@ -5,9 +5,9 @@
 //
 // A snapshot is one OCI artifact: a config, the CRIU images, and the
 // writable layers a fork mounts, its own and those of the snapshots it
-// was forked from, top first. Each is a zstd-compressed tar, written
-// deterministically, so a layer two snapshots share is one blob in the
-// registry. On the pulling host, the layers beneath go to a store, one
+// was forked from, top first. Each is a zstd-compressed tar (the default
+// format), or a nydus image (FormatNydus), written deterministically, so a
+// layer two snapshots share is one blob in the registry. On the pulling host, the layers beneath go to a store, one
 // directory per layer shared by every snapshot pulled that has it, and
 // the snapshot to the directory asked for, with its LayersFile naming
 // the store's copies. Both are registered (snapshot.Record) as if taken
@@ -44,6 +44,7 @@ import (
 	"oras.land/oras-go/v2/registry/remote/retry"
 
 	"github.com/makhov/gcr/internal/imagetar"
+	"github.com/makhov/gcr/internal/nydus"
 	"github.com/makhov/gcr/internal/snapshot"
 	"github.com/makhov/gcr/internal/userns"
 )
@@ -73,11 +74,17 @@ type Config struct {
 	// top first: the manifest's upper layers after the first.
 	Layers  []digest.Digest `json:"layers,omitempty"`
 	Created time.Time       `json:"created"`
+	// Format is FormatNydus, or empty for tars. A layer's digest above
+	// is its bootstrap's in the nydus format.
+	Format string `json:"format,omitempty"`
 }
 
 type blobs struct {
 	Upper  *ocispec.Descriptor `json:"upper,omitempty"`
 	Images *ocispec.Descriptor `json:"images,omitempty"`
+	// In the nydus format: bootstrap, then blob if any.
+	NydusUpper  []ocispec.Descriptor `json:"nydusUpper,omitempty"`
+	NydusImages []ocispec.Descriptor `json:"nydusImages,omitempty"`
 }
 
 // Repository opens the repository ref names, with the credentials in
@@ -105,9 +112,20 @@ func Repository(ref string, plainHTTP bool) (*remote.Repository, error) {
 	return repo, nil
 }
 
-// Push uploads the snapshot in dir to target and tags it. It returns the
-// manifest's descriptor.
-func Push(ctx context.Context, dir string, target oras.Target, tag string) (ocispec.Descriptor, error) {
+// Push uploads the snapshot in dir to target in format (FormatTar if
+// empty, or FormatNydus) and tags it. It returns the manifest's
+// descriptor.
+func Push(ctx context.Context, dir string, target oras.Target, tag, format string) (ocispec.Descriptor, error) {
+	switch format {
+	case "", FormatTar:
+		format = ""
+	case FormatNydus:
+		if err := nydus.Available(); err != nil {
+			return ocispec.Descriptor{}, fmt.Errorf("%w: %w", err, errdefs.ErrFailedPrecondition)
+		}
+	default:
+		return ocispec.Descriptor{}, fmt.Errorf("format %q: %s or %s: %w", format, FormatTar, FormatNydus, errdefs.ErrInvalidArgument)
+	}
 	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return ocispec.Descriptor{}, err
@@ -119,7 +137,7 @@ func Push(ctx context.Context, dir string, target oras.Target, tag string) (ocis
 	if err != nil {
 		return ocispec.Descriptor{}, err
 	}
-	cfg := Config{Arch: runtime.GOARCH, Created: time.Now().UTC()}
+	cfg := Config{Arch: runtime.GOARCH, Created: time.Now().UTC(), Format: format}
 	if b, err := os.ReadFile(filepath.Join(dir, userns.BaseFile)); err == nil {
 		if cfg.UsernsBase, err = userns.ParseBase(string(b)); err != nil {
 			return ocispec.Descriptor{}, err
@@ -131,23 +149,30 @@ func Push(ctx context.Context, dir string, target oras.Target, tag string) (ocis
 		cfg.UsernsKey = strings.TrimSpace(string(key))
 	}
 
-	images, err := pushPart(ctx, target, dir, "images", ImagesMediaType)
+	// Each part's descriptors; the first identifies it.
+	push := func(d, name, mediaType string) ([]ocispec.Descriptor, error) {
+		if format == FormatNydus {
+			return pushNydusPart(ctx, target, d, name)
+		}
+		desc, err := pushPart(ctx, target, d, name, mediaType)
+		return []ocispec.Descriptor{desc}, err
+	}
+	layers, err := push(dir, "images", ImagesMediaType)
 	if err != nil {
 		return ocispec.Descriptor{}, fmt.Errorf("images: %w", err)
 	}
-	layers := []ocispec.Descriptor{images}
 	ancestors, err := owners(chain)
 	if err != nil {
 		return ocispec.Descriptor{}, err
 	}
 	for _, d := range append([]string{dir}, ancestors...) {
-		upper, err := pushPart(ctx, target, d, snapshot.Upper, UpperMediaType)
+		upper, err := push(d, snapshot.Upper, UpperMediaType)
 		if err != nil {
 			return ocispec.Descriptor{}, fmt.Errorf("layer %s: %w", d, err)
 		}
-		layers = append(layers, upper)
+		layers = append(layers, upper...)
 		if d != dir {
-			cfg.Layers = append(cfg.Layers, upper.Digest)
+			cfg.Layers = append(cfg.Layers, upper[0].Digest)
 		}
 	}
 
@@ -340,12 +365,43 @@ func Pull(ctx context.Context, source oras.ReadOnlyTarget, ref, dir, store strin
 	if cfg.Arch != runtime.GOARCH {
 		return pulled, fmt.Errorf("snapshot is for %s, this host is %s: %w", cfg.Arch, runtime.GOARCH, errdefs.ErrFailedPrecondition)
 	}
-	if len(manifest.Layers) != len(cfg.Layers)+2 || manifest.Layers[0].MediaType != ImagesMediaType {
+	var parts []part
+	switch cfg.Format {
+	case "":
+		for _, d := range manifest.Layers {
+			parts = append(parts, part{desc: d})
+		}
+		if len(parts) > 0 && parts[0].desc.MediaType != ImagesMediaType {
+			parts = nil
+		}
+		for _, p := range parts[min(1, len(parts)):] {
+			if p.desc.MediaType != UpperMediaType {
+				parts = nil
+			}
+		}
+	case FormatNydus:
+		if parts, err = nydusParts(manifest.Layers); err != nil {
+			return pulled, fmt.Errorf("%s: malformed snapshot manifest: %v: %w", ref, err, errdefs.ErrInvalidArgument)
+		}
+		for i, p := range parts {
+			name := snapshot.Upper
+			if i == 0 {
+				name = "images"
+			}
+			if p.desc.Annotations[annotationPart] != name {
+				parts = nil
+				break
+			}
+		}
+	default:
+		return pulled, fmt.Errorf("%s: snapshot format %q: %w", ref, cfg.Format, errdefs.ErrNotImplemented)
+	}
+	if len(parts) != len(cfg.Layers)+2 {
 		return pulled, fmt.Errorf("%s: malformed snapshot manifest: %w", ref, errdefs.ErrInvalidArgument)
 	}
-	uppers := manifest.Layers[1:]
-	for i, d := range uppers {
-		if d.MediaType != UpperMediaType || (i > 0 && d.Digest != cfg.Layers[i-1]) {
+	images, uppers := parts[0], parts[1:]
+	for i, p := range uppers {
+		if i > 0 && p.desc.Digest != cfg.Layers[i-1] {
 			return pulled, fmt.Errorf("%s: malformed snapshot manifest: %w", ref, errdefs.ErrInvalidArgument)
 		}
 	}
@@ -357,7 +413,7 @@ func Pull(ctx context.Context, source oras.ReadOnlyTarget, ref, dir, store strin
 		// else here.
 		// Also by the lineage's first layer: the publisher chose the
 		// rest, and could copy them to share another lineage's range.
-		sum := sha256.Sum256([]byte(fmt.Sprintf("%s@%d@%s", cfg.UsernsKey, cfg.UsernsBase, uppers[len(uppers)-1].Digest)))
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%s@%d@%s", cfg.UsernsKey, cfg.UsernsBase, uppers[len(uppers)-1].desc.Digest)))
 		key := "pulled_" + hex.EncodeToString(sum[:8])
 		r, err := userns.ClaimForSnapshot(dir, key, cfg.UsernsBase)
 		if errdefs.IsConflict(err) {
@@ -387,7 +443,7 @@ func Pull(ctx context.Context, source oras.ReadOnlyTarget, ref, dir, store strin
 	for i := len(uppers) - 1; i >= 1; i-- {
 		layerDir, err := pullLayer(ctx, source, uppers[i], below, store, pulled)
 		if err != nil {
-			return pulled, fmt.Errorf("layer %s: %w", uppers[i].Digest, err)
+			return pulled, fmt.Errorf("layer %s: %w", uppers[i].desc.Digest, err)
 		}
 		below = append([]string{filepath.Join(layerDir, snapshot.Upper)}, below...)
 	}
@@ -397,13 +453,15 @@ func Pull(ctx context.Context, source oras.ReadOnlyTarget, ref, dir, store strin
 		return pulled, err
 	}
 	defer os.RemoveAll(tmp)
-	if err := unpackImages(ctx, source, manifest.Layers[0], filepath.Join(tmp, "images")); err != nil {
+	if err := unpackImages(ctx, source, images, filepath.Join(tmp, "images")); err != nil {
 		return pulled, fmt.Errorf("images: %w", err)
 	}
 	if err := unpackLayer(ctx, source, uppers[0], filepath.Join(tmp, snapshot.Upper)); err != nil {
 		return pulled, fmt.Errorf("writable layer: %w", err)
 	}
-	b := blobs{Upper: &uppers[0], Images: &manifest.Layers[0]}
+	b := uppers[0].cached(false)
+	ib := images.cached(true)
+	b.Images, b.NydusImages = ib.Images, ib.NydusImages
 	if pulled.From != 0 {
 		if err := userns.ShiftTree(filepath.Join(tmp, snapshot.Upper), pulled.From, pulled.Range.Base); err != nil {
 			return pulled, fmt.Errorf("move writable layer to range %d: %w", pulled.Range.Base, err)
@@ -439,8 +497,8 @@ func Pull(ctx context.Context, source oras.ReadOnlyTarget, ref, dir, store strin
 
 // pullLayer makes sure store has the layer desc (with below beneath it),
 // in the snapshot's range here, and returns its directory there.
-func pullLayer(ctx context.Context, source oras.ReadOnlyTarget, desc ocispec.Descriptor, below []string, store string, pulled Pulled) (string, error) {
-	name := desc.Digest.Algorithm().String() + "-" + desc.Digest.Encoded()
+func pullLayer(ctx context.Context, source oras.ReadOnlyTarget, p part, below []string, store string, pulled Pulled) (string, error) {
+	name := p.desc.Digest.Algorithm().String() + "-" + p.desc.Digest.Encoded()
 	if pulled.Range.Base != 0 {
 		name += "-" + strconv.Itoa(int(pulled.Range.Base))
 	}
@@ -456,10 +514,10 @@ func pullLayer(ctx context.Context, source oras.ReadOnlyTarget, desc ocispec.Des
 		return "", err
 	}
 	defer os.RemoveAll(tmp)
-	if err := unpackLayer(ctx, source, desc, filepath.Join(tmp, snapshot.Upper)); err != nil {
+	if err := unpackLayer(ctx, source, p, filepath.Join(tmp, snapshot.Upper)); err != nil {
 		return "", err
 	}
-	b := blobs{Upper: &desc}
+	b := p.cached(false)
 	if pulled.From != 0 {
 		if err := userns.ShiftTree(filepath.Join(tmp, snapshot.Upper), pulled.From, pulled.Range.Base); err != nil {
 			return "", fmt.Errorf("move to range %d: %w", pulled.Range.Base, err)
@@ -509,14 +567,21 @@ func untar(ctx context.Context, r io.Reader, dir string) error {
 }
 
 // unpackImages extracts CRIU images: regular files only (imagetar).
-func unpackImages(ctx context.Context, source oras.ReadOnlyTarget, desc ocispec.Descriptor, dir string) error {
-	return unpack(ctx, source, desc, dir, func(_ context.Context, r io.Reader, dir string) error {
+func unpackImages(ctx context.Context, source oras.ReadOnlyTarget, p part, dir string) error {
+	extract := func(_ context.Context, r io.Reader, dir string) error {
 		return imagetar.Extract(r, dir)
-	})
+	}
+	if p.desc.MediaType == NydusBootstrapMediaType {
+		return fetchNydus(ctx, source, p, dir, false, extract)
+	}
+	return unpack(ctx, source, p.desc, dir, extract)
 }
 
-func unpackLayer(ctx context.Context, source oras.ReadOnlyTarget, desc ocispec.Descriptor, dir string) error {
-	return unpack(ctx, source, desc, dir, untar)
+func unpackLayer(ctx context.Context, source oras.ReadOnlyTarget, p part, dir string) error {
+	if p.desc.MediaType == NydusBootstrapMediaType {
+		return fetchNydus(ctx, source, p, dir, true, untar)
+	}
+	return unpack(ctx, source, p.desc, dir, untar)
 }
 
 func unpack(ctx context.Context, source oras.ReadOnlyTarget, desc ocispec.Descriptor, dir string, extract func(context.Context, io.Reader, string) error) error {

@@ -18,6 +18,7 @@ import (
 
 	"github.com/makhov/gcr/internal/container"
 	"github.com/makhov/gcr/internal/control"
+	"github.com/makhov/gcr/internal/nydus"
 	"github.com/makhov/gcr/internal/snapshot"
 	"github.com/makhov/gcr/internal/snapshot/registry"
 	"github.com/makhov/gcr/internal/userns"
@@ -31,6 +32,16 @@ import (
 // here is removed, so it keeps its own. A fork of either carries on from
 // it, mapping the range it was given.
 func TestRegistry(t *testing.T) {
+	t.Run("tar", func(t *testing.T) { testRegistry(t, registry.FormatTar) })
+	t.Run("nydus", func(t *testing.T) {
+		if err := nydus.Available(); err != nil {
+			t.Skip(err)
+		}
+		testRegistry(t, registry.FormatNydus)
+	})
+}
+
+func testRegistry(t *testing.T, format string) {
 	ns := framework.NewNamespace(t, "gcr-e2e")
 	addr := "127.0.0.1:" + strconv.Itoa(5100+os.Getpid()%400)
 	ns.Run(framework.UniqueID("registry"), framework.Spec{
@@ -76,13 +87,13 @@ func TestRegistry(t *testing.T) {
 	}
 	at := a.ReadInt("/tmp/count")
 
-	ref := fmt.Sprintf("%s/gcr-e2e/second:%d", addr, os.Getpid())
+	ref := fmt.Sprintf("%s/gcr-e2e/second-%s:%d", addr, format, os.Getpid())
 	repo, err := registry.Repository(ref, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	begin := time.Now()
-	if _, err := registry.Push(t.Context(), second, repo, repo.Reference.Reference); err != nil {
+	if _, err := registry.Push(t.Context(), second, repo, repo.Reference.Reference, format); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 	t.Logf("pushed in %s", time.Since(begin).Round(time.Millisecond))
