@@ -205,3 +205,52 @@ func TestInitExec(t *testing.T) {
 		t.Fatal("the container did not exit after SIGKILL")
 	}
 }
+
+// TestManualPoints: with gcr.dev/time-travel=manual, points are taken
+// only on request, as an agent would before a command it may want to
+// undo. Execs take none; a rewind to a point brings back the files and
+// the processes as they were when it was taken.
+func TestManualPoints(t *testing.T) {
+	ns := framework.NewNamespace(t, "gcr-e2e")
+	c := ns.Run(framework.UniqueID("tt-manual"), framework.Spec{
+		Annotations: map[string]string{timetravel.AnnotationTrigger: "manual"},
+		// A counter in the shell's memory, mirrored to a file.
+		Args: []string{"sh", "-c", `echo data > /work; i=0; while :; do i=$((i+1)); echo $i > /tmp/count; /bin/true; sleep 0.1; done`},
+	})
+	framework.Eventually(t, 30*time.Second, "the counter", func() bool { return c.ReadInt("/tmp/count") > 5 })
+	ctl := control.NewClient(ns.Name, c.ID)
+	if points, err := ctl.Timeline(ns.Ctx); err != nil || len(points) != 0 {
+		t.Fatalf("points before any was asked for: %v, %v", points, err)
+	}
+
+	p, err := ctl.TakePoint(ns.Ctx, "rm -rf /work")
+	if err != nil {
+		t.Fatalf("take point: %v", err)
+	}
+	at := c.ReadInt("/tmp/count")
+	if p.Label != "rm -rf /work" || p.Syscall != "" || p.StoppedPid != 0 {
+		t.Fatalf("point %+v", p)
+	}
+	if out, code := c.Exec("rm", "-rf", "/work"); code != 0 {
+		t.Fatalf("rm: %s", out)
+	}
+	framework.Eventually(t, 30*time.Second, "the counter to move on", func() bool { return c.ReadInt("/tmp/count") > at+20 })
+
+	if err := ctl.Rewind(ns.Ctx, p.ID); err != nil {
+		t.Fatalf("rewind: %v", err)
+	}
+	if s, err := c.ReadFile("/work"); err != nil || s != "data" {
+		t.Fatalf("/work after the rewind: %q, %v", s, err)
+	}
+	if n := c.ReadInt("/tmp/count"); n > at+10 {
+		t.Fatalf("counter at %d after rewinding to %d: the shell's memory was not rewound", n, at)
+	}
+	if st := c.Status(); st != containerd.Running {
+		t.Fatalf("task is %s after the rewind", st)
+	}
+	framework.Eventually(t, 30*time.Second, "the counter to go on after the rewind", func() bool { return c.ReadInt("/tmp/count") > at+5 })
+	points, err := ctl.Timeline(ns.Ctx)
+	if err != nil || len(points) != 1 {
+		t.Fatalf("timeline: %v, %v (execs take no points)", points, err)
+	}
+}

@@ -38,6 +38,7 @@ func SocketPath(namespace, id string) string {
 type Timeline interface {
 	Points() []timetravel.Point
 	Rewind(ctx context.Context, point int) error
+	Take(ctx context.Context, label string) (timetravel.Point, error)
 }
 
 // Handlers are what one container supports; nil ones answer 404.
@@ -48,6 +49,10 @@ type Handlers struct {
 	// layer to dir, and leaves it running; containers can then be forked
 	// from it.
 	Snapshot func(ctx context.Context, dir string) error
+}
+
+type pointRequest struct {
+	Label string `json:"label"`
 }
 
 type snapshotRequest struct {
@@ -97,6 +102,25 @@ func Serve(ctx context.Context, namespace, id string, h Handlers) (*Server, erro
 		if err := h.Timeline.Rewind(context.WithoutCancel(ctx), point); err != nil {
 			httpError(w, err)
 		}
+	})
+	mux.HandleFunc("POST /points", func(w http.ResponseWriter, r *http.Request) {
+		if h.Timeline == nil {
+			http.Error(w, noTimeline, http.StatusNotFound)
+			return
+		}
+		var req pointRequest
+		if r.ContentLength != 0 {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+		}
+		p, err := h.Timeline.Take(context.WithoutCancel(ctx), req.Label)
+		if err != nil {
+			httpError(w, err)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(p)
 	})
 	mux.HandleFunc("POST /snapshot", func(w http.ResponseWriter, r *http.Request) {
 		if h.Snapshot == nil {
@@ -178,6 +202,14 @@ func (c *Client) Timeline(ctx context.Context) ([]timetravel.Point, error) {
 
 func (c *Client) Rewind(ctx context.Context, point int) error {
 	return c.do(ctx, http.MethodPost, fmt.Sprintf("/rewind/%d", point), nil, nil)
+}
+
+// TakePoint takes a point on the container's timeline now; label says what
+// it comes before.
+func (c *Client) TakePoint(ctx context.Context, label string) (timetravel.Point, error) {
+	var p timetravel.Point
+	err := c.do(ctx, http.MethodPost, "/points", pointRequest{Label: label}, &p)
+	return p, err
 }
 
 // Snapshot asks the container to write a snapshot to dir and keep running.

@@ -29,6 +29,10 @@ func (f *fakeTimeline) Rewind(ctx context.Context, point int) error {
 	return nil
 }
 
+func (f *fakeTimeline) Take(ctx context.Context, label string) (timetravel.Point, error) {
+	return timetravel.Point{ID: 8, Label: label}, nil
+}
+
 func TestControlRoundTrip(t *testing.T) {
 	socketDir = t.TempDir()
 	ctx := context.Background()
@@ -57,6 +61,9 @@ func TestControlRoundTrip(t *testing.T) {
 	}
 	if err := c.Rewind(ctx, 8); err == nil {
 		t.Fatal("rewind to a missing point succeeded")
+	}
+	if p, err := c.TakePoint(ctx, "rm -rf /"); err != nil || p.ID != 8 || p.Label != "rm -rf /" {
+		t.Fatalf("take point: %+v, %v", p, err)
 	}
 	res, err := c.Migrate(ctx, "http://target", "t", migrate.Options{})
 	if err != nil || res.Downtime != 42*time.Millisecond {

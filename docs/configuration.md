@@ -290,7 +290,7 @@ restricted ones (`fork-from`, `migrate-in`, `migrate-token`,
 | --- | --- | --- |
 | `gcr.dev/host-users` | `true` / `false` | Opt out of gcr's user namespace (`true`), or, on Kubernetes, into it (`false`). `UserNamespaces = 'always'` ignores it. |
 | `gcr.dev/userns-base` | first host ID | Ask for a specific range. Migration targets use it to match the source. |
-| `gcr.dev/time-travel` | `execve` | Take a point on the timeline after each exec. |
+| `gcr.dev/time-travel` | `execve` or `manual` | Take a point on the timeline after each exec, or only when asked (`gcr point`). |
 | `gcr.dev/time-travel-interval` | duration, default `1s` | At most one point per interval. |
 | `gcr.dev/time-travel-keep` | number, default `20` | How many points to keep. |
 | `gcr.dev/fork-from` | absolute path | Start from a snapshot (`gcr snapshot`) instead of the image's entrypoint. |

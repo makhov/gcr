@@ -24,8 +24,10 @@ const (
 )
 
 // triggerSets maps an AnnotationTrigger value to the system calls that take a point.
+// With "manual", points are taken only on request (Recorder.Take).
 var triggerSets = map[string][]string{
 	"execve": {"execve", "execveat"},
+	"manual": nil,
 }
 
 type Policy struct {
