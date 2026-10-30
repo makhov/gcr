@@ -141,7 +141,9 @@ func TestFork(t *testing.T) {
 	if n := count(t, fork); n < at {
 		t.Fatalf("the fork counts from %d, its snapshot was at %d", n, at)
 	}
-	addr := func(id string) string { return must(t, "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", id) }
+	addr := func(id string) string {
+		return must(t, "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", id)
+	}
 	if a, b := addr(parent), addr(fork); a == b || b == "" {
 		t.Fatalf("parent and fork addresses: %q, %q", a, b)
 	}
