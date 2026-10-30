@@ -468,8 +468,17 @@ func (s *syncBuffer) String() string {
 // stuck on.
 func (c *Container) diagnose() {
 	t := c.ns.t
-	pid := int(c.Task.Pid())
-	cg, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
+	// Not Task.Pid: that is the pid when the task was created, and a
+	// container restored at start (a migration's target) has another.
+	if st, err := c.Task.Status(c.ns.Ctx); err == nil {
+		t.Logf("diagnose %s: task %s, exit status %d", c.ID, st.Status, st.ExitStatus)
+	}
+	pids, err := c.Task.Pids(c.ns.Ctx)
+	if err != nil || len(pids) == 0 {
+		t.Logf("diagnose %s: no processes (%v)", c.ID, err)
+		return
+	}
+	cg, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pids[0].Pid))
 	if err != nil {
 		t.Logf("diagnose %s: %v", c.ID, err)
 		return
