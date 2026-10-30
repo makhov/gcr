@@ -451,6 +451,36 @@ func Apply(spec *specs.Spec, r Range) {
 		}
 		spec.Mounts[i].Options = append(slices.Clone(m.Options), "idmap")
 	}
+	if !joinsNetwork {
+		clampPingGroups(spec)
+	}
+}
+
+// clampPingGroups keeps net.ipv4.ping_group_range within the groups the
+// container's user namespace maps, which owns its network namespace: the
+// kernel refuses a range with others (EINVAL). Docker sets "0 2147483647",
+// every group, for ping without CAP_NET_RAW.
+func clampPingGroups(spec *specs.Spec) {
+	const key = "net.ipv4.ping_group_range"
+	v, ok := spec.Linux.Sysctl[key]
+	if !ok {
+		return
+	}
+	f := strings.Fields(v)
+	if len(f) != 2 {
+		return
+	}
+	lo, err1 := strconv.ParseUint(f[0], 10, 32)
+	hi, err2 := strconv.ParseUint(f[1], 10, 32)
+	if err1 != nil || err2 != nil || hi < Size {
+		return
+	}
+	if lo >= Size {
+		// Nothing in the range is mapped: no group may ping.
+		spec.Linux.Sysctl[key] = "1 0"
+		return
+	}
+	spec.Linux.Sysctl[key] = fmt.Sprintf("%d %d", lo, Size-1)
 }
 
 // DelegateCgroup makes the container's cgroup mount writable, for a
@@ -504,6 +534,81 @@ func podProcess(spec *specs.Spec, r Range) int {
 		}
 	}
 	return 0
+}
+
+// ExposeMounts makes the sources of spec's bind mounts reachable by the
+// container's root, host UID and GID root: the ones it cannot reach, under
+// a directory it cannot search (Docker's are 0710), are bound under dir
+// and the spec mounts them from there. libcontainer opens mount sources
+// before entering the user namespace, but CRIU restores them from inside
+// it. It returns what it bound, for Unexpose.
+func ExposeMounts(spec *specs.Spec, dir string, root int) ([]string, error) {
+	var bound []string
+	for i, m := range spec.Mounts {
+		if !isBind(m) || reachable(m.Source, root) {
+			continue
+		}
+		if len(bound) == 0 {
+			if err := os.MkdirAll(dir, 0o711); err != nil {
+				return bound, err
+			}
+		}
+		st, err := os.Stat(m.Source)
+		if err != nil {
+			return bound, err
+		}
+		target := filepath.Join(dir, strconv.Itoa(i))
+		flags := uintptr(unix.MS_BIND)
+		if st.IsDir() {
+			err = os.Mkdir(target, 0o711)
+			if slices.Contains(m.Options, "rbind") {
+				flags |= unix.MS_REC
+			}
+		} else {
+			err = os.WriteFile(target, nil, 0o600)
+		}
+		if err != nil {
+			return bound, err
+		}
+		if err := unix.Mount(m.Source, target, "", flags, ""); err != nil {
+			_ = os.Remove(target)
+			return bound, fmt.Errorf("bind %s: %w", m.Source, err)
+		}
+		bound = append(bound, target)
+		spec.Mounts[i].Source = target
+	}
+	return bound, nil
+}
+
+// Unexpose undoes ExposeMounts.
+func Unexpose(bound []string) {
+	for _, p := range bound {
+		_ = unix.Unmount(p, unix.MNT_DETACH)
+		_ = os.Remove(p)
+	}
+}
+
+// reachable says whether host UID and GID root can search every directory
+// above path.
+func reachable(path string, root int) bool {
+	for d := filepath.Dir(path); ; d = filepath.Dir(d) {
+		var st unix.Stat_t
+		if err := unix.Stat(d, &st); err != nil {
+			return false
+		}
+		perm := st.Mode & 0o001
+		if int(st.Uid) == root {
+			perm = st.Mode & 0o100
+		} else if int(st.Gid) == root {
+			perm = st.Mode & 0o010
+		}
+		if perm == 0 {
+			return false
+		}
+		if d == "/" {
+			return true
+		}
+	}
 }
 
 func isBind(m specs.Mount) bool {

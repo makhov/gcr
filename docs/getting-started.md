@@ -47,6 +47,22 @@ ctr task kill -s KILL demo && ctr task rm demo && ctr container rm demo
 ctr container restore --live --rw demo localhost/demo-ckpt:1
 ```
 
+## With Docker
+
+Register gcr in `/etc/docker/daemon.json`, with dockerd on the host's
+containerd, and restart dockerd:
+
+```json
+{"runtimes": {"gcr": {"runtimeType": "io.containerd.gcr.v2"}}}
+```
+
+```sh
+docker run --rm --runtime gcr busybox echo hello
+```
+
+[Docker](docker.md) has the details, and how snapshots, forks and time
+travel work on Docker's containers.
+
 ## With Kubernetes (CRI)
 
 Register the runtime with containerd's CRI plugin in

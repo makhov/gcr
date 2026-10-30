@@ -9,9 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -31,6 +33,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/makhov/gcr/internal/gpu"
+	"github.com/makhov/gcr/internal/ocispec"
 	"github.com/makhov/gcr/internal/snapshot"
 	"github.com/makhov/gcr/internal/userns"
 )
@@ -164,9 +167,15 @@ type Container struct {
 	rootfs    []mount.Mount
 	layers    []string // read-only, between rootfs's upper and lower layers
 	// rootfsDir is where rootfs is mounted: the bundle's rootfs, or where
-	// the caller mounted it (callerMounted; CRI-O does).
+	// the caller mounted it (callerMounted; CRI-O and Docker do).
 	rootfsDir     string
 	callerMounted bool
+	// callerMounts is the caller's own mount, put back on delete where gcr
+	// mounted another over it.
+	callerMounts []mount.Mount
+	// callerPath, if set, is where the caller mounted the rootfs, which gcr
+	// mounted at rootfsDir instead and binds there.
+	callerPath string
 	// frozen: restored when created and frozen until Start (CRI-O).
 	frozen         bool
 	snapshots      *snapshot.Hold
@@ -268,19 +277,20 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		}
 	}
 
-	// CRI-O mounts the rootfs itself and passes none. gcr then works with
-	// the overlay it mounted: its writable layer, and for a fork the same
-	// overlay mounted again with the snapshot's layers.
+	// CRI-O and Docker mount the rootfs themselves and pass none. gcr then
+	// works with the overlay they mounted: its writable layer, and the same
+	// overlay mounted again where it needs another, with a fork's snapshot
+	// layers or with its image layers idmapped.
 	rootfsDir := filepath.Join(o.Bundle, "rootfs")
 	callerMounted := false
+	var callerMounts []mount.Mount // as the caller mounted it
 	if len(o.Rootfs) == 0 && spec.Root != nil && filepath.IsAbs(spec.Root.Path) {
 		if m := callerRootfs(spec.Root.Path); m != nil {
-			if prep.IDMap != "" {
-				// Its layers would have to be idmapped, and its writable
-				// layer given to the mapped root.
+			if prep.IDMap != "" && ocispec.CRIO(spec) {
+				// Not tried yet; pods have CRI-O's own (hostUsers: false).
 				return nil, errRootfs("gcr's user namespaces")
 			}
-			if prep.Rewinds {
+			if prep.Rewinds && ocispec.CRIO(spec) {
 				// CRI-O knows the container by its init's pid and start
 				// time, and a rewind brings another: CRI-O would take
 				// the container for gone.
@@ -288,6 +298,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 					"CRI-O tracks the container by: %w", errdefs.ErrNotImplemented)
 			}
 			o.Rootfs, rootfsDir, callerMounted = m, spec.Root.Path, true
+			callerMounts = m
 		}
 	}
 
@@ -323,16 +334,38 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		}
 	}
 	rootfs := rootfsDir
-	if callerMounted && len(prep.Layers) > 0 {
-		if err := remountCaller(o.Rootfs, rootfs, prep.Layers); err != nil {
+	var remountedCaller []mount.Mount
+	callerPath := ""
+	switch {
+	case callerMounted && prep.IDMap != "":
+		// The container's root, an unprivileged host ID, may not reach
+		// where the caller mounted it (Docker's directories are 0710), so
+		// the idmapped overlay goes in the bundle, and is bound where the
+		// caller expects it for its own use (docker cp).
+		callerPath, rootfs = rootfsDir, filepath.Join(o.Bundle, "rootfs")
+		if err := moveCaller(o.Rootfs, rootfs, prep.Layers, callerPath, callerMounts); err != nil {
 			return nil, fmt.Errorf("mount rootfs: %w", err)
 		}
+		remountedCaller = callerMounts
+		spec.Root.Path, rootfsDir = rootfs, rootfs
 		defer func() {
 			if retErr != nil {
-				_ = remountCaller(o.Rootfs, rootfs, nil)
+				_ = unix.Unmount(callerPath, unix.MNT_DETACH)
+				_ = mount.UnmountRecursive(rootfs, 0)
+				_ = mountAll(callerMounts, callerPath)
 			}
 		}()
-	} else if len(o.Rootfs) > 0 && !callerMounted {
+	case callerMounted && len(prep.Layers) > 0:
+		if err := remountCaller(o.Rootfs, rootfs, prep.Layers, callerMounts); err != nil {
+			return nil, fmt.Errorf("mount rootfs: %w", err)
+		}
+		remountedCaller = callerMounts
+		defer func() {
+			if retErr != nil {
+				_ = remountCaller(callerMounts, rootfs, nil, nil)
+			}
+		}()
+	case len(o.Rootfs) > 0 && !callerMounted:
 		if err := os.MkdirAll(rootfs, 0o711); err != nil {
 			return nil, err
 		}
@@ -409,6 +442,8 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		layers:         prep.Layers,
 		rootfsDir:      rootfsDir,
 		callerMounted:  callerMounted,
+		callerMounts:   remountedCaller,
+		callerPath:     callerPath,
 		snapshots:      hold,
 		lc:             lc,
 		spec:           spec,
@@ -444,7 +479,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 			return nil, fmt.Errorf("live migration into a container CRI-O runs: CRI-O needs the container's "+
 				"process when it creates it, before the source has sent one: %w", errdefs.ErrNotImplemented)
 		}
-		if err := c.restore(c.checkpoint); err != nil {
+		if err := c.restore(c.checkpoint, c.callerNetwork()); err != nil {
 			return nil, err
 		}
 		if err := c.lc.Pause(); err != nil {
@@ -503,7 +538,7 @@ func (c *Container) Start(ctx context.Context) error {
 		c.setStatus(Running)
 		return nil
 	default:
-		if err := c.restore(c.checkpoint); err != nil {
+		if err := c.restore(c.checkpoint, c.callerNetwork()); err != nil {
 			return err
 		}
 	}
@@ -518,7 +553,26 @@ func (c *Container) Start(ctx context.Context) error {
 }
 
 // restore starts a new incarnation from CRIU images.
-func (c *Container) restore(images string) error {
+// callerNetwork says whether the container's caller sets up its network,
+// in the namespace the container makes, once the task exists: Docker
+// does. Its devices (a veth to a host bridge) cannot be restored, and a
+// new container must not have another's address anyway.
+func (c *Container) callerNetwork() bool {
+	if !c.callerMounted || ocispec.CRIO(c.spec) {
+		return false
+	}
+	for _, ns := range c.cfg.Namespaces {
+		if ns.Type == configs.NEWNET {
+			return ns.Path == ""
+		}
+	}
+	return false
+}
+
+// restore restores the container from images. With freshNetwork, its
+// network namespace is restored empty but for its loopback, for the caller
+// to set up (callerNetwork).
+func (c *Container) restore(images string, freshNetwork bool) error {
 	c.trackedSince = ""
 	// The images may come from elsewhere (a snapshot, a migration): their
 	// user namespace must be this container's.
@@ -554,16 +608,29 @@ func (c *Container) restore(images string) error {
 		}
 		defer stop()
 	}
-	err = c.lc.Restore(proc, &libcontainer.CriuOpts{
+	opts := &libcontainer.CriuOpts{
 		ImagesDirectory: images,
 		WorkDirectory:   work,
 		LazyPages:       c.lazyPages,
 		StatusFd:        -1,
 		Command:         c.criuCommand(),
-	})
+	}
+	if freshNetwork {
+		opts.EmptyNs = unix.CLONE_NEWNET
+	}
+	err = c.lc.Restore(proc, opts)
 	if err != nil {
 		c.io.detach() // restore requires pipes, never a terminal
 		return fmt.Errorf("restore (criu log in %s): %w", work, err)
+	}
+	if freshNetwork {
+		pid, err := proc.Pid()
+		if err == nil {
+			err = loopbackUp(pid)
+		}
+		if err != nil {
+			return fmt.Errorf("restore: %w", err)
+		}
 	}
 	_ = os.RemoveAll(work)
 	// libcontainer leaves a restored container in a state that refuses
@@ -763,6 +830,12 @@ func (c *Container) Rewind(ctx context.Context, dir string) error {
 	if !c.Running() || c.isMigrating() {
 		return fmt.Errorf("container is not running or is migrating: %w", errdefs.ErrFailedPrecondition)
 	}
+	if c.callerNetwork() && hasNetDevices(c.Pid()) {
+		// A rewind restores the processes in a network namespace of
+		// their own, without the devices the caller set up in this one.
+		return fmt.Errorf("rewind of a container on a network its caller set up (Docker's bridge networks; "+
+			"run it with --network none or host): %w", errdefs.ErrNotImplemented)
+	}
 	upper, err := c.UpperDir()
 	if err != nil {
 		return err
@@ -797,6 +870,13 @@ func (c *Container) Rewind(ctx context.Context, dir string) error {
 		c.mu.Lock()
 		c.replacing = false
 		c.mu.Unlock()
+		// As at any exit, the output ends: Docker holds the container
+		// until it reads EOF on it.
+		if c.tty != nil {
+			c.tty.Close()
+		} else {
+			c.io.Close()
+		}
 		c.markExited(nil)
 		return err
 	}
@@ -828,18 +908,54 @@ func (c *Container) replace(upper, dir string) error {
 	if err := mountRootfs(c.rootfs, rootfs, c.layers); err != nil {
 		return fmt.Errorf("mount rootfs: %w", err)
 	}
+	if c.callerPath != "" {
+		// The bind still shows the old overlay.
+		_ = unix.Unmount(c.callerPath, unix.MNT_DETACH)
+		if err := unix.Mount(rootfs, c.callerPath, "", unix.MS_BIND, ""); err != nil {
+			return fmt.Errorf("bind rootfs at %s: %w", c.callerPath, err)
+		}
+	}
 	lc, err := libcontainer.Create(Root(c.namespace), c.ID, c.cfg)
 	if err != nil {
 		return fmt.Errorf("create container: %w", err)
 	}
 	c.lc = lc
-	return c.restore(filepath.Join(dir, "images"))
+	return c.restore(filepath.Join(dir, "images"), false)
+}
+
+// moveCaller mounts the overlay its caller mounted at callerPath at dir
+// instead, as mounts (idmapped) with layers, and binds it at callerPath.
+// On failure the caller's own mount, orig, is put back.
+func moveCaller(mounts []mount.Mount, dir string, layers []string, callerPath string, orig []mount.Mount) (retErr error) {
+	if err := unix.Unmount(callerPath, 0); err != nil {
+		return fmt.Errorf("unmount %s: %w", callerPath, err)
+	}
+	defer func() {
+		if retErr != nil {
+			_ = mountAll(orig, callerPath)
+		}
+	}()
+	if err := clearVolatile(mounts); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o711); err != nil {
+		return err
+	}
+	if err := mountRootfs(mounts, dir, layers); err != nil {
+		return err
+	}
+	if err := unix.Mount(dir, callerPath, "", unix.MS_BIND, ""); err != nil {
+		_ = mount.UnmountRecursive(dir, 0)
+		return fmt.Errorf("bind rootfs at %s: %w", callerPath, err)
+	}
+	return nil
 }
 
 // remountCaller mounts the overlay its caller mounted at dir again, with
 // layers between its writable layer and the image's (none: as the caller
 // had it).
-func remountCaller(mounts []mount.Mount, dir string, layers []string) error {
+// On failure it mounts orig, the caller's own mounts, back if given.
+func remountCaller(mounts []mount.Mount, dir string, layers []string, orig []mount.Mount) error {
 	if err := unix.Unmount(dir, 0); err != nil {
 		return fmt.Errorf("unmount %s: %w", dir, err)
 	}
@@ -847,8 +963,8 @@ func remountCaller(mounts []mount.Mount, dir string, layers []string) error {
 		return err
 	}
 	if err := mountRootfs(mounts, dir, layers); err != nil {
-		if len(layers) > 0 {
-			_ = mountRootfs(mounts, dir, nil)
+		if orig != nil {
+			_ = mountAll(orig, dir)
 		}
 		return err
 	}
@@ -886,13 +1002,32 @@ func clearVolatile(mounts []mount.Mount) error {
 // mount if it mounted another there, and nothing if the caller has
 // unmounted it already (CRI-O does when the container stops).
 func (c *Container) unmountRootfs() error {
+	if c.callerPath != "" {
+		// The caller's mount goes back unless it has unmounted the bind.
+		bound := callerRootfs(c.callerPath) != nil
+		if bound {
+			if err := unix.Unmount(c.callerPath, unix.MNT_DETACH); err != nil {
+				return err
+			}
+		}
+		if err := mount.UnmountRecursive(c.rootfsDir, 0); err != nil {
+			return err
+		}
+		if !bound {
+			return nil
+		}
+		if err := clearVolatile(c.callerMounts); err != nil {
+			return err
+		}
+		return mountAll(c.callerMounts, c.callerPath)
+	}
 	if !c.callerMounted {
 		return mount.UnmountRecursive(c.rootfsDir, 0)
 	}
-	if len(c.layers) == 0 || callerRootfs(c.rootfsDir) == nil {
+	if c.callerMounts == nil || callerRootfs(c.rootfsDir) == nil {
 		return nil
 	}
-	return remountCaller(c.rootfs, c.rootfsDir, nil)
+	return remountCaller(c.callerMounts, c.rootfsDir, nil, nil)
 }
 
 // SetMigrating marks the container as being migrated out (true) or not.
@@ -1082,11 +1217,18 @@ func systemdCgroupPath(spec *specs.Spec) bool {
 }
 
 // idmapRootfs adds idmapping to an overlay rootfs: containerd's mount code
-// idmaps the lower layers, and a still empty upper layer is given to the
-// container's root so files it creates are owned by the mapped IDs.
+// idmaps the lower layers, and the upper layer is given to the container's
+// root so files it creates are owned by the mapped IDs.
 func idmapRootfs(mounts []mount.Mount, idmap string, root int) ([]mount.Mount, error) {
 	if len(mounts) == 0 {
 		return nil, errRootfs("gcr's user namespaces")
+	}
+	size := 0
+	if f := strings.Split(idmap, ":"); len(f) == 3 {
+		size, _ = strconv.Atoi(f[2])
+	}
+	if size <= 0 {
+		return nil, fmt.Errorf("idmap %q: %w", idmap, errdefs.ErrInvalidArgument)
 	}
 	out := slices.Clone(mounts)
 	for i, m := range out {
@@ -1098,19 +1240,103 @@ func idmapRootfs(mounts []mount.Mount, idmap string, root int) ([]mount.Mount, e
 			if !ok {
 				continue
 			}
-			entries, err := os.ReadDir(upper)
-			if err != nil {
-				return nil, err
-			}
-			if len(entries) == 0 {
-				if err := os.Chown(upper, root, root); err != nil {
-					return nil, fmt.Errorf("give writable layer to the container's root: %w", err)
-				}
+			if err := shiftUpper(upper, root, size); err != nil {
+				return nil, fmt.Errorf("give writable layer to the container's root: %w", err)
 			}
 		}
 		out[i].Options = append(slices.Clone(m.Options), "uidmap="+idmap, "gidmap="+idmap)
 	}
 	return out, nil
+}
+
+// hasNetDevices says whether pid's network namespace has devices other
+// than its loopback.
+func hasNetDevices(pid int) bool {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/net/dev", pid))
+	if err != nil {
+		return false
+	}
+	lines := strings.Split(string(b), "\n")
+	for _, line := range lines[min(2, len(lines)):] { // two header lines
+		if name, _, ok := strings.Cut(strings.TrimSpace(line), ":"); ok && name != "lo" {
+			return true
+		}
+	}
+	return false
+}
+
+// loopbackUp brings lo up in pid's network namespace.
+func loopbackUp(pid int) error {
+	errc := make(chan error, 1)
+	go func() {
+		// This thread switches network namespace and is never reused.
+		runtime.LockOSThread()
+		errc <- func() error {
+			ns, err := unix.Open(fmt.Sprintf("/proc/%d/ns/net", pid), unix.O_RDONLY|unix.O_CLOEXEC, 0)
+			if err != nil {
+				return err
+			}
+			defer unix.Close(ns)
+			if err := unix.Setns(ns, unix.CLONE_NEWNET); err != nil {
+				return fmt.Errorf("enter network namespace: %w", err)
+			}
+			fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+			if err != nil {
+				return err
+			}
+			defer unix.Close(fd)
+			ifr, err := unix.NewIfreq("lo")
+			if err != nil {
+				return err
+			}
+			if err := unix.IoctlIfreq(fd, unix.SIOCGIFFLAGS, ifr); err != nil {
+				return fmt.Errorf("lo: %w", err)
+			}
+			ifr.SetUint16(ifr.Uint16() | unix.IFF_UP)
+			if err := unix.IoctlIfreq(fd, unix.SIOCSIFFLAGS, ifr); err != nil {
+				return fmt.Errorf("lo up: %w", err)
+			}
+			return nil
+		}()
+	}()
+	return <-errc
+}
+
+// shiftUpper moves what in a writable layer is owned by IDs below size
+// (unmapped: the host's) into the range at root, as the idmapped image
+// layers beneath it appear. The layer is empty but for what the caller put
+// there before the container started (Docker: mountpoints such as
+// /etc/hosts); what the container wrote is in the range already, so a
+// container started again is left as it is.
+func shiftUpper(upper string, root, size int) error {
+	return filepath.WalkDir(upper, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		st := info.Sys().(*syscall.Stat_t)
+		uid, gid := int(st.Uid), int(st.Gid)
+		if uid >= size && gid >= size {
+			return nil
+		}
+		if uid < size {
+			uid += root
+		}
+		if gid < size {
+			gid += root
+		}
+		if err := os.Lchown(path, uid, gid); err != nil {
+			return err
+		}
+		// chown clears setuid and setgid.
+		if mode := info.Mode(); mode&(fs.ModeSetuid|fs.ModeSetgid) != 0 && mode&fs.ModeSymlink == 0 {
+			return os.Chmod(path, mode)
+		}
+		return nil
+	})
 }
 
 // delegateCgroup gives the container's cgroup to cgroupOwner, the way
@@ -1467,11 +1693,11 @@ var rlimits = map[string]int{
 
 // errRootfs says that what needs gcr to mount the container's overlay
 // rootfs cannot have it: the caller mounted it (CRI-O does; snapshots and
-// forks work with the overlay it mounted, user namespaces do not), or it
-// is not an overlay.
+// forks work with the overlay it mounted, user namespaces are not tried),
+// or it is not an overlay.
 func errRootfs(what string) error {
 	return fmt.Errorf("%s need the rootfs as overlay mounts from containerd, which gcr mounts itself; "+
-		"this container's was mounted by its caller (CRI-O does): %w", what, errdefs.ErrNotImplemented)
+		"this container's was mounted by its caller (CRI-O): %w", what, errdefs.ErrNotImplemented)
 }
 
 func idExtents(m []configs.IDMap) []userns.Extent {

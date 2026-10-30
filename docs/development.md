@@ -45,6 +45,7 @@ CRI, checkpoint/restore, static helper programs to run in containers):
 | `landlock` | a leaked host descriptor, with Landlock on and off, across a restore |
 | `dind` | Docker-in-Docker, unprivileged, in a user namespace |
 | `cri` | a pod through CRI: exec, exit codes, logs, updates, stats, user namespace |
+| `docker` | `docker run --runtime gcr`: run, exit codes, the user namespace, a published port, exec, stop and start; a snapshot on the bridge network forked into a container Docker gives an address; a rewind with `--network none`, and one refused on a bridge network; skipped without dockerd (`hack/docker-setup.sh`) |
 | `crio` | a pod under CRI-O (runtime type `vm`): exec, exit codes, logs, the container is gcr's, stop and remove end the shim; a snapshot forked into another pod, a fork of the fork, and the snapshots held while forks use them; time travel refused; skipped without CRI-O (`hack/crio-setup.sh`) |
 
 `sudo hack/clean-e2e.sh` removes what a failed run left behind (a leaked

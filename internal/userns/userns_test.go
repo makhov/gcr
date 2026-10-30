@@ -190,6 +190,22 @@ func TestApply(t *testing.T) {
 	}
 }
 
+func TestClampPingGroups(t *testing.T) {
+	for in, want := range map[string]string{
+		"0 2147483647": "0 65535", // Docker's
+		"0 1000":       "0 1000",
+		"100 99999":    "100 65535",
+		"70000 80000":  "1 0",
+		"1 0":          "1 0",
+	} {
+		s := &specs.Spec{Linux: &specs.Linux{Sysctl: map[string]string{"net.ipv4.ping_group_range": in}}}
+		clampPingGroups(s)
+		if got := s.Linux.Sysctl["net.ipv4.ping_group_range"]; got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestDelegateCgroup(t *testing.T) {
 	spec := func(caps ...string) *specs.Spec {
 		return &specs.Spec{

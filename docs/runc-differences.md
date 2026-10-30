@@ -31,7 +31,8 @@ container asks for them with an annotation.
 - **Under CRI-O**: no port forwarding, no gcr user namespaces, no time
   travel, no migration into a CRI-O container, and no CRI checkpoints.
   Snapshots and forks work ([getting started](getting-started.md#with-cri-o)).
-- **Docker (dockerd)** has not been tried with gcr as its runtime.
+- **Under Docker**: no `docker checkpoint`, and no rewind on a bridge
+  network ([Docker](docker.md#networking)).
 
 ## On by default
 
