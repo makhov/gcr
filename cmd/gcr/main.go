@@ -4,6 +4,7 @@
 //
 //	gcr [-n namespace] timeline ID
 //	gcr [-n namespace] rewind ID POINT
+//	gcr [-n namespace] point ID [LABEL]
 //	gcr [-n namespace] snapshot ID DIR
 //	gcr snapshot-users DIR
 //	gcr snapshot-rm DIR...
@@ -33,6 +34,7 @@ func main() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: gcr [-n namespace] timeline ID\n"+
 			"       gcr [-n namespace] rewind ID POINT\n"+
+			"       gcr [-n namespace] point ID [LABEL]\n"+
 			"       gcr [-n namespace] snapshot ID DIR\n"+
 			"       gcr snapshot-users DIR\n"+
 			"       gcr snapshot-rm DIR...\n"+
@@ -63,7 +65,11 @@ func run(ctx context.Context, ns string, args []string) error {
 			if len(p.Argv) > 0 {
 				call += ", [" + quoteAll(p.Argv) + "]"
 			}
-			fmt.Fprintf(w, "#%d\t%s\t%s)\n", p.ID, p.Time.Format("15:04:05.000"), call)
+			call += ")"
+			if p.Syscall == "" {
+				call = p.Label // taken on request
+			}
+			fmt.Fprintf(w, "#%d\t%s\t%s\n", p.ID, p.Time.Format("15:04:05.000"), call)
 		}
 		return w.Flush()
 	case len(args) == 3 && args[0] == "rewind":
@@ -72,6 +78,15 @@ func run(ctx context.Context, ns string, args []string) error {
 			return fmt.Errorf("bad point %q", args[2])
 		}
 		return control.NewClient(ns, args[1]).Rewind(ctx, point)
+	case (len(args) == 2 || len(args) == 3) && args[0] == "point":
+		// Taken now, with the container frozen; needs time travel on
+		// (gcr.dev/time-travel=manual takes points only this way).
+		p, err := control.NewClient(ns, args[1]).TakePoint(ctx, strings.Join(args[2:], " "))
+		if err != nil {
+			return err
+		}
+		fmt.Printf("#%d\n", p.ID)
+		return nil
 	case len(args) == 3 && args[0] == "snapshot":
 		// The container keeps running; containers created with the
 		// annotation gcr.dev/fork-from=DIR start from the snapshot.

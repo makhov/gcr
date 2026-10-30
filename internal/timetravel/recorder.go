@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"golang.org/x/sys/unix"
 
@@ -159,10 +160,31 @@ func (r *Recorder) handle(ctx context.Context, t Trigger, allow func()) {
 		return
 	}
 
+	p := Point{Syscall: t.Syscall, Path: t.Path, Argv: t.Argv, StoppedPid: nspid}
+	if _, err := r.point(ctx, snap, p); err != nil {
+		log.G(ctx).WithError(err).Error("time travel")
+	}
+}
+
+// Take takes a point now, with the container frozen rather than a task
+// stopped at an exec; label says what it was taken before. A rewind to it
+// lets every process go on from where it was frozen.
+func (r *Recorder) Take(ctx context.Context, label string) (Point, error) {
+	r.mu.Lock()
+	snap := r.snap
+	r.mu.Unlock()
+	if snap == nil || !snap.Running() {
+		return Point{}, fmt.Errorf("container is not running: %w", errdefs.ErrFailedPrecondition)
+	}
+	return r.point(ctx, snap, Point{Label: label})
+}
+
+// point dumps the container as the next point on the timeline, p filled in
+// with its id, time and parent.
+func (r *Recorder) point(ctx context.Context, snap Snapshotter, p Point) (Point, error) {
 	id, dir, err := r.timeline.Reserve()
 	if err != nil {
-		log.G(ctx).WithError(err).Error("time travel: reserve point")
-		return
+		return p, fmt.Errorf("reserve point: %w", err)
 	}
 	r.mu.Lock()
 	parentID := 0
@@ -180,19 +202,17 @@ func (r *Recorder) handle(ctx context.Context, t Trigger, allow func()) {
 		r.mu.Lock()
 		r.lastID = 0 // the next starts a chain
 		r.mu.Unlock()
-		log.G(ctx).WithError(err).Error("time travel: snapshot")
-		return
+		return p, fmt.Errorf("snapshot: %w", err)
 	}
 	// The container falls back to a full dump when it cannot do an
 	// incremental one; CRIU links "parent" in the images when it did.
 	if _, err := os.Lstat(filepath.Join(dir, "images", "parent")); err != nil {
 		parentID = 0
 	}
-	p := Point{ID: id, Time: start, Syscall: t.Syscall, Path: t.Path, Argv: t.Argv, StoppedPid: nspid, Parent: parentID}
+	p.ID, p.Time, p.Parent = id, start, parentID
 	if err := r.timeline.Commit(p); err != nil {
 		r.timeline.Discard(id)
-		log.G(ctx).WithError(err).Error("time travel: commit point")
-		return
+		return p, fmt.Errorf("commit point: %w", err)
 	}
 	r.mu.Lock()
 	if parentID == 0 {
@@ -203,10 +223,11 @@ func (r *Recorder) handle(ctx context.Context, t Trigger, allow func()) {
 	r.lastID = id
 	r.mu.Unlock()
 	log.G(ctx).WithField("point", id).WithField("took", time.Since(start)).Debug("time travel: point")
+	return p, nil
 }
 
 // Rewind restores the container to point id and continues the task that was
-// stopped in it.
+// stopped in it, if any.
 func (r *Recorder) Rewind(ctx context.Context, id int) error {
 	p, err := r.timeline.Get(id)
 	if err != nil {
@@ -226,6 +247,9 @@ func (r *Recorder) Rewind(ctx context.Context, id int) error {
 	r.lastID = 0 // the restored memory has no tracking: start a chain
 	r.mu.Unlock()
 
+	if p.StoppedPid == 0 {
+		return nil // taken frozen: the restore left everything running
+	}
 	pids, err := snap.Pids()
 	if err != nil {
 		return fmt.Errorf("continue rewound task: %w", err)

@@ -383,9 +383,11 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 				criuOpts = append(criuOpts, "track-mem")
 				prep.TrackMemory = true
 			}
-			policy.AddTrigger(spec)
-			for _, name := range policy.Syscalls {
-				handlers[name] = rec.Handle
+			if len(policy.Syscalls) > 0 {
+				policy.AddTrigger(spec)
+				for _, name := range policy.Syscalls {
+					handlers[name] = rec.Handle
+				}
 			}
 		}
 		if len(handlers) > 0 {

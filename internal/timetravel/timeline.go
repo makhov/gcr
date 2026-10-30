@@ -22,8 +22,12 @@ type Point struct {
 	Syscall string    `json:"syscall"`
 	Path    string    `json:"path"`
 	Argv    []string  `json:"argv,omitempty"`
+	// Label says what a point taken on request (Recorder.Take) came
+	// before; such a point has no Syscall.
+	Label string `json:"label,omitempty"`
 	// StoppedPid is the task stopped just after its execve, as a pid in
-	// the container's pid namespace; it is continued after a rewind.
+	// the container's pid namespace; it is continued after a rewind. 0
+	// for a point taken on request.
 	StoppedPid int `json:"stoppedPid"`
 	// Parent is the point whose memory this one dumped only the changes
 	// to, 0 for a full point. A point needs its parents.

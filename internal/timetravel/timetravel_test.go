@@ -15,6 +15,9 @@ func TestParsePolicy(t *testing.T) {
 	if p, err := ParsePolicy(map[string]string{}); p != nil || err != nil {
 		t.Fatalf("no annotation: %v, %v", p, err)
 	}
+	if p, err := ParsePolicy(map[string]string{AnnotationTrigger: "manual"}); err != nil || p == nil || len(p.Syscalls) != 0 {
+		t.Fatalf("manual: %+v, %v (no trigger calls)", p, err)
+	}
 	p, err := ParsePolicy(map[string]string{AnnotationTrigger: "execve", AnnotationInterval: "250ms", AnnotationKeep: "3"})
 	if err != nil {
 		t.Fatal(err)

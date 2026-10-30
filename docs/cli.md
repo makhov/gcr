@@ -9,6 +9,7 @@ Containers are named by their containerd ID, in the namespace `-n` gives
 ```
 gcr [-n namespace] timeline ID
 gcr [-n namespace] rewind ID POINT
+gcr [-n namespace] point ID [LABEL]
 gcr [-n namespace] snapshot ID DIR
 gcr snapshot-users DIR
 gcr snapshot-rm DIR...
@@ -25,8 +26,8 @@ Errors go to standard error with `gcr:` in front, and the exit status is
 ### `gcr timeline ID`
 
 Lists the points on a container's timeline, newest first, with the call
-each was taken before. The container must have been started with
-`gcr.dev/time-travel=execve` ([time travel](time-travel.md)).
+each was taken before, or its label. The container must have been
+started with `gcr.dev/time-travel` ([time travel](time-travel.md)).
 
 ```
 $ gcr timeline demo
@@ -36,11 +37,20 @@ POINT  TIME          BEFORE
 #1     14:02:07.950  execve("/bin/sh", ["sh"])
 ```
 
+### `gcr point ID [LABEL]`
+
+Takes a point on the container's timeline now, with the container frozen,
+and prints it. `LABEL` says what it comes before (`gcr timeline` shows
+it). The container must have time travel on; with
+`gcr.dev/time-travel=manual`, this is the only way points are taken
+([points on request](time-travel.md#points-on-request)).
+
 ### `gcr rewind ID POINT`
 
 Replaces the container's processes and writable layer with those of a
 point (`3` or `#3`), and continues the program that point stopped
-before its first instruction. The container stays the same task to
+before its first instruction (or, for a point taken on request, every
+process from where it was). The container stays the same task to
 containerd. The timeline keeps its points, later ones included, so a
 rewind can be undone by rewinding forward; new points are added after
 them.
