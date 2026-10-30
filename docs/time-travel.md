@@ -52,5 +52,5 @@ checkpoint, a migration) and any rewind, which leave nothing to count
 from. A point of a 256 MiB container that wrote little since the last is
 a few hundred KiB, against 257 MiB for a full one.
 
-It needs CRIU with `--seccomp-notify-socket`
-([makhov/criu#1](https://github.com/makhov/criu/pull/1)) installed as `criu`.
+It needs gcr's CRIU (`--seccomp-notify-socket`), which a release's
+`gcr setup` installs ([install](getting-started.md#install)).

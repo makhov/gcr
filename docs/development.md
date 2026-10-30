@@ -11,9 +11,12 @@ make vm T=criu                            # once: build and install the CRIU for
 make vm T=test-e2e                        # build, install, run the end-to-end tests
 ```
 
-The CRIU fork is expected next to this repository (`../criu`), from
-[makhov/criu](https://github.com/makhov/criu); the runc fork comes in
-through `go.mod`. [Architecture](architecture.md) says what each package
+The CRIU fork is expected next to this repository (`../criu`): a clone of
+[makhov/criu](https://github.com/makhov/criu) at the tag in
+`hack/criu-version` (`git -C ../criu checkout v4.2.1+gcr.0`), or on its
+`gcr` branch to change it. Changes go to that branch as pull requests, and
+a new tag (`v4.2.1+gcr.1`, ...) in `hack/criu-version` releases them. The
+runc fork comes in through `go.mod`. [Architecture](architecture.md) says what each package
 does.
 
 For the CRI conformance suite:
@@ -72,35 +75,35 @@ are willing to give everyone with write access.
 
 ## Releases
 
-`make release` (`hack/release.sh`) builds static binaries of the shim,
-`gcr` and CRIU for linux/amd64 and linux/arm64 into
-`dist/gcr-VERSION-linux-ARCH.tar.gz`, with `dist/SHA256SUMS`. gcr's are
-stamped with the version (`containerd-shim-gcr-v2 -v`, `gcr version`);
-CRIU comes from the makhov/criu checkout in `CRIU_SRC` (default `../criu`),
-built `STATIC=1 NO_GNUTLS=1 NO_NFTABLES=1`, without plugins. Each archive's
-`VERSIONS` says which commits they are.
+`make release` (`hack/release.sh`) builds, for linux/amd64 and
+linux/arm64, one file each, `dist/gcr-VERSION-linux-ARCH`, and
+`dist/SHA256SUMS`. Each is the `gcr` command, static, carrying what
+`gcr setup` installs (`internal/payload`, compressed): the shim, static,
+and gcr's CRIU with its CUDA plugin. All are stamped with the version;
+`gcr version` says which CRIU commit a release carries.
 
-It needs no CI: it runs on a Linux host that can build with cgo for both,
-such as the dev VM. There, building amd64 from arm64 takes Ubuntu's cross
-compiler and the amd64 libraries:
+- **CRIU** is makhov/criu at the tag in `hack/criu-version`
+  (`RELEASE_CRIU_SRC=DIR` builds a tree instead, to try a change). It is built in
+  an Ubuntu 22.04 container (`hack/criu-build.sh`, `CRIU_IMAGE`) with its
+  libraries linked in and glibc dynamic (`STATIC=libs`), so it runs on
+  glibc 2.35 and later and loads its plugins.
+- **The host** needs Docker (`DOCKER="sudo docker"` where its socket is
+  root's), `zstd`, and Go with cgo for both architectures. On the arm64 dev
+  VM, building amd64 takes Ubuntu's cross compiler and amd64 libseccomp:
 
-```sh
-sudo dpkg --add-architecture amd64 && sudo apt-get update
-sudo apt-get install gcc-x86-64-linux-gnu libc6-dev-amd64-cross libseccomp-dev:amd64 \
-  libprotobuf-c-dev:amd64 libnl-3-dev:amd64 libnet1-dev:amd64 libcap-dev:amd64 libbsd-dev:amd64 \
-  libbpf-dev:amd64 uuid-dev:amd64 libelf-dev:amd64 zlib1g-dev:amd64 libzstd-dev:amd64 libmd-dev:amd64
-```
+  ```sh
+  sudo dpkg --add-architecture amd64 && sudo apt-get update
+  sudo apt-get install gcc-x86-64-linux-gnu libc6-dev-amd64-cross libseccomp-dev:amd64
+  ```
 
-(on an amd64 host, the same with `arm64`, and `gcc-aarch64-linux-gnu`,
-`libc6-dev-arm64-cross`). To cut one:
+  (on an amd64 host, `gcc-aarch64-linux-gnu`, `libc6-dev-arm64-cross` and
+  `libseccomp-dev:arm64`).
+
+It needs no CI. To cut one:
 
 ```sh
 git tag v0.1.0 && git push origin v0.1.0
-make vm T='release VERSION=v0.1.0'    # or `make release VERSION=v0.1.0` on the host
+make vm T='release VERSION=v0.1.0 DOCKER="sudo docker"'
 make release-publish VERSION=v0.1.0   # a draft GitHub release, to look over and publish
 ```
-
-`VERSION` defaults to `git describe`. gcr's binaries are built with
-`-trimpath` and stripped. Check out the makhov/criu branch the release
-should carry in `CRIU_SRC` first.
 

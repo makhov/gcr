@@ -38,8 +38,9 @@ bpf:
 test:
 	go test -tags $(TAGS) ./...
 
-# Builds and installs our CRIU fork (seccomp listener restore) as `criu`,
-# with its CUDA plugin, from a checkout next to this repo.
+# Builds and installs gcr's CRIU as `criu`, with its CUDA plugin, from a
+# makhov/criu checkout next to this repo: the tag in hack/criu-version, or
+# a change to it.
 CRIU_SRC ?= ../criu
 criu:
 	$(MAKE) -C $(CRIU_SRC) criu cuda_plugin
@@ -67,22 +68,25 @@ test-k8s: static
 vm:
 	$(IN_VM) make $(T)
 
-# Release archives (hack/release.sh): static binaries of the shim, gcr and
-# CRIU (from CRIU_SRC) for each architecture, built on a Linux host that
-# can cross-compile with cgo, such as the dev VM: `make vm T=release`
-# (docs/development.md#releases). The version is the git tag, or a
-# describe of the commit.
+# A release (hack/release.sh): for each architecture one file, gcr carrying
+# the shim and gcr's CRIU for `gcr setup` to install, built on a Linux host
+# with Docker that can cross-compile with cgo, such as the dev VM:
+# `make vm T=release` (docs/development.md#releases). The version is the
+# git tag, or a describe of the commit.
 VERSION ?= $(shell git describe --tags --always --dirty)
 RELEASE_ARCHES ?= amd64 arm64
 # containerd's own version variables: `containerd-shim-gcr-v2 -v` and
 # `gcr version` print them.
 VERSION_LDFLAGS := -X github.com/containerd/containerd/v2/version.Version=$(VERSION) \
 	-X github.com/containerd/containerd/v2/version.Revision=$(shell git rev-parse HEAD)
+DOCKER ?= docker
+# CRIU comes from makhov/criu at the tag in hack/criu-version; CRIU_SRC=DIR
+# builds a tree instead, to try a change to it.
 release:
-	VERSION=$(VERSION) CRIU_SRC=$(CRIU_SRC) hack/release.sh $(RELEASE_ARCHES)
+	VERSION=$(VERSION) DOCKER="$(DOCKER)" $(if $(RELEASE_CRIU_SRC),CRIU_SRC=$(RELEASE_CRIU_SRC)) hack/release.sh $(RELEASE_ARCHES)
 
 # Publishes dist/ as a GitHub release for VERSION (a tag), as a draft to
 # look over before it is public.
 release-publish:
-	gh release create $(VERSION) dist/*.tar.gz dist/SHA256SUMS --draft --title $(VERSION) --generate-notes
+	gh release create $(VERSION) dist/gcr-* dist/SHA256SUMS --draft --title $(VERSION) --generate-notes
 

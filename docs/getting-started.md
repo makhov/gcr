@@ -18,28 +18,58 @@ another machine without a spare Linux node, use the
 
 ## Install
 
-From a release, for `linux-amd64` or `linux-arm64`: static binaries of
-the shim, `gcr`, and the CRIU they need (gcr's own,
-[makhov/criu](https://github.com/makhov/criu)), nothing else to install.
+A release is one file per architecture, `gcr`, which carries the rest:
 
 ```sh
-v=v0.1.0 arch=amd64
-curl -LO https://github.com/makhov/gcr/releases/download/$v/gcr-$v-linux-$arch.tar.gz
-tar -xzf gcr-$v-linux-$arch.tar.gz && cd gcr-$v-linux-$arch
-sudo install -m 0755 containerd-shim-gcr-v2 gcr /usr/local/bin/
-sudo install -m 0755 criu /usr/local/sbin/
-gcr version
+v=v0.1.0 arch=amd64        # or arm64
+curl -Lo gcr https://github.com/makhov/gcr/releases/download/$v/gcr-$v-linux-$arch
+chmod +x gcr
+sudo ./gcr setup           # -docker to register with dockerd too
 ```
 
-The release's CRIU loads no plugins, which a static binary cannot: GPU
-nodes, whose checkpoints need CRIU's CUDA plugin ([GPUs](gpus.md)), build
-CRIU instead.
+`gcr setup`:
+
+- installs `gcr` and the shim (`containerd-shim-gcr-v2`) into
+  `/usr/local/bin`;
+- installs gcr's CRIU ([makhov/criu](https://github.com/makhov/criu)) and
+  CRIU's CUDA plugin into `/var/lib/gcr`, where gcr uses them ahead of any
+  `criu` the node has, which it leaves alone;
+- registers the runtime with containerd in a drop-in,
+  `/etc/containerd/conf.d/gcr.toml`, making `config.toml` import `conf.d` if
+  it does not (keeping the old one as `config.toml.gcr-backup`), and with
+  dockerd with `-docker`;
+- restarts containerd (running containers carry on; `-no-restart` leaves
+  it to you);
+- and ends with `gcr doctor`: what the node has for gcr's features, and
+  what to do about what it lacks.
+
+The Go binaries are static; the CRIU needs glibc 2.35 or later (Ubuntu
+22.04, Debian 12, RHEL 10, and later). Running `gcr setup` again with a new
+`gcr` upgrades it; running containers keep the shim they started with.
+
+`gcr doctor` on its own checks a node any time:
+
+```
+$ sudo gcr doctor
+ok   kernel          6.14.0-1015
+ok   cgroup v2       unified hierarchy
+ok   shim            /usr/local/bin/containerd-shim-gcr-v2 v0.1.0
+ok   containerd      v2.4.2, runtime gcr registered
+ok   CRIU            /var/lib/gcr/bin/criu 4.2.1
+ok   Landlock        ABI 7
+off  netlink policy  no BPF LSM: containers' network configuration is limited by seccomp alone
+                     -> add bpf to the kernel's lsm= list (lockdown,capability,landlock,yama,apparmor) and reboot
+off  lazy restore    vm.unprivileged_userfaultfd = 0: no gcr.dev/lazy-restore or post-copy migration for containers in a user namespace
+                     -> sysctl vm.unprivileged_userfaultfd=1 (docs/fork.md#lazy-restore says what it exposes)
+...
+```
 
 Or build on the Linux host (cgo is required):
 
 ```sh
 make install          # containerd-shim-gcr-v2 and gcr into /usr/local/bin
-make criu             # CRIU, with its CUDA plugin, from a makhov/criu checkout in ../criu
+make criu             # CRIU and its CUDA plugin, from a makhov/criu clone in ../criu at hack/criu-version's tag
+sudo gcr setup        # registers the runtime; this gcr carries nothing to install
 ```
 
 containerd finds the shim by name on `PATH`: the runtime type
