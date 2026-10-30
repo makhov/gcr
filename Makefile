@@ -9,8 +9,8 @@ IN_VM = limactl shell --workdir $(CURDIR) $(VM) --
 .PHONY: build static install vet test test-e2e test-k8s vm criu bpf release release-publish
 
 build:
-	CGO_ENABLED=1 go build -tags $(TAGS) -o $(BIN) ./cmd/containerd-shim-gcr-v2
-	CGO_ENABLED=1 go build -tags $(TAGS) -o $(CLI) ./cmd/gcr
+	CGO_ENABLED=1 go build -tags $(TAGS) -ldflags '$(VERSION_LDFLAGS)' -o $(BIN) ./cmd/containerd-shim-gcr-v2
+	CGO_ENABLED=1 go build -tags $(TAGS) -ldflags '$(VERSION_LDFLAGS)' -o $(CLI) ./cmd/gcr
 
 # Static binaries, for nodes without glibc (k0s's image is Alpine).
 STATIC_LDFLAGS := -linkmode external -extldflags "-static"
