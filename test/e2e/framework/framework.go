@@ -168,7 +168,7 @@ func (n *Namespace) Create(id string, s Spec) *Container {
 // test, so it can run in another goroutine (an incoming migration's task
 // starts only once the checkpoint arrives).
 func (c *Container) Start() error {
-	task, err := c.C.NewTask(c.ns.Ctx, cio.NullIO)
+	task, err := c.C.NewTask(c.ns.Ctx, c.output())
 	if err != nil {
 		return fmt.Errorf("task %s: %w", c.ID, err)
 	}
@@ -219,6 +219,12 @@ func (c *Container) Remove() {
 	ctx := c.ns.Ctx
 	if c.Task != nil && c.ns.t.Failed() {
 		c.diagnose()
+	}
+	if c.ns.t.Failed() {
+		if b, err := os.ReadFile(c.logPath()); err == nil && len(b) > 0 {
+			lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+			c.ns.t.Logf("output of %s (%s), last lines:\n%s", c.ID, c.ns.Name, strings.Join(lines[max(0, len(lines)-30):], "\n"))
+		}
 	}
 	if c.Task != nil {
 		_ = c.Task.Kill(ctx, syscall.SIGKILL)
@@ -354,7 +360,7 @@ func (c *Container) CheckpointRestore() {
 		t.Fatalf("restore %s: %v", c.ID, err)
 	}
 	c.C = restored
-	task, err := restored.NewTask(ctx, cio.NullIO, containerd.WithTaskCheckpoint(img))
+	task, err := restored.NewTask(ctx, c.output(), containerd.WithTaskCheckpoint(img))
 	if err != nil {
 		t.Fatalf("restore task %s: %v", c.ID, err)
 	}
@@ -460,6 +466,22 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// output sends the container's stdout and stderr to a file, which a
+// failed test shows: what a process that crashed said.
+func (c *Container) output() cio.Creator {
+	_ = os.MkdirAll(filepath.Dir(c.logPath()), 0o755)
+	f, err := os.OpenFile(c.logPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return cio.NullIO
+	}
+	c.ns.t.Cleanup(func() { f.Close() })
+	return cio.NewCreator(cio.WithStreams(nil, f, f))
+}
+
+func (c *Container) logPath() string {
+	return filepath.Join(os.TempDir(), "gcr-e2e-output", c.ns.Name+"-"+c.ID+".log")
 }
 
 // diagnose logs, for each process in the container's cgroup, each

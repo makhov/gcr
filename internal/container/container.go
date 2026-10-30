@@ -623,6 +623,7 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 	}
 	keepWork := false // the log of a lazy-pages daemon that runs on
 	lazy := c.lazyPages || c.remotePages != ""
+	began := time.Now()
 	if lazy {
 		// Must be serving before the restore asks it for a page, and it
 		// keeps going afterwards: the container faults pages in as it
@@ -638,6 +639,7 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 		c.lazyDaemon.stop()
 		c.lazyDaemon, keepWork = d, true
 	}
+	daemonUp := time.Now()
 	opts := &libcontainer.CriuOpts{
 		ImagesDirectory: images,
 		WorkDirectory:   work,
@@ -653,6 +655,18 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 		c.io.detach() // restore requires pipes, never a terminal
 		return fmt.Errorf("restore (criu log in %s): %w%s", work, err, criuErrors(filepath.Join(work, "restore.log")))
 	}
+	restored := time.Now()
+	inCRIU, gaps := criuTimes(filepath.Join(work, "restore.log"), 3)
+	defer func() {
+		log.G(context.Background()).WithFields(log.Fields{
+			"lazy":         lazy,
+			"daemon":       daemonUp.Sub(began).Round(time.Millisecond),
+			"criu":         restored.Sub(daemonUp).Round(time.Millisecond),
+			"criu-own":     inCRIU.Round(time.Millisecond),
+			"criu-longest": gaps,
+			"after":        time.Since(restored).Round(time.Millisecond),
+		}).Info("restore took")
+	}()
 	if freshNetwork {
 		pid, err := proc.Pid()
 		if err == nil {
@@ -1408,6 +1422,46 @@ func startLazyPages(images, work string, onDemand bool, pageServer string) (*laz
 		}
 	}()
 	return d, nil
+}
+
+// criuTimes reads a CRIU log's timestamps ("(00.123456)" opening each
+// line): how long CRIU took by its own clock, and its n longest gaps
+// between lines, each with the line that ended it.
+func criuTimes(path string, n int) (time.Duration, string) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, ""
+	}
+	type gap struct {
+		d    time.Duration
+		line string
+	}
+	var gaps []gap
+	var last time.Duration
+	for _, l := range strings.Split(string(b), "\n") {
+		l = strings.TrimSpace(l)
+		end := strings.IndexByte(l, ')')
+		if !strings.HasPrefix(l, "(") || end < 0 {
+			continue
+		}
+		secs, err := strconv.ParseFloat(l[1:end], 64)
+		if err != nil {
+			continue
+		}
+		at := time.Duration(secs * float64(time.Second))
+		gaps = append(gaps, gap{at - last, strings.TrimSpace(l[end+1:])})
+		last = at
+	}
+	slices.SortFunc(gaps, func(a, b gap) int { return int(b.d - a.d) })
+	var out []string
+	for _, g := range gaps[:min(n, len(gaps))] {
+		line := g.line
+		if len(line) > 100 {
+			line = line[:100]
+		}
+		out = append(out, fmt.Sprintf("%s before %q", g.d.Round(time.Millisecond), line))
+	}
+	return last, strings.Join(out, "; ")
 }
 
 // logTail returns the last n lines of a log, joined with " | ".
