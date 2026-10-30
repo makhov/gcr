@@ -28,6 +28,11 @@ func TestRegisterContainerd(t *testing.T) {
 		want   []string // in config.toml afterwards; nil: no config.toml
 	}{
 		"no config, containerd 2": {major: 2},
+		"version 2 config, containerd 2 (kind)": {
+			config: "version = 2\n[plugins.\"io.containerd.grpc.v1.cri\".containerd]\n  snapshotter = \"overlayfs\"\n",
+			major:  2,
+			want:   []string{"version = 2\nimports = ['CONFD/*.toml']\n[plugins"},
+		},
 		"no config, containerd 1": {major: 1, want: []string{"version = 2", "imports = ['CONFD/*.toml']"}},
 		"config without imports": {
 			config: "version = 3\n[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc]\n  runtime_type = 'io.containerd.runc.v2'\n",
@@ -55,7 +60,7 @@ func TestRegisterContainerd(t *testing.T) {
 				}
 			}
 			for i := range 2 { // a second run changes nothing
-				changed, err := registerContainerd(config, tc.major, quiet)
+				changed, _, err := registerContainerd(config, "/x/shim", tc.major, quiet)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -64,11 +69,13 @@ func TestRegisterContainerd(t *testing.T) {
 				}
 			}
 			dropIn := read(t, filepath.Join(confd, "gcr.toml"))
+			// The drop-in's format is the configuration's: containerd
+			// refuses one newer than what imports it.
 			wantTable := "io.containerd.cri.v1.runtime"
-			if tc.major == 1 {
+			if tc.major == 1 || strings.Contains(tc.config, "version = 2") {
 				wantTable = "io.containerd.grpc.v1.cri"
 			}
-			if !strings.Contains(dropIn, wantTable) || !strings.Contains(dropIn, RuntimeType) {
+			if !strings.Contains(dropIn, wantTable) || !strings.Contains(dropIn, RuntimeType) || !strings.Contains(dropIn, "runtime_path = '/x/shim'") {
 				t.Fatalf("drop-in for containerd %d:\n%s", tc.major, dropIn)
 			}
 			if tc.want == nil {
@@ -89,6 +96,53 @@ func TestRegisterContainerd(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Undo puts the configuration and conf.d back as they were, as when
+// containerd would not load the new configuration.
+func TestRegisterContainerdUndo(t *testing.T) {
+	dir := t.TempDir()
+	config := filepath.Join(dir, "config.toml")
+	old := "version = 3\n[plugins.'x']\n"
+	if err := os.WriteFile(config, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, undo, err := registerContainerd(config, "/x/shim", 2, quiet)
+	if err != nil || !changed {
+		t.Fatalf("%v, %v", changed, err)
+	}
+	undo()
+	if got := read(t, config); got != old {
+		t.Fatalf("config.toml after undo:\n%s", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "conf.d", "gcr.toml")); err == nil {
+		t.Fatal("the drop-in is still there after undo")
+	}
+}
+
+func TestRegisterK0s(t *testing.T) {
+	dir := t.TempDir()
+	k0sConfig = filepath.Join(dir, "containerd.toml")
+	if err := os.WriteFile(k0sConfig, []byte("# k0s_managed=true\nversion = 3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := registerK0s("/x/shim", quiet); err != nil || !changed {
+		t.Fatalf("%v, %v", changed, err)
+	}
+	if got := read(t, filepath.Join(dir, "containerd.d", "gcr.toml")); !strings.Contains(got, "version = 3") ||
+		!strings.Contains(got, "io.containerd.cri.v1.runtime") {
+		t.Fatalf("drop-in:\n%s", got)
+	}
+	if got := read(t, k0sConfig); got != "# k0s_managed=true\nversion = 3\n" {
+		t.Fatalf("k0s's own configuration changed:\n%s", got)
+	}
+	// One taken over from k0s does not import containerd.d.
+	if err := os.WriteFile(k0sConfig, []byte("version = 3\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registerK0s("/x/shim", quiet); err == nil || !strings.Contains(err.Error(), "not managed by k0s") {
+		t.Fatalf("unmanaged: %v", err)
 	}
 }
 

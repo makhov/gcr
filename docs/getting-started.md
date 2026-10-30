@@ -112,8 +112,35 @@ travel work on Docker's containers.
 
 ## With Kubernetes (CRI)
 
-Register the runtime with containerd's CRI plugin in
-`/etc/containerd/config.toml` and restart containerd:
+On a cluster whose nodes run containerd, the installer DaemonSet sets gcr
+up on every node:
+
+```sh
+kubectl apply -f deploy/gcr.yaml
+```
+
+Each node gets a privileged pod (`gcr-system/gcr-installer`) that runs the
+release image's `gcr setup` on the host ([install](#install)): the shim and
+gcr's CRIU, the runtime registered with containerd. On k0s it writes
+`/etc/k0s/containerd.d/gcr.toml`, which k0s applies itself; elsewhere a
+containerd drop-in and a restart of containerd (running pods carry on).
+It then labels the node `gcr.dev/runtime=ready`, and the manifest's
+`gcr` RuntimeClass schedules pods only onto nodes with that label. A node
+missing something gcr needs keeps its pod crash-looping, with
+`gcr doctor`'s report in the pod's logs. A new image upgrades every node in
+turn; deleting the DaemonSet unlabels the nodes and leaves gcr on them.
+
+- `GCR_SETUP_ARGS` in the DaemonSet passes options to `gcr setup`:
+  `-containerd-config` and `-containerd-unit` for distributions that run
+  containerd their own way (k3s, RKE2).
+- The image is `ghcr.io/makhov/gcr:VERSION`; while the repository is
+  private, the DaemonSet needs an `imagePullSecrets` for it.
+- Nodes whose CRIU cannot run (gcr's needs glibc 2.35 or later, so not
+  Alpine) run containers on gcr without checkpoints, forks, time travel
+  or migration; `gcr doctor` says so.
+
+Or by hand: register the runtime with containerd's CRI plugin in
+`/etc/containerd/config.toml` (or `sudo gcr setup`) and restart containerd:
 
 ```toml
 version = 3

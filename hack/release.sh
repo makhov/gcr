@@ -42,7 +42,7 @@ if [ -n "${CRIU_SRC:-}" ]; then
 	CRIU_SRC=$(cd "$CRIU_SRC" && pwd)
 else
 	CRIU_SRC=$work/criu-src
-	git clone -q --depth 1 --branch "$CRIU_VERSION" https://github.com/makhov/criu.git "$CRIU_SRC"
+	git -c advice.detachedHead=false clone -q --depth 1 --branch "$CRIU_VERSION" https://github.com/makhov/criu.git "$CRIU_SRC"
 fi
 
 for arch in "$@"; do
