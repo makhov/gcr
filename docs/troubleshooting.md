@@ -24,6 +24,26 @@ around each. To find the call, run the program under `strace -f` in the
 container (or `strace -p` from an `exec`), or compare with a handler that
 has `Hardening = 'off'` and `Landlock = 'off'`.
 
+## Which layer refused it
+
+- **seccomp** refusals show nowhere but in the program's error. Compare
+  under a handler with `Hardening = 'off'`.
+- **Landlock** refusals are in the kernel's audit log, where audit is
+  on (auditd running, or `audit=1` on the kernel command line) and the
+  kernel has Landlock ABI 7 (Linux 6.15 or later):
+
+  ```
+  type=LANDLOCK_ACCESS msg=audit(...): domain=16b69b9aa blockers=fs.change_topology path="/mnt" dev="overlay" ino=2097465
+  ```
+
+  Older audit tools print the type as `UNKNOWN[1423]`.
+  `fs.change_topology` is a mount; other `fs.` blockers name the file
+  access refused, at the path given. Containers restored from a
+  checkpoint are confined again, but their refusals are not logged.
+- **Supervised mounts** the supervisor refused are in the shim's log, at
+  info level (`mount refused`, with the filesystem type and flags).
+- **The netlink policy** counts its refusals (above).
+
 ## Errors gcr returns
 
 | Error says | Why | What to do |

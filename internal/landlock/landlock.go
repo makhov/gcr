@@ -212,6 +212,21 @@ var criuHasLandlock = sync.OnceValue(func() bool {
 	return bytes.Contains(out, []byte("--landlock-fs"))
 })
 
+// logNewExecOn has the kernel audit what the domain denies after an exec
+// too (linux/landlock.h, ABI 7). By default only denials in the program
+// that restricted itself are audited, and that is the container's init,
+// before it execs the entrypoint: nothing the workload is refused would
+// be logged.
+const logNewExecOn = 0x2
+
+// restrictFlags are landlock_restrict_self's flags for the kernel's ABI.
+func restrictFlags(abi int) uintptr {
+	if abi >= 7 {
+		return logNewExecOn
+	}
+	return 0
+}
+
 type rule struct {
 	f      *os.File
 	access uint64
@@ -231,7 +246,7 @@ func restrict(handled uint64, rules []rule) error {
 			return fmt.Errorf("landlock: add rule for %s: %w", r.f.Name(), errno)
 		}
 	}
-	if _, _, errno := unix.Syscall(unix.SYS_LANDLOCK_RESTRICT_SELF, fd, 0, 0); errno != 0 {
+	if _, _, errno := unix.Syscall(unix.SYS_LANDLOCK_RESTRICT_SELF, fd, restrictFlags(ABI()), 0); errno != 0 {
 		return fmt.Errorf("landlock: restrict: %w", errno)
 	}
 	return nil

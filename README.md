@@ -80,6 +80,8 @@ fork.
 - [Getting started](docs/getting-started.md): install, and run with
   `ctr`, Kubernetes or CRI-O
 - [What gcr is good for, and where it falls short](docs/tradeoffs.md)
+- [Differences from runc](docs/runc-differences.md): what will not work
+  as on runc, and how to turn each protection off
 - Features: [fork](docs/fork.md), [moving snapshots](docs/snapshot-registry.md),
   [time travel](docs/time-travel.md), [live migration](docs/migration.md),
   [GPUs](docs/gpus.md)

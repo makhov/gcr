@@ -179,7 +179,9 @@ independent of `Hardening`: `Hardening = 'off'` leaves Landlock on.
     containers, `shareProcessNamespace`);
   - all containers, on kernels without Landlock.
 
-  Processes started with `exec` are never confined.
+  Processes started with `exec` are never confined. What Landlock
+  refuses is in the kernel's audit log where audit is on
+  ([troubleshooting](troubleshooting.md#which-layer-refused-it)).
 - `off` confines nothing.
 
 A restored container is confined again only with the CRIU fork's

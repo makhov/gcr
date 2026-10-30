@@ -139,3 +139,13 @@ func TestInitHookSkipsUnmarked(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRestrictFlags(t *testing.T) {
+	// Audit what the workload is refused, not only the init, where the
+	// kernel can.
+	for abi, want := range map[int]uintptr{0: 0, 6: 0, 7: logNewExecOn, 8: logNewExecOn} {
+		if got := restrictFlags(abi); got != want {
+			t.Errorf("ABI %d: flags %#x, want %#x", abi, got, want)
+		}
+	}
+}
