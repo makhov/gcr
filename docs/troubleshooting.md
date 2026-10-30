@@ -64,6 +64,8 @@ has `Hardening = 'off'` and `Landlock = 'off'`.
 | `this node has vm.unprivileged_userfaultfd = 0` | `gcr.dev/lazy-restore` needs it | set the sysctl, or restore eagerly ([fork](fork.md#lazy-restore)) |
 | `KSM is not running (/sys/kernel/mm/ksm/run is 0, not 1)` | `gcr.dev/memory-merge` needs KSM | `echo 1 > /sys/kernel/mm/ksm/run` |
 | a migration refused with a user namespace range | the target was created with another range | recreate it with `gcr.dev/userns-base=N`, N from the error |
+| `post-copy: this node has vm.unprivileged_userfaultfd = 0` | the target cannot restore a container in a user namespace lazily | set the sysctl on the target, or migrate without `-post-copy` |
+| `target is running but serving it its memory failed` | a post-copy migration lost the source or the connection after the target ran | the container is lost; restore it from a snapshot or checkpoint |
 | `gcr.dev/migrate-in needs gcr.dev/migrate-token of at least 16 characters` | the token is missing or too short | use a longer one |
 | GPU driver, model or minor mismatch on restore | the node cannot take the checkpoint | restore on a node with the same driver and GPUs at the same indexes ([GPUs](gpus.md)) |
 

@@ -43,3 +43,40 @@ certificate signed by the CA. A source with `MigrationTLS` set refuses
 `http://` targets. The token still has to match: the certificate says
 the source is a node of the cluster, and the token that it is the one
 meant to send this container.
+
+## Post-copy
+
+`gcr migrate -post-copy` restores the target before its memory arrives.
+The source freezes and sends everything but its memory: CRIU's process
+images and the writable layer. The target restores at once, and a CRIU
+lazy-pages daemon there fetches each page from the source the moment the
+container touches it, and all the others in the background, over the
+migration's connection like the rest. Once the target has every page,
+CRIU ends the source's processes.
+
+The downtime then no longer grows with the memory, which matters most
+where the kernel cannot track dirty memory (arm64), and every migration
+is otherwise stop-and-copy. A container counting through its memory,
+migrated between two containerd namespaces on one host (arm64 VM):
+
+| memory | stop-and-copy downtime | post-copy downtime | post-copy, memory all at the target |
+| --- | --- | --- | --- |
+| 256 MiB | 0.49 to 0.54 s | 0.16 to 0.17 s | 0.77 to 0.79 s |
+| 1 GiB | 1.36 s | 0.20 s | 1.44 s |
+
+What it costs:
+
+- **Two hosts at once.** Until the target has all its memory, the
+  container runs on the target with part of its memory on the source. If
+  the source, or the connection, goes before then, the target's
+  processes get SIGBUS on the next page they lack: the container is lost
+  on both. A failure before the target runs leaves the source running,
+  as with pre-copy.
+- **Lazy restore on the target.** A container in a user namespace is
+  restored lazily only where `vm.unprivileged_userfaultfd` is 1
+  ([fork](fork.md#lazy-restore) has why); a target without it refuses a
+  post-copy migration before the source freezes.
+- **No GPUs.** CRIU's CUDA plugin cannot serve GPU memory lazily.
+- **No pre-copy rounds yet.** Post-copy starts from a full dump; pages
+  the target touches early wait on the network instead of on the freeze.
+
