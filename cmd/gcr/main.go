@@ -2,6 +2,8 @@
 
 // gcr is the command line for gcr runtime features outside containerd's API.
 //
+//	gcr setup [-docker] [-no-restart] [-bin-dir DIR] [-containerd-config FILE]
+//	gcr doctor
 //	gcr version
 //	gcr [-n namespace] timeline ID
 //	gcr [-n namespace] rewind ID POINT
@@ -29,6 +31,8 @@ import (
 
 	"github.com/makhov/gcr/internal/control"
 	"github.com/makhov/gcr/internal/migrate"
+	"github.com/makhov/gcr/internal/payload"
+	"github.com/makhov/gcr/internal/setup"
 	"github.com/makhov/gcr/internal/snapshot"
 	"github.com/makhov/gcr/internal/snapshot/registry"
 )
@@ -36,7 +40,9 @@ import (
 func main() {
 	ns := flag.String("n", "default", "containerd namespace")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: gcr version\n"+
+		fmt.Fprintf(os.Stderr, "usage: gcr setup [-docker] [-no-restart] [-bin-dir DIR] [-containerd-config FILE]\n"+
+			"       gcr doctor\n"+
+			"       gcr version\n"+
 			"       gcr [-n namespace] timeline ID\n"+
 			"       gcr [-n namespace] rewind ID POINT\n"+
 			"       gcr [-n namespace] point ID [LABEL]\n"+
@@ -57,8 +63,29 @@ func main() {
 
 func run(ctx context.Context, ns string, args []string) error {
 	switch {
+	case len(args) >= 1 && args[0] == "setup":
+		fs := flag.NewFlagSet("setup", flag.ExitOnError)
+		o := setup.Options{Out: os.Stdout}
+		fs.StringVar(&o.BinDir, "bin-dir", "/usr/local/bin", "where gcr and the shim go")
+		fs.StringVar(&o.ContainerdConfig, "containerd-config", "/etc/containerd/config.toml", "containerd's configuration; gcr's goes in conf.d beside it")
+		fs.BoolVar(&o.Docker, "docker", false, "register gcr with dockerd too, as runtime gcr")
+		fs.BoolVar(&o.NoRestart, "no-restart", false, "do not restart containerd (or dockerd); the configuration applies on their next start")
+		_ = fs.Parse(args[1:])
+		if err := setup.Run(o); err != nil {
+			return err
+		}
+		fmt.Println()
+		return doctor()
+	case len(args) == 1 && args[0] == "doctor":
+		return doctor()
 	case len(args) == 1 && args[0] == "version":
 		fmt.Printf("gcr %s (%s)\n", version.Version, version.Revision)
+		if v, err := payload.Read(payload.Versions); err == nil {
+			// What it carries for gcr setup: the shim is built with it.
+			for _, l := range strings.Split(strings.TrimSpace(string(v)), "\n")[1:] {
+				fmt.Println("carries " + l)
+			}
+		}
 		return nil
 	case len(args) == 2 && args[0] == "timeline":
 		points, err := control.NewClient(ns, args[1]).Timeline(ctx)
@@ -197,6 +224,28 @@ func run(ctx context.Context, ns string, args []string) error {
 		os.Exit(2)
 		return nil
 	}
+}
+
+// doctor prints what the node has for gcr, and how to get what it lacks.
+// It fails if gcr cannot work as it should here.
+func doctor() error {
+	missing := 0
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	for _, c := range setup.Doctor() {
+		mark := map[setup.Level]string{setup.OK: "ok", setup.Optional: "off", setup.Missing: "MISSING"}[c.Level]
+		fmt.Fprintf(w, "%s\t%s\t%s\n", mark, c.Name, c.Detail)
+		if c.Fix != "" {
+			fmt.Fprintf(w, "\t\t-> %s\n", c.Fix)
+		}
+		if c.Level == setup.Missing {
+			missing++
+		}
+	}
+	_ = w.Flush()
+	if missing > 0 {
+		return fmt.Errorf("%d missing", missing)
+	}
+	return nil
 }
 
 func quoteAll(ss []string) string {

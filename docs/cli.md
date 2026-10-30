@@ -7,6 +7,9 @@ Containers are named by their containerd ID, in the namespace `-n` gives
 (default `default`; Kubernetes pods are in `k8s.io`).
 
 ```
+gcr setup [-docker] [-no-restart] [-bin-dir DIR] [-containerd-config FILE]
+gcr doctor
+gcr version
 gcr [-n namespace] timeline ID
 gcr [-n namespace] rewind ID POINT
 gcr [-n namespace] point ID [LABEL]
@@ -20,6 +23,32 @@ gcr [-n namespace] migrate [-token TOKEN] [-post-copy] ID TARGET-URL
 
 Errors go to standard error with `gcr:` in front, and the exit status is
 1 (2 for a usage error).
+
+## Setting up a node
+
+### `gcr setup`
+
+Installs gcr on the node and registers the runtime
+([install](getting-started.md#install)): `gcr` and the shim into
+`-bin-dir` (`/usr/local/bin`), and, from a release, gcr's CRIU and its CUDA
+plugin into `/var/lib/gcr`; a containerd drop-in in `conf.d` beside
+`-containerd-config`, which it makes containerd import; with `-docker`,
+runtime `gcr` in `/etc/docker/daemon.json`. It restarts what it
+reconfigured unless `-no-restart`, and ends with `gcr doctor`. Running it
+again is safe, and with a newer `gcr` upgrades.
+
+### `gcr doctor`
+
+Checks the node: the kernel, cgroup v2, the shim and its version,
+containerd's and Docker's registration, CRIU (and whether it is gcr's),
+Landlock, the netlink policy (BPF LSM), lazy restore, dirty memory
+tracking, memory merging, nydus, GPUs. Each line is `ok`, `off` (a feature
+this node does not have) or `MISSING` (gcr does not work as it should),
+with what to do about it. It exits non-zero if anything is missing.
+
+### `gcr version`
+
+Prints gcr's version and, for a release, what it carries.
 
 ## Time travel
 

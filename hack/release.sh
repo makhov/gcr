@@ -1,61 +1,53 @@
 #!/bin/bash
-# Builds release archives into dist/: for each architecture, static
-# binaries of the shim, gcr and CRIU (gcr's fork, from CRIU_SRC, built
-# without plugins), with SHA256SUMS. Runs on a Linux host that can build
-# with cgo for each, natively or across (docs/development.md#releases).
+# Builds a release into dist/: for each architecture one file,
+# gcr-VERSION-linux-ARCH, the gcr command carrying the shim, gcr's CRIU and
+# CRIU's CUDA plugin (internal/payload) for `gcr setup` to install; and
+# SHA256SUMS. The Go binaries are static; CRIU, built in an Ubuntu 22.04
+# container (hack/criu-build.sh), needs glibc 2.35 or later. Runs on a
+# Linux host with Docker that can build Go with cgo for each architecture
+# (docs/development.md#releases).
 #
 #   VERSION=v0.1.0 CRIU_SRC=../criu hack/release.sh amd64 arm64
 set -euo pipefail
 
 VERSION=${VERSION:?set VERSION}
 CRIU_SRC=$(cd "${CRIU_SRC:-../criu}" && pwd)
-ARCHES=("$@")
+CRIU_IMAGE=${CRIU_IMAGE:-ubuntu:22.04}
+DOCKER=${DOCKER:-docker}
 HOST=$(go env GOARCH)
 REVISION=$(git rev-parse HEAD)
 VERSION_PKG=github.com/containerd/containerd/v2/version
+PAYLOAD=internal/payload/files
 
 triplet() { case $1 in amd64) echo x86_64-linux-gnu ;; arm64) echo aarch64-linux-gnu ;; esac; }
-criu_arch() { case $1 in amd64) echo x86 ;; arm64) echo aarch64 ;; esac; }
+
+gobuild() { # ARCH OUT PKG TAGS
+	local t cc=gcc
+	t=$(triplet "$1")
+	[ "$1" = "$HOST" ] || cc=$t-gcc
+	CC=$cc GOOS=linux GOARCH=$1 CGO_ENABLED=1 PKG_CONFIG_LIBDIR=/usr/lib/$t/pkgconfig \
+		go build -trimpath -tags "seccomp netgo osusergo $4" \
+		-ldflags "-s -w -X $VERSION_PKG.Version=$VERSION -X $VERSION_PKG.Revision=$REVISION -linkmode external -extldflags -static" \
+		-o "$2" "$3"
+}
 
 rm -rf dist && mkdir -p dist
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+trap 'rm -rf "$work"; find "$PAYLOAD" -name "*.zst" -delete' EXIT
 
-for arch in "${ARCHES[@]}"; do
-	t=$(triplet "$arch")
-	cc=gcc
-	cross=()
-	if [ "$arch" != "$HOST" ]; then
-		cc=$t-gcc
-		cross=(ARCH="$(criu_arch "$arch")" CROSS_COMPILE="$t-" CC="$cc")
-	fi
-	out=dist/gcr-$VERSION-linux-$arch
-	mkdir -p "$out"
-
-	for cmd in containerd-shim-gcr-v2 gcr; do
-		CC=$cc GOOS=linux GOARCH=$arch CGO_ENABLED=1 PKG_CONFIG_LIBDIR=/usr/lib/$t/pkgconfig \
-			go build -trimpath -tags "seccomp netgo osusergo" \
-			-ldflags "-s -w -X $VERSION_PKG.Version=$VERSION -X $VERSION_PKG.Revision=$REVISION -linkmode external -extldflags -static" \
-			-o "$out/$cmd" "./cmd/$cmd"
-	done
-
-	# CRIU in a copy of its tree, so its own build products stay its own.
-	# pkg-config falls back to the host's directory for what is the same
-	# everywhere (protobuf's .proto files).
-	src=$work/criu-$arch
-	cp -r "$CRIU_SRC" "$src" 2>/dev/null || true # sockets left by its tests
-	make -s -C "$src" mrproper >/dev/null
-	PKG_CONFIG_LIBDIR=/usr/lib/$t/pkgconfig:/usr/share/pkgconfig:/usr/lib/$(triplet "$HOST")/pkgconfig \
-		make -s -C "$src" -j"$(nproc)" criu "${cross[@]}" STATIC=1 NO_GNUTLS=1 NO_NFTABLES=1 \
-		2> >(grep -v "warning: Using\|in function" >&2)
-	install -m 0755 "$src/criu/criu" "$out/criu"
-
-	cp README.md "$out/"
+for arch in "$@"; do
+	find "$PAYLOAD" -name "*.zst" -delete
+	gobuild "$arch" "$work/containerd-shim-gcr-v2" ./cmd/containerd-shim-gcr-v2 ""
+	mkdir -p "$work/criu-$arch"
+	$DOCKER run --rm -v "$CRIU_SRC:/src:ro" -v "$work/criu-$arch:/out" -v "$PWD/hack:/hack:ro" \
+		"$CRIU_IMAGE" /hack/criu-build.sh "$arch" /src /out
 	{
 		echo "gcr $VERSION ($REVISION)"
-		echo "criu $(git -C "$CRIU_SRC" describe --always --dirty) (static, no plugins)"
-	} >"$out/VERSIONS"
-	tar -C dist -czf "$out.tar.gz" "$(basename "$out")"
-	rm -rf "$out"
+		echo "criu $(git -C "$CRIU_SRC" describe --always --dirty), built on $CRIU_IMAGE"
+	} >"$work/VERSIONS"
+	for f in "$work/containerd-shim-gcr-v2" "$work/criu-$arch/criu" "$work/criu-$arch/cuda_plugin.so" "$work/VERSIONS"; do
+		zstd -q -19 -T0 "$f" -o "$PAYLOAD/$(basename "$f").zst"
+	done
+	gobuild "$arch" "dist/gcr-$VERSION-linux-$arch" ./cmd/gcr gcr_payload
 done
-(cd dist && sha256sum ./*.tar.gz | sed 's# \./# #' >SHA256SUMS)
+(cd dist && sha256sum gcr-* >SHA256SUMS)

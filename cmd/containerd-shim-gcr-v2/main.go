@@ -17,11 +17,14 @@ import (
 	"github.com/makhov/gcr/internal/container"
 	"github.com/makhov/gcr/internal/landlock"
 	"github.com/makhov/gcr/internal/manager"
+	"github.com/makhov/gcr/internal/setup"
 	_ "github.com/makhov/gcr/internal/task"
 	"github.com/makhov/gcr/internal/timetravel"
 )
 
 func init() {
+	// The CRIU gcr setup installed, if it did, ahead of any other.
+	setup.UseOwnCRIU()
 	// libcontainer re-executes this binary as the container's init.
 	// nsenter's constructor has already set up namespaces by now.
 	if len(os.Args) > 1 && os.Args[1] == "init" {

@@ -67,22 +67,23 @@ test-k8s: static
 vm:
 	$(IN_VM) make $(T)
 
-# Release archives (hack/release.sh): static binaries of the shim, gcr and
-# CRIU (from CRIU_SRC) for each architecture, built on a Linux host that
-# can cross-compile with cgo, such as the dev VM: `make vm T=release`
-# (docs/development.md#releases). The version is the git tag, or a
-# describe of the commit.
+# A release (hack/release.sh): for each architecture one file, gcr carrying
+# the shim and gcr's CRIU for `gcr setup` to install, built on a Linux host
+# with Docker that can cross-compile with cgo, such as the dev VM:
+# `make vm T=release` (docs/development.md#releases). The version is the
+# git tag, or a describe of the commit.
 VERSION ?= $(shell git describe --tags --always --dirty)
 RELEASE_ARCHES ?= amd64 arm64
 # containerd's own version variables: `containerd-shim-gcr-v2 -v` and
 # `gcr version` print them.
 VERSION_LDFLAGS := -X github.com/containerd/containerd/v2/version.Version=$(VERSION) \
 	-X github.com/containerd/containerd/v2/version.Revision=$(shell git rev-parse HEAD)
+DOCKER ?= docker
 release:
-	VERSION=$(VERSION) CRIU_SRC=$(CRIU_SRC) hack/release.sh $(RELEASE_ARCHES)
+	VERSION=$(VERSION) CRIU_SRC=$(CRIU_SRC) DOCKER="$(DOCKER)" hack/release.sh $(RELEASE_ARCHES)
 
 # Publishes dist/ as a GitHub release for VERSION (a tag), as a draft to
 # look over before it is public.
 release-publish:
-	gh release create $(VERSION) dist/*.tar.gz dist/SHA256SUMS --draft --title $(VERSION) --generate-notes
+	gh release create $(VERSION) dist/gcr-* dist/SHA256SUMS --draft --title $(VERSION) --generate-notes
 
