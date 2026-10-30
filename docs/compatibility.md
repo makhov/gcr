@@ -3,7 +3,8 @@
 Most containers run on gcr exactly as they do on runc: it passes CRI
 conformance, and Docker-in-Docker, `docker build` and `ping` work. This
 page lists what does not, grouped by the layer that refuses it, with the
-way around each. [Configuration](configuration.md) describes the knobs.
+way around each. [Differences from runc](runc-differences.md) has the
+summary; [configuration](configuration.md) describes the knobs.
 
 **Which programs are named here.** The tests check every refusal: that
 the call fails, with which error, and that it succeeds with the layer off.
@@ -119,7 +120,7 @@ under it.
 ## Netlink policy (hardened containers, BPF LSM enabled)
 
 Containers may create links of kind `veth`, `dummy`, `bridge` and `vlan`,
-and the common qdiscs, classes and filters (the README lists them). Other
+and the common qdiscs, classes and filters ([hardening](hardening.md#netlink-policy) lists them). Other
 kinds are refused:
 
 | Refused | Who uses it |

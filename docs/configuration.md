@@ -45,7 +45,7 @@ When `ConfigPath` is set, gcr reads only that file and ignores any other
 options in the table.
 
 **CRI-O.** Name the file with `runtime_config_path` in the handler's
-table (README, With CRI-O); CRI-O passes it to gcr like `ConfigPath`.
+table ([getting started](getting-started.md#with-cri-o)); CRI-O passes it to gcr like `ConfigPath`.
 Options that need gcr to mount the rootfs (`UserNamespaces = 'always'`)
 fail there.
 
@@ -64,7 +64,7 @@ error that names the setting and the values it accepts.
 | Option | Values | Default |
 | --- | --- | --- |
 | `UserNamespaces` | `auto`, `always`, `never` | `auto` |
-| `Hardening` | `standard`, `always`, `off` | `standard` |
+| `Hardening` | `standard`, `denied`, `always`, `off` | `standard` |
 | `NestedUserNamespaces` | `guarded`, `deny` | `guarded` |
 | `Landlock` | `standard`, `off` | `standard` |
 | `NetlinkPolicy` | `auto`, `off` | `auto` |
@@ -105,7 +105,7 @@ The seccomp-based layer.
     default, and a runtime can't tell it apart from an explicit choice.
   - To harden every pod that does not ask for `Unconfined`, set the
     kubelet's `seccompDefault: true`: pods without a profile then run
-    `RuntimeDefault`, which gcr hardens (README, Hardening). This keeps
+    `RuntimeDefault`, which gcr hardens ([hardening](hardening.md)). This keeps
     CRI conformance.
 - `denied`:
   - Also gives `Unconfined` pods the denied set (the first two rows
@@ -128,9 +128,10 @@ profile of its own:
 | As absent, ENOSYS: the keyring (`add_key`, `keyctl`, `request_key`) and the new mount API (`fsopen`, `open_tree`, `mount_setattr`, ...) | yes | yes, overriding the profile |
 | `AF_PACKET`, `AF_VSOCK`, `AF_KEY`, `AF_ALG`, raw IP sockets refused | yes | no: the profile decides |
 | `clone3` as absent (ENOSYS), so libc uses `clone` | yes | no |
+| Tunnel ioctls (`SIOCADDTUNNEL`, `SIOCCHGTUNNEL`, `SIOCADDPRL`, `SIOCCHGPRL`) refused | yes | no |
 | Nested user namespaces: guarded or denied (`NestedUserNamespaces`) | yes | no: the profile decides |
 | ICMP datagram sockets opened (`ping` without raw sockets) | yes, in a network namespace the container owns | no |
-| `mount(2)` through the supervisor (filesystem allowlist) | with `CAP_SYS_ADMIN`, or nested namespaces guarded and no Landlock | with `CAP_SYS_ADMIN` |
+| `mount(2)` through the supervisor (filesystem allowlist) | in a user namespace: with `CAP_SYS_ADMIN`, or nested namespaces guarded and no Landlock | in a user namespace, with `CAP_SYS_ADMIN` |
 | `setns(2)` through the supervisor | with `CAP_SYS_ADMIN` in a user namespace | same |
 | `pivot_root` allowed | n/a (everything not refused is allowed) | with `CAP_SYS_ADMIN` in a user namespace |
 | Netlink policy (if loaded) | yes | yes |
@@ -145,8 +146,10 @@ raw and packet sockets need `CAP_NET_RAW`, which a pod can drop.
 
 The mount supervisor allows `proc`, `sysfs`, `tmpfs`, `devpts`, `mqueue`,
 `cgroup2` and `overlay`, plus bind mounts, remounts and propagation
-changes. It refuses every other filesystem. It does the mount itself, as
-the caller, so the kernel's own checks still apply.
+changes. It refuses every other filesystem, and any remount that would
+make a read-only mount writable. It does the mount itself, as the caller
+(its namespaces, credentials and AppArmor profile), so the kernel's own
+checks still apply.
 
 ### `NestedUserNamespaces`
 
@@ -176,7 +179,9 @@ independent of `Hardening`: `Hardening = 'off'` leaves Landlock on.
     containers, `shareProcessNamespace`);
   - all containers, on kernels without Landlock.
 
-  Processes started with `exec` are never confined.
+  Processes started with `exec` are never confined. What Landlock
+  refuses is in the kernel's audit log where audit is on
+  ([troubleshooting](troubleshooting.md#which-layer-refused-it)).
 - `off` confines nothing.
 
 A restored container is confined again only with the CRIU fork's
@@ -185,7 +190,7 @@ A restored container is confined again only with the CRIU fork's
 ### `NetlinkPolicy`
 
 A BPF LSM program that checks which kinds of network links, qdiscs,
-classes and filters hardened containers may create (the README lists
+classes and filters hardened containers may create ([hardening](hardening.md#netlink-policy) lists
 them).
 
 - `auto`:

@@ -212,7 +212,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			if prep.LazyPages && !container.LazyPagesAvailable() {
 				// Said here rather than left to a CRIU log: the node has to
 				// allow it, and an operator should know what they are
-				// allowing (see the README).
+				// allowing (docs/fork.md, Lazy restore).
 				return prep, fmt.Errorf("%s: this node has vm.unprivileged_userfaultfd = 0, so a container "+
 					"in a user namespace cannot open the userfaultfd a lazy restore needs; set it to 1 to "+
 					"allow lazy restores: %w", container.AnnotationLazyRestore, errdefs.ErrFailedPrecondition)
