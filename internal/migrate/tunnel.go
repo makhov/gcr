@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/containerd/log"
 )
@@ -63,6 +64,55 @@ func (r *Receiver) pages(w http.ResponseWriter, req *http.Request) {
 	go splice(bufferedConn{brw.Reader, conn}, local)
 }
 
+// lazyPages takes over the request's connection, a stream to the source's
+// page server, for the restore's lazy-pages daemon to fetch memory over.
+func (r *Receiver) lazyPages(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	postCopy := r.postCopy
+	r.mu.Unlock()
+	if !postCopy {
+		http.Error(w, "not a post-copy migration", http.StatusConflict)
+		return
+	}
+	if !strings.EqualFold(req.Header.Get("Upgrade"), pagesProto) {
+		http.Error(w, "want Upgrade: "+pagesProto, http.StatusBadRequest)
+		return
+	}
+	conn, brw, err := http.NewResponseController(w).Hijack()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	_, _ = brw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: " + pagesProto + "\r\n\r\n")
+	if err := brw.Flush(); err != nil {
+		conn.Close()
+		return
+	}
+	select {
+	case r.lazy <- bufferedConn{brw.Reader, conn}:
+	default:
+		conn.Close() // more streams than the restore can use
+	}
+}
+
+// serveLazyPages joins each connection the restore's lazy-pages daemon
+// makes to ln with a stream the source opened to its page server.
+func (r *Receiver) serveLazyPages(ln net.Listener) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		select {
+		case remote := <-r.lazy:
+			go splice(conn, remote)
+		case <-time.After(30 * time.Second):
+			log.G(r.ctx).Warn("migration: no page stream from the source for the restore")
+			conn.Close()
+		}
+	}
+}
+
 // bufferedConn reads what the server had already buffered first.
 type bufferedConn struct {
 	r *bufio.Reader
@@ -101,8 +151,17 @@ func (c *client) pageProxy(ctx context.Context, round int) (port int, stop func(
 }
 
 func (c *client) openPages(ctx context.Context, round int) (io.ReadWriteCloser, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.base.JoinPath("rounds", strconv.Itoa(round), "pages").String(), nil)
+	return c.upgrade(ctx, c.base.JoinPath("rounds", strconv.Itoa(round), "pages").String())
+}
+
+// openLazyPages opens a stream for the target's lazy-pages daemon, joined
+// there to its connection, and here to the dump's page server.
+func (c *client) openLazyPages(ctx context.Context) (io.ReadWriteCloser, error) {
+	return c.upgrade(ctx, c.base.JoinPath("lazy-pages").String())
+}
+
+func (c *client) upgrade(ctx context.Context, u string) (io.ReadWriteCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -116,12 +175,12 @@ func (c *client) openPages(ctx context.Context, round int) (io.ReadWriteCloser, 
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("page stream for round %d: %s: %s", round, resp.Status, strings.TrimSpace(string(b)))
+		return nil, fmt.Errorf("page stream %s: %s: %s", req.URL.Path, resp.Status, strings.TrimSpace(string(b)))
 	}
 	rw, ok := resp.Body.(io.ReadWriteCloser)
 	if !ok {
 		resp.Body.Close()
-		return nil, fmt.Errorf("page stream for round %d: connection not handed over", round)
+		return nil, fmt.Errorf("page stream %s: connection not handed over", req.URL.Path)
 	}
 	return rw, nil
 }

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -39,7 +40,10 @@ const (
 // shim. Its Start waits on Wait, then restores from the returned directory.
 //
 //	POST /rounds   start a page server for the next round -> {"round"}
+//	               (post-copy: a round without one, its memory to come later)
 //	POST /rounds/N/pages  Upgrade: the round's page stream (tunnel.go)
+//	POST /lazy-pages      Upgrade: post-copy, the source's page server, for
+//	               the restore's lazy-pages daemon (tunnel.go)
 //	PUT  /images   the final dump's images (tar), after its page server is done
 //	PUT  /upper    the writable layer (tar)
 //	POST /restore  restore and start; answers once the container runs
@@ -67,7 +71,18 @@ type Receiver struct {
 	upperDone   bool
 	restoring   bool
 
-	ready   chan string
+	// postCopy: the last round's memory is fetched from the source as
+	// the restored container touches it; lazy carries the streams to the
+	// source's page server, and lazyLn is where the restore connects.
+	postCopy bool
+	lazy     chan io.ReadWriteCloser
+	lazyLn   net.Listener
+
+	// PostCopyCheck, if set, says whether this node can restore lazily;
+	// a post-copy migration is refused before the source freezes.
+	PostCopyCheck func() error
+
+	ready   chan Incoming
 	result  chan error
 	aborted chan struct{}
 	once    sync.Once
@@ -101,11 +116,13 @@ func NewReceiver(ctx context.Context, addr, token string, t TLS, root string, up
 	r := &Receiver{
 		ctx:   ctx,
 		token: token, root: root, upper: upper, idBase: idBase, layers: layers,
-		ready: make(chan string, 1), result: make(chan error, 1), aborted: make(chan struct{}),
+		ready: make(chan Incoming, 1), result: make(chan error, 1), aborted: make(chan struct{}),
+		lazy: make(chan io.ReadWriteCloser, 4),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /rounds", r.auth(r.startRound))
 	mux.HandleFunc("POST /rounds/{round}/pages", r.auth(r.pages))
+	mux.HandleFunc("POST /lazy-pages", r.auth(r.lazyPages))
 	mux.HandleFunc("PUT /images", r.auth(r.putImages))
 	mux.HandleFunc("PUT /upper", r.auth(r.putUpper))
 	mux.HandleFunc("POST /restore", r.auth(r.restore))
@@ -121,16 +138,23 @@ func NewReceiver(ctx context.Context, addr, token string, t TLS, root string, up
 // Addr is the address the receiver listens on.
 func (r *Receiver) Addr() string { return r.ln.Addr().String() }
 
-// Wait blocks until the source asks for the restore and returns the images
-// directory to restore from.
-func (r *Receiver) Wait(ctx context.Context) (string, error) {
+// Incoming is what to restore: the images, and for a post-copy migration
+// the page server (on loopback, carried to the source) serving the memory.
+type Incoming struct {
+	Dir        string
+	PageServer string
+}
+
+// Wait blocks until the source asks for the restore and returns what to
+// restore from.
+func (r *Receiver) Wait(ctx context.Context) (Incoming, error) {
 	select {
-	case dir := <-r.ready:
-		return dir, nil
+	case in := <-r.ready:
+		return in, nil
 	case <-r.aborted:
-		return "", errors.New("migration aborted by the source")
+		return Incoming{}, errors.New("migration aborted by the source")
 	case <-ctx.Done():
-		return "", ctx.Err()
+		return Incoming{}, ctx.Err()
 	}
 }
 
@@ -146,6 +170,16 @@ func (r *Receiver) Close() {
 		r.ps.Kill()
 	}
 	r.mu.Unlock()
+}
+
+// CloseLazyPages stops taking post-copy page streams, once the restore
+// has all its memory. The streams under way are not cut.
+func (r *Receiver) CloseLazyPages() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.lazyLn != nil {
+		r.lazyLn.Close()
+	}
 }
 
 func (r *Receiver) auth(h http.HandlerFunc) http.HandlerFunc {
@@ -194,6 +228,11 @@ const HeaderRestart = "Gcr-Restart"
 // must have been created with the same range.
 const HeaderIDBase = "Gcr-Userns-Base"
 
+// HeaderPostCopy, on POST /rounds and POST /restore, makes the migration
+// post-copy: the round has no page server, and the restore fetches the
+// memory from the source.
+const HeaderPostCopy = "Gcr-Post-Copy"
+
 // HeaderLayers carries the read-only layers beneath the source's writable
 // layer, ':'-separated (overlay's own separator, so no layer has one). The
 // writable layer sent is only what changed above them, so the target must
@@ -219,6 +258,13 @@ func (r *Receiver) startRound(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, fmt.Sprintf("layers beneath the writable layer differ (source %q, target %q): "+
 			"create the target with the source's %s", srcLayers, dst, "gcr.dev/fork-from"), http.StatusConflict)
 		return
+	}
+	postCopy := req.Header.Get(HeaderPostCopy) != ""
+	if postCopy && r.PostCopyCheck != nil {
+		if err := r.PostCopyCheck(); err != nil {
+			http.Error(w, "post-copy: "+err.Error(), http.StatusConflict)
+			return
+		}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -247,6 +293,12 @@ func (r *Receiver) startRound(w http.ResponseWriter, req *http.Request) {
 		parent = filepath.Join("..", strconv.Itoa(round-1))
 	}
 	r.chain++
+	if postCopy {
+		// Its memory comes later, from the source's page server.
+		r.round, r.postCopy = round, true
+		_ = json.NewEncoder(w).Encode(map[string]int{"round": round})
+		return
+	}
 	// Not the request's context: the page server outlives this request.
 	ps, err := startPageServer(r.ctx, loopback, dir, parent)
 	if err != nil {
@@ -320,8 +372,21 @@ func (r *Receiver) restore(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "restore already requested", http.StatusConflict)
 		return
 	}
+	in := Incoming{Dir: r.dir(round)}
+	if r.postCopy {
+		ln, err := net.Listen("tcp", net.JoinHostPort(loopback, "0"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		r.mu.Lock()
+		r.lazyLn = ln
+		r.mu.Unlock()
+		go r.serveLazyPages(ln)
+		in.PageServer = ln.Addr().String()
+	}
 	select {
-	case r.ready <- r.dir(round):
+	case r.ready <- in:
 	default:
 		http.Error(w, "restore already requested", http.StatusConflict)
 		return

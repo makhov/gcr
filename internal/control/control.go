@@ -44,7 +44,7 @@ type Timeline interface {
 // Handlers are what one container supports; nil ones answer 404.
 type Handlers struct {
 	Timeline Timeline
-	Migrate  func(ctx context.Context, target, token string) (migrate.Result, error)
+	Migrate  func(ctx context.Context, target, token string, opts migrate.Options) (migrate.Result, error)
 	// Snapshot writes the running container's processes and writable
 	// layer to dir, and leaves it running; containers can then be forked
 	// from it.
@@ -60,8 +60,9 @@ type snapshotRequest struct {
 }
 
 type migrateRequest struct {
-	Target string `json:"target"`
-	Token  string `json:"token"`
+	Target   string `json:"target"`
+	Token    string `json:"token"`
+	PostCopy bool   `json:"postCopy,omitempty"`
 }
 
 type Server struct {
@@ -151,7 +152,7 @@ func Serve(ctx context.Context, namespace, id string, h Handlers) (*Server, erro
 		}
 		// Not tied to the client's connection: a half-done migration must
 		// run its own cleanup.
-		res, err := h.Migrate(context.WithoutCancel(ctx), req.Target, req.Token)
+		res, err := h.Migrate(context.WithoutCancel(ctx), req.Target, req.Token, migrate.Options{PostCopy: req.PostCopy})
 		if err != nil {
 			httpError(w, err)
 			return
@@ -216,9 +217,9 @@ func (c *Client) Snapshot(ctx context.Context, dir string) error {
 	return c.do(ctx, http.MethodPost, "/snapshot", snapshotRequest{Dir: dir}, nil)
 }
 
-func (c *Client) Migrate(ctx context.Context, target, token string) (migrate.Result, error) {
+func (c *Client) Migrate(ctx context.Context, target, token string, opts migrate.Options) (migrate.Result, error) {
 	var res migrate.Result
-	err := c.do(ctx, http.MethodPost, "/migrate", migrateRequest{Target: target, Token: token}, &res)
+	err := c.do(ctx, http.MethodPost, "/migrate", migrateRequest{Target: target, Token: token, PostCopy: opts.PostCopy}, &res)
 	return res, err
 }
 

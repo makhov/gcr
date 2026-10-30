@@ -7,11 +7,13 @@ package migrate
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 
 	"github.com/makhov/gcr/internal/control"
 	"github.com/makhov/gcr/internal/migrate"
@@ -44,25 +46,32 @@ func pair(t *testing.T, annotations map[string]string, srcConfig, dstConfig stri
 	return src, dst, token, errc
 }
 
-func TestMigrate(t *testing.T) { testMigrate(t, "http", "", "") }
+func TestMigrate(t *testing.T) { testMigrate(t, "http", "", "", migrate.Options{}) }
 
 // TestMigrateTLS migrates with mutual TLS: memory and files go over the
 // one connection, which each side verifies against the CA.
 func TestMigrateTLS(t *testing.T) {
 	f := testcerts.Write(t, t.TempDir())
-	testMigrate(t, "https", tlsConfig(f.ClientCert, f.ClientKey, f.CA), tlsConfig(f.ServerCert, f.ServerKey, f.CA))
+	testMigrate(t, "https", tlsConfig(f.ClientCert, f.ClientKey, f.CA), tlsConfig(f.ServerCert, f.ServerKey, f.CA), migrate.Options{})
+}
+
+// TestMigratePostCopyTLS: post-copy's page stream goes over the TLS
+// connection too.
+func TestMigratePostCopyTLS(t *testing.T) {
+	f := testcerts.Write(t, t.TempDir())
+	testMigrate(t, "https", tlsConfig(f.ClientCert, f.ClientKey, f.CA), tlsConfig(f.ServerCert, f.ServerKey, f.CA), migrate.Options{PostCopy: true})
 }
 
 func tlsConfig(cert, key, ca string) string {
 	return fmt.Sprintf("[MigrationTLS]\nCert = %q\nKey = %q\nCA = %q\n", cert, key, ca)
 }
 
-func testMigrate(t *testing.T, scheme, srcConfig, dstConfig string) {
+func testMigrate(t *testing.T, scheme, srcConfig, dstConfig string, opts migrate.Options) {
 	// The source holds its user namespace range until it is killed, so on
 	// one host the target cannot take it; across hosts it would be created
 	// with gcr.dev/userns-base.
 	src, dst, token, started := pair(t, map[string]string{userns.AnnotationHostUsers: "true"}, srcConfig, dstConfig)
-	if _, err := control.NewClient("gcr-e2e-src", src.ID).Migrate(t.Context(), scheme+"://"+addr, token); err != nil {
+	if _, err := control.NewClient("gcr-e2e-src", src.ID).Migrate(t.Context(), scheme+"://"+addr, token, opts); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	if err := <-started; err != nil {
@@ -87,7 +96,7 @@ func testMigrate(t *testing.T, scheme, srcConfig, dstConfig string) {
 func TestMigrateRefused(t *testing.T) {
 	// Each side in its own user namespace range: the target refuses.
 	src, _, token, _ := pair(t, nil, "", "")
-	_, err := control.NewClient("gcr-e2e-src", src.ID).Migrate(t.Context(), "http://"+addr, token)
+	_, err := control.NewClient("gcr-e2e-src", src.ID).Migrate(t.Context(), "http://"+addr, token, migrate.Options{})
 	if err == nil {
 		t.Fatal("migration between different user namespace ranges succeeded")
 	}
@@ -109,13 +118,13 @@ func TestMigrateTLSRefused(t *testing.T) {
 	src, _, token, _ := pair(t, map[string]string{userns.AnnotationHostUsers: "true"},
 		tlsConfig("", "", f.CA), tlsConfig(f.ServerCert, f.ServerKey, f.CA))
 	c := control.NewClient("gcr-e2e-src", src.ID)
-	if _, err := c.Migrate(t.Context(), "https://"+addr, token); err == nil {
+	if _, err := c.Migrate(t.Context(), "https://"+addr, token, migrate.Options{}); err == nil {
 		t.Fatal("migrated without a client certificate")
 	} else {
 		t.Logf("refused: %v", err)
 	}
 	// And a source with MigrationTLS set will not send in the clear.
-	if _, err := c.Migrate(t.Context(), "http://"+addr, token); err == nil || !strings.Contains(err.Error(), "https://") {
+	if _, err := c.Migrate(t.Context(), "http://"+addr, token, migrate.Options{}); err == nil || !strings.Contains(err.Error(), "https://") {
 		t.Fatalf("plain HTTP with MigrationTLS set: %v", err)
 	}
 	a := src.ReadInt("/tmp/count")
@@ -123,4 +132,117 @@ func TestMigrateTLSRefused(t *testing.T) {
 	if b := src.ReadInt("/tmp/count"); b <= a {
 		t.Fatalf("source stopped after a refused migration (%d -> %d)", a, b)
 	}
+}
+
+// TestMigratePostCopy migrates a container holding 256 MiB post-copy: the
+// target runs before its memory arrives and fetches it from the source,
+// as it touches pages and in the background, through the migration's
+// connection. The memory checks itself (hog reads its pattern back from
+// pages all over), the target carries on from the source's count, and the
+// source is gone once the target has everything.
+func TestMigratePostCopy(t *testing.T) { testMigrateMemory(t, true) }
+
+// TestMigrateMemory is TestMigratePostCopy's workload migrated as before,
+// stop-and-copy where the kernel cannot track dirty pages (arm64): what
+// post-copy saves.
+func TestMigrateMemory(t *testing.T) { testMigrateMemory(t, false) }
+
+func testMigrateMemory(t *testing.T, postCopy bool) {
+	const mib = "256"
+	hog := framework.BuildStatic(t, "../fork/hog")
+	spec := framework.Spec{
+		Args:   []string{"/hog", mib},
+		Mounts: []specs.Mount{framework.BindRO(hog, "/hog")},
+		// See testMigrate: one host, one range.
+		Annotations: map[string]string{userns.AnnotationHostUsers: "true"},
+	}
+	id := framework.UniqueID("mig-post")
+	token := fmt.Sprintf("secret-%d", time.Now().UnixNano())
+	src := framework.NewNamespace(t, "gcr-e2e-src").Run(id, spec)
+	framework.Eventually(t, 2*time.Minute, "the source to fill its memory", func() bool {
+		s, _ := src.ReadFile("/tmp/ready")
+		return s == mib
+	})
+	in := spec
+	in.Annotations = map[string]string{migrate.AnnotationIn: addr, migrate.AnnotationToken: token, userns.AnnotationHostUsers: "true"}
+	dst := framework.NewNamespace(t, "gcr-e2e-dst").Create(id, in)
+	started := make(chan error, 1)
+	go func() { started <- dst.Start() }()
+	time.Sleep(2 * time.Second)
+
+	res, err := control.NewClient("gcr-e2e-src", src.ID).Migrate(t.Context(), "http://"+addr, token, migrate.Options{PostCopy: postCopy})
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := <-started; err != nil {
+		t.Fatalf("target: %v", err)
+	}
+	if postCopy {
+		if !res.PostCopy || res.Downtime <= 0 || res.PostCopyTook < res.Downtime {
+			t.Fatalf("result %+v", res)
+		}
+		t.Logf("post-copy of %s MiB: downtime %s, memory fetched by %s", mib,
+			res.Downtime.Round(time.Millisecond), res.PostCopyTook.Round(time.Millisecond))
+	} else {
+		t.Logf("%s MiB, pre-copy rounds %v: downtime %s", mib, res.PreCopyPages, res.Downtime.Round(time.Millisecond))
+	}
+	if st := src.Status(); st != containerd.Stopped {
+		t.Fatalf("source is %s once the target has its memory", st)
+	}
+	last := dst.ReadInt("/tmp/count")
+	framework.Eventually(t, time.Minute, "the target to read 25 more pages back", func() bool {
+		s, _ := dst.ReadFile("/tmp/count")
+		if strings.HasPrefix(s, "corrupt") {
+			t.Fatalf("the target read back wrong memory: %s", s)
+		}
+		n, err := strconv.Atoi(s)
+		return err == nil && n >= last+25
+	})
+}
+
+// TestMigratePostCopyFails: a target that fails to restore, after the
+// source froze and sent it everything but its memory, leaves the source
+// running with its memory intact. The target here lacks a mount the
+// source has, which CRIU's restore refuses.
+func TestMigratePostCopyFails(t *testing.T) {
+	hog := framework.BuildStatic(t, "../fork/hog")
+	hostUsers := map[string]string{userns.AnnotationHostUsers: "true"}
+	id := framework.UniqueID("mig-post-fail")
+	token := fmt.Sprintf("secret-%d", time.Now().UnixNano())
+	src := framework.NewNamespace(t, "gcr-e2e-src").Run(id, framework.Spec{
+		Args: []string{"/hog", "64"}, Mounts: []specs.Mount{framework.BindRO(hog, "/hog")}, Annotations: hostUsers,
+	})
+	framework.Eventually(t, time.Minute, "the source to fill its memory", func() bool {
+		s, _ := src.ReadFile("/tmp/ready")
+		return s == "64"
+	})
+	dst := framework.NewNamespace(t, "gcr-e2e-dst").Create(id, framework.Spec{
+		Args: counter,
+		Annotations: map[string]string{migrate.AnnotationIn: addr, migrate.AnnotationToken: token,
+			userns.AnnotationHostUsers: "true"},
+	})
+	started := make(chan error, 1)
+	go func() { started <- dst.Start() }()
+	time.Sleep(2 * time.Second)
+
+	_, err := control.NewClient("gcr-e2e-src", src.ID).Migrate(t.Context(), "http://"+addr, token, migrate.Options{PostCopy: true})
+	if err == nil {
+		t.Fatal("migrated to a target that cannot restore it")
+	}
+	t.Logf("failed as it should: %v", err)
+	if err := <-started; err == nil {
+		t.Fatal("the target started")
+	}
+	if st := src.Status(); st != containerd.Running {
+		t.Fatalf("source is %s after a failed migration", st)
+	}
+	last := src.ReadInt("/tmp/count")
+	framework.Eventually(t, time.Minute, "the source to count on", func() bool {
+		s, _ := src.ReadFile("/tmp/count")
+		if strings.HasPrefix(s, "corrupt") {
+			t.Fatalf("the source read back wrong memory: %s", s)
+		}
+		n, err := strconv.Atoi(s)
+		return err == nil && n >= last+10
+	})
 }

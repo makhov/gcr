@@ -39,7 +39,7 @@ func TestControlRoundTrip(t *testing.T) {
 	tl := &fakeTimeline{}
 	srv, err := Serve(ctx, "ns", "c1", Handlers{
 		Timeline: tl,
-		Migrate: func(ctx context.Context, target, token string) (migrate.Result, error) {
+		Migrate: func(ctx context.Context, target, token string, opts migrate.Options) (migrate.Result, error) {
 			if token != "t" {
 				return migrate.Result{}, errors.New("bad token")
 			}
@@ -65,11 +65,11 @@ func TestControlRoundTrip(t *testing.T) {
 	if p, err := c.TakePoint(ctx, "rm -rf /"); err != nil || p.ID != 8 || p.Label != "rm -rf /" {
 		t.Fatalf("take point: %+v, %v", p, err)
 	}
-	res, err := c.Migrate(ctx, "http://target", "t")
+	res, err := c.Migrate(ctx, "http://target", "t", migrate.Options{})
 	if err != nil || res.Downtime != 42*time.Millisecond {
 		t.Fatalf("migrate %+v, %v", res, err)
 	}
-	if _, err := c.Migrate(ctx, "http://target", "x"); err == nil || !strings.Contains(err.Error(), "bad token") {
+	if _, err := c.Migrate(ctx, "http://target", "x", migrate.Options{}); err == nil || !strings.Contains(err.Error(), "bad token") {
 		t.Fatalf("migrate error not passed through: %v", err)
 	}
 }

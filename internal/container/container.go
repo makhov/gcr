@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -109,7 +110,7 @@ type Prepared struct {
 	GPUError error
 	// CheckpointFrom, when set, makes Start wait for it to return a
 	// directory of CRIU images and restore from it (incoming migration).
-	CheckpointFrom func(context.Context) (string, error)
+	CheckpointFrom func(context.Context) (Incoming, error)
 	// IDMap, when set (containerd's "0:host:size" form), mounts the image
 	// layers idmapped for the container's user namespace and hands a fresh
 	// writable layer to the mapped root (IDMapRoot).
@@ -182,9 +183,12 @@ type Container struct {
 	snapshots      *snapshot.Hold
 	spec           *specs.Spec
 	checkpoint     string
-	checkpointFrom func(context.Context) (string, error)
-	io             *stdio // pipes, when the init has no terminal
-	tty            *ttyIO // when it has one
+	checkpointFrom func(context.Context) (Incoming, error)
+	// remotePages is the page server a post-copy migration's memory comes
+	// from, as it is touched and then in the background.
+	remotePages string
+	io          *stdio // pipes, when the init has no terminal
+	tty         *ttyIO // when it has one
 
 	// op serializes operations that replace or freeze the processes
 	// (snapshot, rewind) against each other and against delete.
@@ -524,14 +528,21 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	return c, nil
 }
 
+// Incoming is what an incoming migration restores from: CRIU images, and
+// for a post-copy one the page server (host:port) that serves its memory.
+type Incoming struct {
+	Images     string
+	PageServer string
+}
+
 // Start runs the created container, or restores it from its checkpoint.
 func (c *Container) Start(ctx context.Context) error {
 	if c.checkpointFrom != nil {
-		dir, err := c.checkpointFrom(ctx)
+		in, err := c.checkpointFrom(ctx)
 		if err != nil {
 			return err
 		}
-		c.checkpoint = dir
+		c.checkpoint, c.remotePages = in.Images, in.PageServer
 	}
 	switch {
 	case c.frozen:
@@ -608,13 +619,16 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 		return err
 	}
 	keepWork := false // the log of a lazy-pages daemon that runs on
-	if c.lazyPages {
+	lazy := c.lazyPages || c.remotePages != ""
+	if lazy {
 		// Must be serving before the restore asks it for a page, and it
 		// keeps going afterwards: the container faults pages in as it
 		// runs. It exits once it has sent the last one, or, serving only
-		// faults (a fork), when the container is deleted.
-		onDemand := images == c.forkImages && lazyPagesOnDemand()
-		d, err := startLazyPages(images, work, onDemand)
+		// faults (a fork), when the container is deleted. A post-copy
+		// migration's pages come from the source, all of them, so the
+		// source can go.
+		onDemand := c.remotePages == "" && images == c.forkImages && lazyPagesOnDemand()
+		d, err := startLazyPages(images, work, onDemand, c.remotePages)
 		if err != nil {
 			return err
 		}
@@ -624,7 +638,7 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 	opts := &libcontainer.CriuOpts{
 		ImagesDirectory: images,
 		WorkDirectory:   work,
-		LazyPages:       c.lazyPages,
+		LazyPages:       lazy,
 		StatusFd:        -1,
 		Command:         c.criuCommand(),
 	}
@@ -1126,6 +1140,117 @@ func (c *Container) dump(dir, parent, host string, port int, pre bool) error {
 	return nil
 }
 
+// LazyDump freezes the container and dumps it for a post-copy migration:
+// everything but its memory to dir, its memory served by CRIU at host:port
+// to a lazy-pages daemon. It returns once CRIU serves. wait returns once
+// every page was fetched, after which CRIU has killed the container's
+// processes; abort, before then, stops CRIU and thaws the container,
+// which runs on.
+func (c *Container) LazyDump(ctx context.Context, dir, host string, port int) (wait, abort func() error, err error) {
+	c.op.Lock()
+	unlock := sync.OnceFunc(c.op.Unlock)
+	fail := func(err error) (func() error, func() error, error) {
+		unlock()
+		return nil, nil, err
+	}
+	if c.gpu != nil || c.gpuError != nil {
+		// CRIU's CUDA plugin cannot serve GPU memory lazily.
+		return fail(fmt.Errorf("post-copy migration of a container with GPUs: %w", errdefs.ErrNotImplemented))
+	}
+	if err := c.fillMemory(); err != nil {
+		return fail(err)
+	}
+	c.trackedSince = ""
+	ready, signal, err := os.Pipe()
+	if err != nil {
+		return fail(err)
+	}
+	defer ready.Close()
+	// libcontainer closes the status fd once CRIU is ready, by number.
+	statusFd, err := unix.Dup(int(signal.Fd()))
+	signal.Close()
+	if err != nil {
+		return fail(err)
+	}
+	if err := c.lc.Pause(); err != nil {
+		unix.Close(statusFd)
+		return fail(fmt.Errorf("freeze: %w", err))
+	}
+	init := c.Pid()
+	done := make(chan error, 1)
+	go func() {
+		err := c.lc.Checkpoint(&libcontainer.CriuOpts{
+			ImagesDirectory: dir,
+			WorkDirectory:   dir,
+			LazyPages:       true,
+			StatusFd:        statusFd,
+			PageServer:      libcontainer.CriuPageServerInfo{Address: host, Port: int32(port)},
+		})
+		if err != nil {
+			err = fmt.Errorf("criu dump: %w%s", err, criuErrors(filepath.Join(dir, "dump.log")))
+		}
+		done <- err
+	}()
+	served := make(chan bool, 1)
+	go func() {
+		var b [1]byte
+		n, _ := ready.Read(b[:])
+		served <- n == 1
+	}()
+	select {
+	case ok := <-served:
+		if !ok {
+			err := <-done
+			_ = c.lc.Resume()
+			return fail(fmt.Errorf("lazy dump: CRIU did not serve: %v", err))
+		}
+	case err := <-done:
+		// Failed before serving: the status fd is still ours.
+		unix.Close(statusFd)
+		_ = c.lc.Resume()
+		return fail(err)
+	}
+	var once sync.Once
+	var result error
+	finish := func() error {
+		once.Do(func() { result = <-done })
+		return result
+	}
+	wait = func() error {
+		defer unlock()
+		return finish()
+	}
+	abort = func() error {
+		defer unlock()
+		// CRIU serves with the container's tasks seized: their tracer.
+		if tracer := tracerOf(init); tracer > 0 {
+			_ = unix.Kill(tracer, unix.SIGKILL)
+		}
+		_ = finish()
+		// Thawed already if the dump's failure did.
+		if err := c.lc.Resume(); err != nil && !errors.Is(err, libcontainer.ErrNotPaused) {
+			return err
+		}
+		return nil
+	}
+	return wait, abort, nil
+}
+
+// tracerOf is the pid tracing pid, 0 if none.
+func tracerOf(pid int) int {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return 0
+	}
+	for _, l := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(l, "TracerPid:"); ok {
+			n, _ := strconv.Atoi(strings.TrimSpace(v))
+			return n
+		}
+	}
+	return 0
+}
+
 // LazyPagesAvailable says whether a container in a user namespace can be
 // restored lazily. The restored tasks open the userfaultfd themselves, from
 // inside the namespace, and the kernel allows that unrestricted only to
@@ -1216,7 +1341,7 @@ func (d *lazyDaemon) stop() {
 // outlives the restore: it copies the pages the restored processes do not
 // touch in the background, and exits once it has sent the last; or, with
 // onDemand, it copies none, and runs until stopped or drained.
-func startLazyPages(images, work string, onDemand bool) (*lazyDaemon, error) {
+func startLazyPages(images, work string, onDemand bool, pageServer string) (*lazyDaemon, error) {
 	ready, signal, err := os.Pipe()
 	if err != nil {
 		return nil, err
@@ -1225,6 +1350,13 @@ func startLazyPages(images, work string, onDemand bool) (*lazyDaemon, error) {
 	args := []string{"lazy-pages", "--images-dir", images, "--work-dir", work, "--status-fd", "3"}
 	if onDemand {
 		args = append(args, "--lazy-pages-on-demand")
+	}
+	if pageServer != "" {
+		host, port, err := net.SplitHostPort(pageServer)
+		if err != nil {
+			return nil, err
+		}
+		args = append(args, "--page-server", "--address", host, "--port", port)
 	}
 	cmd := exec.Command("criu", args...)
 	cmd.ExtraFiles = []*os.File{signal}
