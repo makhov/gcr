@@ -720,7 +720,7 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 			return err
 		}
 		c.lazyDaemon.stop()
-		c.lazyDaemon, keepWork = d, onDemand
+		c.lazyDaemon, keepWork = d, true
 	}
 	// CRIU sets the hostname the snapshot's UTS namespace had, in the
 	// one the container joins: a fork is another pod, which keeps its own.
@@ -1462,6 +1462,7 @@ type lazyDaemon struct {
 	done     chan struct{}
 	err      error // how it exited, once done
 	stopping atomic.Bool
+	log      string
 }
 
 // drain has the daemon copy the pages it has not, and waits until it has
@@ -1502,6 +1503,17 @@ func (d *lazyDaemon) stop() {
 		return
 	}
 	d.stopping.Store(true)
+	select {
+	case <-d.done:
+		return
+	default:
+	}
+	if !d.onDemand {
+		// It exits once it has copied every page: still running, it has
+		// not, and the container may be stuck on a fault it never served.
+		log.G(context.Background()).WithField("log", d.log).
+			Warn("lazy pages daemon stopped before it copied every page: " + logTail(d.log, 15))
+	}
 	_ = d.cmd.Process.Signal(unix.SIGTERM)
 	select {
 	case <-d.done:
@@ -1552,10 +1564,15 @@ func startLazyPages(images, work string, onDemand bool, pageServer string) (*laz
 		return nil, fmt.Errorf("lazy pages: not serving: %w%s", err, criuErrors(filepath.Join(work, "lazy-pages.log")))
 	}
 	ready.Close()
-	d := &lazyDaemon{cmd: cmd, onDemand: onDemand, done: make(chan struct{})}
+	started := time.Now()
+	d := &lazyDaemon{cmd: cmd, onDemand: onDemand, done: make(chan struct{}), log: filepath.Join(work, "lazy-pages.log")}
 	go func() {
 		defer close(d.done)
 		d.err = cmd.Wait()
+		if d.err == nil && !d.stopping.Load() {
+			log.G(context.Background()).WithField("took", time.Since(started).Round(time.Millisecond)).
+				Info("lazy pages daemon copied every page")
+		}
 		if err := d.err; err != nil && !d.stopping.Load() {
 			// The container is left with pages nobody will send it; it
 			// gets SIGBUS when it touches one.
@@ -1564,6 +1581,19 @@ func startLazyPages(images, work string, onDemand bool, pageServer string) (*laz
 		}
 	}()
 	return d, nil
+}
+
+// logTail returns the last n lines of a log, joined with " | ".
+func logTail(path string, n int) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err.Error()
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, " | ")
 }
 
 // criuErrors returns the error lines of a CRIU log, for error messages.
