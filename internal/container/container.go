@@ -1633,11 +1633,17 @@ func (c *Container) Kill(sig syscall.Signal, all bool) error {
 			if errors.Is(err, libcontainer.ErrNotRunning) {
 				return fmt.Errorf("container not running: %w", errdefs.ErrNotFound)
 			}
+			if cgroupGone(err) {
+				return nil
+			}
 			return err
 		}
 		return nil
 	}
 	pids, err := lc.Processes()
+	if cgroupGone(err) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -1647,6 +1653,14 @@ func (c *Container) Kill(sig syscall.Signal, all bool) error {
 		}
 	}
 	return nil
+}
+
+// cgroupGone says whether err is the container's cgroup having been
+// removed, which happens once every process in it has exited: killing
+// them, or all of them, has nothing left to do. libcontainer checks the
+// cgroup exists, then reads it, and it can go in between.
+func cgroupGone(err error) bool {
+	return errors.Is(err, libcontainer.ErrCgroupNotExist) || errors.Is(err, fs.ErrNotExist)
 }
 
 // Delete removes a stopped container: libcontainer state, rootfs mounts, stdio.
