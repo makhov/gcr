@@ -25,4 +25,7 @@ for ns in $(ctr namespace ls -q 2>/dev/null); do
 done
 
 pkill -f containerd-shim-gcr-v2 >/dev/null 2>&1
+# Snapshots pulled lazily in a failed run stay mounted, each by a nydusd
+# that exits with its mount.
+findmnt -t fuse -n -o TARGET,SOURCE | awk '$2 == "rafs" && $1 ~ "^/tmp/Test" {print $1}' | xargs -r -n1 umount -l
 echo "left: $(pgrep -c -f containerd-shim-gcr-v2 || echo 0) shims, $(crictl pods -q 2>/dev/null | wc -l) pods"

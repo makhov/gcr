@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/makhov/gcr/internal/container"
 	"github.com/makhov/gcr/internal/control"
+	"github.com/makhov/gcr/internal/nydus"
 	"github.com/makhov/gcr/internal/snapshot"
 	"github.com/makhov/gcr/internal/snapshot/registry"
 	"github.com/makhov/gcr/internal/userns"
@@ -31,6 +33,16 @@ import (
 // here is removed, so it keeps its own. A fork of either carries on from
 // it, mapping the range it was given.
 func TestRegistry(t *testing.T) {
+	t.Run("tar", func(t *testing.T) { testRegistry(t, registry.FormatTar) })
+	t.Run("nydus", func(t *testing.T) {
+		if err := nydus.Available(); err != nil {
+			t.Skip(err)
+		}
+		testRegistry(t, registry.FormatNydus)
+	})
+}
+
+func testRegistry(t *testing.T, format string) {
 	ns := framework.NewNamespace(t, "gcr-e2e")
 	addr := "127.0.0.1:" + strconv.Itoa(5100+os.Getpid()%400)
 	ns.Run(framework.UniqueID("registry"), framework.Spec{
@@ -76,13 +88,13 @@ func TestRegistry(t *testing.T) {
 	}
 	at := a.ReadInt("/tmp/count")
 
-	ref := fmt.Sprintf("%s/gcr-e2e/second:%d", addr, os.Getpid())
+	ref := fmt.Sprintf("%s/gcr-e2e/second-%s:%d", addr, format, os.Getpid())
 	repo, err := registry.Repository(ref, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	begin := time.Now()
-	if _, err := registry.Push(t.Context(), second, repo, repo.Reference.Reference); err != nil {
+	if _, err := registry.Push(t.Context(), second, repo, repo.Reference.Reference, format); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 	t.Logf("pushed in %s", time.Since(begin).Round(time.Millisecond))
@@ -92,7 +104,7 @@ func TestRegistry(t *testing.T) {
 
 	// Its range is held here: the pull moves it.
 	moved := filepath.Join(tmp, "moved")
-	res, err := registry.Pull(t.Context(), repo, repo.Reference.Reference, moved, store)
+	res, err := registry.Pull(t.Context(), repo, repo.Reference.Reference, moved, store, registry.PullOptions{})
 	if err != nil {
 		t.Fatalf("pull into a taken range: %v", err)
 	}
@@ -117,7 +129,7 @@ func TestRegistry(t *testing.T) {
 
 	pulled := filepath.Join(tmp, "pulled")
 	begin = time.Now()
-	res, err = registry.Pull(t.Context(), repo, repo.Reference.Reference, pulled, store)
+	res, err = registry.Pull(t.Context(), repo, repo.Reference.Reference, pulled, store, registry.PullOptions{})
 	if err != nil {
 		t.Fatalf("pull: %v", err)
 	}
@@ -130,6 +142,54 @@ func TestRegistry(t *testing.T) {
 	if users, err := snapshot.Users(pulled); err != nil || len(users) != 1 {
 		t.Fatalf("users of the pulled snapshot: %v, %v; want the fork", users, err)
 	}
+	if format != registry.FormatNydus {
+		return
+	}
+
+	// Pulled lazily: its parts and the layer beneath are mounted, read
+	// from the registry as the fork reads them. Its range is the one the
+	// snapshot pulled above holds, under the same key, as forks share it.
+	lazy := filepath.Join(tmp, "lazy")
+	lazyStore := filepath.Join(tmp, "lazy-layers")
+	begin = time.Now()
+	res, err = registry.Pull(t.Context(), repo, repo.Reference.Reference, lazy, lazyStore, registry.PullOptions{Lazy: true})
+	if err != nil {
+		t.Fatalf("lazy pull: %v", err)
+	}
+	t.Logf("pulled lazily in %s", time.Since(begin).Round(time.Millisecond))
+	layers := strings.Fields(readFileHost(t, filepath.Join(lazy, snapshot.LayersFile)))
+	for _, m := range append([]string{filepath.Join(lazy, "images"), filepath.Join(lazy, snapshot.Upper)}, layers...) {
+		if !nydus.Mounted(m) {
+			t.Fatalf("%s is not mounted", m)
+		}
+	}
+	c := forkOf("fork-lazy", lazy)
+	checkFork(t, c, at, base)
+	c.Remove()
+	if err := snapshot.Remove(lazy); err != nil {
+		t.Fatalf("remove the lazy snapshot: %v", err)
+	}
+	for _, l := range layers {
+		if err := snapshot.Remove(filepath.Dir(l)); err != nil {
+			t.Fatalf("remove its layer: %v", err)
+		}
+		if nydus.Mounted(l) {
+			t.Fatalf("%s is still mounted after its removal", l)
+		}
+	}
+	framework.Eventually(t, 10*time.Second, "nydusd to exit", func() bool {
+		out, _ := exec.Command("pgrep", "-f", "nydusd .*"+tmp).Output()
+		return len(out) == 0
+	})
+}
+
+func readFileHost(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
 
 // checkFork checks that c, a fork of the snapshot of fork a, has a's

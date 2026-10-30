@@ -10,8 +10,10 @@ import (
 	"testing"
 
 	"github.com/containerd/errdefs"
+	"golang.org/x/sys/unix"
 	"oras.land/oras-go/v2/content/memory"
 
+	"github.com/makhov/gcr/internal/nydus"
 	"github.com/makhov/gcr/internal/snapshot"
 )
 
@@ -51,6 +53,16 @@ func readFile(t *testing.T, path string) string {
 }
 
 func TestPushPull(t *testing.T) {
+	t.Run("tar", func(t *testing.T) { testPushPull(t, FormatTar) })
+	t.Run("nydus", func(t *testing.T) {
+		if err := nydus.Available(); err != nil {
+			t.Skip(err)
+		}
+		testPushPull(t, FormatNydus)
+	})
+}
+
+func testPushPull(t *testing.T, format string) {
 	ctx := context.Background()
 	src := t.TempDir()
 	a := filepath.Join(src, "a")
@@ -59,7 +71,7 @@ func TestPushPull(t *testing.T) {
 	newSnapshot(t, b, map[string]string{"fork": "b", "etc/conf": "2"}, filepath.Join(a, snapshot.Upper))
 
 	reg := memory.New()
-	desc, err := Push(ctx, b, reg, "b")
+	desc, err := Push(ctx, b, reg, "b", format)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +82,7 @@ func TestPushPull(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	again, err := Push(ctx, b, memory.New(), "b")
+	again, err := Push(ctx, b, memory.New(), "b", format)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +93,7 @@ func TestPushPull(t *testing.T) {
 	dst := t.TempDir()
 	store := filepath.Join(dst, "layers")
 	c := filepath.Join(dst, "c")
-	if _, err := Pull(ctx, reg, "b", c, store); err != nil {
+	if _, err := Pull(ctx, reg, "b", c, store, PullOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := readFile(t, filepath.Join(c, snapshot.Upper, "fork")); got != "b" {
@@ -106,7 +118,7 @@ func TestPushPull(t *testing.T) {
 
 	// A second snapshot with the same layer beneath shares it.
 	d := filepath.Join(dst, "d")
-	if _, err := Pull(ctx, reg, "b", d, store); err != nil {
+	if _, err := Pull(ctx, reg, "b", d, store, PullOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if entries, _ := os.ReadDir(store); len(entries) != 1 {
@@ -127,10 +139,10 @@ func TestPushPull(t *testing.T) {
 		}
 	}
 
-	if _, err := Pull(ctx, reg, "b", src, store); !errdefs.IsAlreadyExists(err) {
+	if _, err := Pull(ctx, reg, "b", src, store, PullOptions{}); !errdefs.IsAlreadyExists(err) {
 		t.Fatalf("pull into a directory with files: %v", err)
 	}
-	if _, err := Pull(ctx, reg, "missing", filepath.Join(dst, "e"), store); err == nil {
+	if _, err := Pull(ctx, reg, "missing", filepath.Join(dst, "e"), store, PullOptions{}); err == nil {
 		t.Fatal("pulled a tag that is not there")
 	}
 }
@@ -142,24 +154,77 @@ func TestPushCached(t *testing.T) {
 	a := filepath.Join(t.TempDir(), "a")
 	newSnapshot(t, a, map[string]string{"x": "1"})
 	reg := memory.New()
-	if _, err := Push(ctx, a, reg, "one"); err != nil {
+	if _, err := Push(ctx, a, reg, "one", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(a, BlobsFile)); err != nil {
 		t.Fatalf("no cache: %v", err)
 	}
-	if _, err := Push(ctx, a, reg, "two"); err != nil {
+	if _, err := Push(ctx, a, reg, "two", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Another registry has none of them: they are packed again, and must
 	// come out the same.
-	if _, err := Push(ctx, a, memory.New(), "one"); err != nil {
+	if _, err := Push(ctx, a, memory.New(), "one", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(a, snapshot.Upper, "x"), []byte("changed"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Push(ctx, a, memory.New(), "one"); err == nil || !strings.Contains(err.Error(), "changed") {
+	if _, err := Push(ctx, a, memory.New(), "one", ""); err == nil || !strings.Contains(err.Error(), "changed") {
 		t.Fatalf("pushing a snapshot changed after it was packed: %v", err)
+	}
+}
+
+// A writable layer keeps, through the nydus format, what overlay and the
+// user namespace need: numeric owners, setuid bits, hard links, whiteouts
+// (character devices 0/0) and opaque directories (a trusted xattr).
+func TestNydusKeepsLayer(t *testing.T) {
+	if err := nydus.Available(); err != nil {
+		t.Skip(err)
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("needs root: device nodes, trusted xattrs, owners")
+	}
+	ctx := context.Background()
+	a := filepath.Join(t.TempDir(), "a")
+	newSnapshot(t, a, map[string]string{"f": "data", "d/opaque/x": "x"})
+	up := filepath.Join(a, snapshot.Upper)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(os.Chown(filepath.Join(up, "f"), 1<<30, 1<<30+1))
+	must(unix.Chmod(filepath.Join(up, "f"), 0o4755))
+	must(os.Link(filepath.Join(up, "f"), filepath.Join(up, "hard")))
+	must(unix.Mknod(filepath.Join(up, "wh"), unix.S_IFCHR, 0))
+	must(unix.Setxattr(filepath.Join(up, "d", "opaque"), "trusted.overlay.opaque", []byte("y"), 0))
+
+	reg := memory.New()
+	if _, err := Push(ctx, a, reg, "a", FormatNydus); err != nil {
+		t.Fatal(err)
+	}
+	c := filepath.Join(t.TempDir(), "c")
+	if _, err := Pull(ctx, reg, "a", c, filepath.Join(t.TempDir(), "store"), PullOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	got := filepath.Join(c, snapshot.Upper)
+	var st unix.Stat_t
+	must(unix.Lstat(filepath.Join(got, "f"), &st))
+	if st.Uid != 1<<30 || st.Gid != 1<<30+1 || st.Mode&0o7777 != 0o4755 || st.Nlink != 2 {
+		t.Fatalf("f: %d:%d %o, %d links", st.Uid, st.Gid, st.Mode&0o7777, st.Nlink)
+	}
+	must(unix.Lstat(filepath.Join(got, "wh"), &st))
+	if st.Mode&unix.S_IFMT != unix.S_IFCHR || st.Rdev != 0 {
+		t.Fatalf("whiteout: mode %o rdev %d", st.Mode, st.Rdev)
+	}
+	buf := make([]byte, 8)
+	if n, err := unix.Getxattr(filepath.Join(got, "d", "opaque"), "trusted.overlay.opaque", buf); err != nil || string(buf[:n]) != "y" {
+		t.Fatalf("opaque: %q, %v", buf[:n], err)
+	}
+	if got := readFile(t, filepath.Join(got, "d", "opaque", "x")); got != "x" {
+		t.Fatalf("d/opaque/x: %q", got)
 	}
 }

@@ -7,8 +7,8 @@
 //	gcr [-n namespace] snapshot ID DIR
 //	gcr snapshot-users DIR
 //	gcr snapshot-rm DIR...
-//	gcr snapshot-push [-plain-http] DIR REF
-//	gcr snapshot-pull [-plain-http] [-store DIR] REF DIR
+//	gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF
+//	gcr snapshot-pull [-plain-http] [-store DIR] [-lazy] REF DIR
 //	gcr [-n namespace] migrate [-token TOKEN] ID TARGET-URL
 package main
 
@@ -36,8 +36,8 @@ func main() {
 			"       gcr [-n namespace] snapshot ID DIR\n"+
 			"       gcr snapshot-users DIR\n"+
 			"       gcr snapshot-rm DIR...\n"+
-			"       gcr snapshot-push [-plain-http] DIR REF\n"+
-			"       gcr snapshot-pull [-plain-http] [-store DIR] REF DIR\n"+
+			"       gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF\n"+
+			"       gcr snapshot-pull [-plain-http] [-store DIR] [-lazy] REF DIR\n"+
 			"       gcr [-n namespace] migrate [-token TOKEN] ID TARGET-URL\n")
 	}
 	flag.Parse()
@@ -104,6 +104,8 @@ func run(ctx context.Context, ns string, args []string) error {
 		fs := flag.NewFlagSet(args[0], flag.ExitOnError)
 		plainHTTP := fs.Bool("plain-http", false, "speak HTTP, not HTTPS, to the registry (always for loopback)")
 		store := fs.String("store", registry.DefaultStore, "where the layers beneath pulled snapshots go")
+		lazy := fs.Bool("lazy", false, "snapshot-pull: mount a nydus snapshot's parts, reading from the registry what is read (needs nydusd)")
+		format := fs.String("format", registry.FormatTar, "snapshot-push: tar, or nydus (nodes can then read parts lazily; needs nydus-image and nydusd)")
 		_ = fs.Parse(args[1:])
 		if fs.NArg() != 2 {
 			flag.Usage()
@@ -122,16 +124,19 @@ func run(ctx context.Context, ns string, args []string) error {
 			tag = "latest"
 		}
 		if args[0] == "snapshot-pull" {
-			pulled, err := registry.Pull(ctx, repo, tag, fs.Arg(1), *store)
+			pulled, err := registry.Pull(ctx, repo, tag, fs.Arg(1), *store, registry.PullOptions{Lazy: *lazy})
 			if err != nil {
 				return err
+			}
+			if pulled.Lazy {
+				fmt.Println("mounted lazily: nydusd reads it from the registry until gcr snapshot-rm; after a reboot, pull it again")
 			}
 			if pulled.From != 0 {
 				fmt.Printf("moved from user namespace range %d to %d (that one is in use here)\n", pulled.From, pulled.Range.Base)
 			}
 			return nil
 		}
-		desc, err := registry.Push(ctx, fs.Arg(0), repo, tag)
+		desc, err := registry.Push(ctx, fs.Arg(0), repo, tag, *format)
 		if err != nil {
 			return err
 		}

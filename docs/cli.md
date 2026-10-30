@@ -12,8 +12,8 @@ gcr [-n namespace] rewind ID POINT
 gcr [-n namespace] snapshot ID DIR
 gcr snapshot-users DIR
 gcr snapshot-rm DIR...
-gcr snapshot-push [-plain-http] DIR REF
-gcr snapshot-pull [-plain-http] [-store DIR] REF DIR
+gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF
+gcr snapshot-pull [-plain-http] [-store DIR] [-lazy] REF DIR
 gcr [-n namespace] migrate [-token TOKEN] ID TARGET-URL
 ```
 
@@ -64,7 +64,7 @@ Removes snapshots, and lets go of the user namespace ranges they held.
 Refuses a snapshot something still uses, and a directory that does not
 look like a snapshot.
 
-### `gcr snapshot-push [-plain-http] DIR REF`
+### `gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF`
 
 Pushes a snapshot to an OCI registry as one artifact, and prints its
 digest ([moving snapshots](snapshot-registry.md)). `REF` is like
@@ -73,10 +73,13 @@ Credentials come from Docker's config (`docker login`).
 
 - `-plain-http`: speak HTTP to the registry. Registries on loopback
   always get HTTP.
+- `-format`: `tar` (the default) or `nydus`
+  ([formats](snapshot-registry.md#formats)).
 
-### `gcr snapshot-pull [-plain-http] [-store DIR] REF DIR`
+### `gcr snapshot-pull [-plain-http] [-store DIR] [-lazy] REF DIR`
 
-Pulls a snapshot to `DIR`, and the layers beneath it to the store. If the
+Pulls a snapshot to `DIR`, and the layers beneath it to the store, in
+whichever format it was pushed. If the
 snapshot's user namespace range is in use on this node, it is moved to a
 free one and `gcr` says so.
 
@@ -85,6 +88,8 @@ free one and `gcr` says so.
   Include it in the handler's `SnapshotRoots` if pods fork from pulled
   snapshots.
 - `-plain-http`: as for `snapshot-push`.
+- `-lazy`: for a snapshot pushed with `-format nydus`, mount its parts
+  instead of downloading them ([lazy pulls](snapshot-registry.md#lazy-pulls)).
 
 ## Live migration
 

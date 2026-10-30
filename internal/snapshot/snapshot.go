@@ -37,6 +37,7 @@ import (
 	"github.com/containerd/errdefs"
 	"golang.org/x/sys/unix"
 
+	"github.com/makhov/gcr/internal/nydus"
 	"github.com/makhov/gcr/internal/userns"
 )
 
@@ -54,11 +55,15 @@ const (
 	Upper = "upper"
 	// BlobsFile caches a snapshot's registry blobs (package registry).
 	BlobsFile = "gcr-blobs.json"
+	// LazyDir holds, in a snapshot pulled lazily (package registry), what
+	// serves its mounted parts: their bootstraps, nydusd's configuration,
+	// log and cache.
+	LazyDir = "gcr-lazy"
 )
 
 // known are the entries a snapshot directory has; Remove refuses a
 // directory with anything else in it, which is likely not a snapshot.
-var known = []string{Upper, "images", "work", LayersFile, RefsDir, LockFile, BlobsFile, userns.BaseFile, userns.KeyFile}
+var known = []string{Upper, "images", "work", LayersFile, RefsDir, LockFile, BlobsFile, LazyDir, userns.BaseFile, userns.KeyFile}
 
 // Kind is what holds a reference.
 type Kind string
@@ -334,6 +339,13 @@ func Remove(dir string) error {
 				names[i] = u.String()
 			}
 			return fmt.Errorf("snapshot %s is in use by %s: %w", dir, strings.Join(names, ", "), errdefs.ErrFailedPrecondition)
+		}
+		// A snapshot pulled lazily has its parts mounted (nydusd, which
+		// exits with its mount).
+		for _, part := range []string{"images", Upper} {
+			if err := nydus.Unmount(filepath.Join(dir, part)); err != nil {
+				return fmt.Errorf("unmount %s: %w", part, err)
+			}
 		}
 		if trash, err = os.MkdirTemp(filepath.Dir(dir), "."+filepath.Base(dir)+".gcr-removing-"); err != nil {
 			return err
