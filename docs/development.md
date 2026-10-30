@@ -69,3 +69,31 @@ REPO=makhov/gcr TOKEN=$(gh api -X POST \
 
 It is a host the repository's workflows execute code on, so use one you
 are willing to give everyone with write access.
+
+## Releases
+
+`make release` builds static binaries of the shim and `gcr` for
+linux/amd64 and linux/arm64, each stamped with the version
+(`containerd-shim-gcr-v2 -v`, `gcr version`), into
+`dist/gcr-VERSION-linux-ARCH.tar.gz` with `dist/SHA256SUMS`. It needs no
+CI: it runs on a Linux host that can build with cgo for both, such as the
+dev VM. There, building amd64 from arm64 takes Ubuntu's cross compiler and
+amd64 libseccomp:
+
+```sh
+sudo dpkg --add-architecture amd64 && sudo apt-get update
+sudo apt-get install gcc-x86-64-linux-gnu libc6-dev-amd64-cross libseccomp-dev:amd64
+```
+
+(on an amd64 host, `gcc-aarch64-linux-gnu`, `libc6-dev-arm64-cross` and
+`libseccomp-dev:arm64`). To cut one:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+make vm T='release VERSION=v0.1.0'    # or `make release VERSION=v0.1.0` on the host
+make release-publish VERSION=v0.1.0   # a draft GitHub release, to look over and publish
+```
+
+`VERSION` defaults to `git describe`. The binaries are built with
+`-trimpath` and stripped. CRIU is not part of a release.
+

@@ -2,6 +2,7 @@
 
 // gcr is the command line for gcr runtime features outside containerd's API.
 //
+//	gcr version
 //	gcr [-n namespace] timeline ID
 //	gcr [-n namespace] rewind ID POINT
 //	gcr [-n namespace] point ID [LABEL]
@@ -24,6 +25,8 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/containerd/containerd/v2/version"
+
 	"github.com/makhov/gcr/internal/control"
 	"github.com/makhov/gcr/internal/migrate"
 	"github.com/makhov/gcr/internal/snapshot"
@@ -33,7 +36,8 @@ import (
 func main() {
 	ns := flag.String("n", "default", "containerd namespace")
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: gcr [-n namespace] timeline ID\n"+
+		fmt.Fprintf(os.Stderr, "usage: gcr version\n"+
+			"       gcr [-n namespace] timeline ID\n"+
 			"       gcr [-n namespace] rewind ID POINT\n"+
 			"       gcr [-n namespace] point ID [LABEL]\n"+
 			"       gcr [-n namespace] snapshot ID DIR\n"+
@@ -53,6 +57,9 @@ func main() {
 
 func run(ctx context.Context, ns string, args []string) error {
 	switch {
+	case len(args) == 1 && args[0] == "version":
+		fmt.Printf("gcr %s (%s)\n", version.Version, version.Revision)
+		return nil
 	case len(args) == 2 && args[0] == "timeline":
 		points, err := control.NewClient(ns, args[1]).Timeline(ctx)
 		if err != nil {

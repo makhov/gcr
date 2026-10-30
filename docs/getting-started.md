@@ -18,12 +18,26 @@ another machine without a spare Linux node, use the
 
 ## Install
 
-Build on the Linux host (cgo is required) and install both binaries:
+From a release, for `linux-amd64` or `linux-arm64`: static binaries,
+nothing else to install for them.
+
+```sh
+v=v0.1.0 arch=amd64
+curl -LO https://github.com/makhov/gcr/releases/download/$v/gcr-$v-linux-$arch.tar.gz
+tar -xzf gcr-$v-linux-$arch.tar.gz
+sudo install -m 0755 gcr-$v-linux-$arch/containerd-shim-gcr-v2 gcr-$v-linux-$arch/gcr /usr/local/bin/
+gcr version
+```
+
+Or build on the Linux host (cgo is required) and install both binaries:
 
 ```sh
 make install          # containerd-shim-gcr-v2 and gcr into /usr/local/bin
-make criu             # optional: build and install the CRIU fork from ../criu
 ```
+
+Either way, checkpoints, forks, time travel and migration need CRIU, and
+some of it gcr's own ([makhov/criu](https://github.com/makhov/criu)):
+`make criu` builds and installs it from a checkout in `../criu`.
 
 containerd finds the shim by name on `PATH`: the runtime type
 `io.containerd.gcr.v2` maps to `containerd-shim-gcr-v2`.
