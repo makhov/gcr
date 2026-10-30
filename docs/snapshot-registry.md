@@ -89,17 +89,21 @@ too, so a fork of a large snapshot starts after reading a fraction of it.
 What it buys, for a fork of a Python process holding 1 GiB of random data
 (incompressible), pulled from a registry on the same host (arm64 VM):
 
-| | pull | until the fork runs | total | read from the registry by then |
-| --- | --- | --- | --- | --- |
-| plain pull | 3.25 s | 0.58 s | 3.83 s | 1027 MiB |
-| `-lazy` | 0.07 s | 3.16 s | 3.23 s | 1027 MiB |
-| `-lazy`, `gcr.dev/lazy-restore=true` | 0.06 s | 0.35 s | **0.41 s** | **28 MiB** |
+| | pull | until the fork runs | total | read from the registry | 10 s later |
+| --- | --- | --- | --- | --- | --- |
+| plain pull | 3.78 s | 0.64 s | 4.42 s | 1027 MiB | |
+| `-lazy` | 0.09 s | 3.34 s | 3.43 s | 1027 MiB | 1027 MiB |
+| `-lazy`, `gcr.dev/lazy-restore=true` | 0.07 s | 0.33 s | **0.40 s** | **8 MiB** | **8 MiB** |
 
 Without lazy restore, CRIU reads all of the memory before the processes
 run, so the lazy pull only moves the wait. With it, the fork runs after
-the pages it touched; CRIU then copies the rest in the background until
-the fork has all its memory, so the whole snapshot is read within seconds
-either way. Over a real network the time saved grows with the snapshot.
+reading the pages it touched, and with gcr's CRIU it reads only those for
+as long as it runs ([lazy restore](fork.md#lazy-restore)): a node starts a
+fork of a snapshot it has never seen by reading what the fork uses. A
+snapshot of such a fork reads the rest first. With an upstream CRIU, the
+rest of the memory is copied in the background, and the whole snapshot is
+read within seconds. Over a real network the time saved grows with the
+snapshot. `hack/bench-lazy-pull.sh` makes these numbers.
 
 - **Lifetime.** The `nydusd`s run on their own and serve the snapshot
   until `gcr snapshot-rm` removes it, which unmounts its parts and they
