@@ -21,7 +21,7 @@ another machine without a spare Linux node, use the
 A release is one file per architecture, `gcr`, which carries the rest:
 
 ```sh
-v=v0.1.0 arch=amd64        # or arm64
+v=v0.0.1 arch=amd64        # or arm64
 curl -Lo gcr https://github.com/makhov/gcr/releases/download/$v/gcr-$v-linux-$arch
 chmod +x gcr
 sudo ./gcr setup           # -docker to register with dockerd too
@@ -116,7 +116,7 @@ On a cluster whose nodes run containerd, the installer DaemonSet sets gcr
 up on every node:
 
 ```sh
-kubectl apply -f deploy/gcr.yaml
+kubectl apply -f https://github.com/makhov/gcr/releases/download/v0.0.1/gcr.yaml
 ```
 
 Each node gets a privileged pod (`gcr-system/gcr-installer`) that runs the
