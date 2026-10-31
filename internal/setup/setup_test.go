@@ -182,7 +182,7 @@ func TestKernelAtLeast(t *testing.T) {
 func TestDistroDropInDir(t *testing.T) {
 	for _, tc := range []struct {
 		name, config, want string
-		version          int
+		version            int
 	}{
 		{"v3 importing config-v3.toml.d", "version = 3\nimports = [\"DIR/config-v3.toml.d/*.toml\"]\n", "config-v3.toml.d", 3},
 		{"v2 importing config.toml.d", "version = 2\nimports = [\"DIR/config.toml.d/*.toml\"]\n", "config.toml.d", 2},
