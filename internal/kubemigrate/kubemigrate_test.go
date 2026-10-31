@@ -22,13 +22,19 @@ func running(mod func(*corev1.Pod)) *corev1.Pod {
 }
 
 func TestMovable(t *testing.T) {
-	f := false
+	f, yes := false, true
 	for name, tc := range map[string]struct {
 		pod    *corev1.Pod
 		refuse string
 	}{
-		"a bare pod":     {running(nil), ""},
-		"owned":          {running(func(p *corev1.Pod) { p.OwnerReferences = []metav1.OwnerReference{{Kind: "ReplicaSet", Name: "rs"}} }), "owned by ReplicaSet"},
+		"a bare pod":               {running(nil), ""},
+		"owned, not as controller": {running(func(p *corev1.Pod) { p.OwnerReferences = []metav1.OwnerReference{{Kind: "ReplicaSet", Name: "rs"}} }), "owned by ReplicaSet"},
+		"a ReplicaSet's": {running(func(p *corev1.Pod) {
+			p.OwnerReferences = []metav1.OwnerReference{{Kind: "ReplicaSet", Name: "rs", Controller: &yes}}
+		}), ""},
+		"a Job's": {running(func(p *corev1.Pod) {
+			p.OwnerReferences = []metav1.OwnerReference{{Kind: "Job", Name: "j", Controller: &yes}}
+		}), "owned by Job"},
 		"two containers": {running(func(p *corev1.Pod) { p.Spec.Containers = append(p.Spec.Containers, corev1.Container{Name: "d"}) }), "2 containers"},
 		"hostUsers":      {running(func(p *corev1.Pod) { p.Spec.HostUsers = &f }), "hostUsers: false"},
 		"emptyDir": {running(func(p *corev1.Pod) {
@@ -70,5 +76,22 @@ func TestTargetPod(t *testing.T) {
 	}
 	if dst := targetPod(src, "n2", "a", "t", info{}); dst.Annotations[annotationHostUsers] != "true" || dst.Spec.NodeName != "n2" {
 		t.Errorf("no user namespace: host-users %q, node %q", dst.Annotations[annotationHostUsers], dst.Spec.NodeName)
+	}
+}
+
+func TestHoldBack(t *testing.T) {
+	dst := running(func(p *corev1.Pod) {
+		p.Labels = map[string]string{"app": "x", "pod-template-hash": "abc", "tier": "web"}
+	})
+	sel := &metav1.LabelSelector{
+		MatchLabels:      map[string]string{"app": "x", "pod-template-hash": "abc"},
+		MatchExpressions: []metav1.LabelSelectorRequirement{{Key: "tier", Operator: metav1.LabelSelectorOpExists}},
+	}
+	held := holdBack(dst, sel)
+	if len(dst.Labels) != 0 {
+		t.Errorf("target keeps %v: its ReplicaSet would see it", dst.Labels)
+	}
+	if len(held) != 3 || held["pod-template-hash"] != "abc" || held["tier"] != "web" {
+		t.Errorf("held back %v", held)
 	}
 }
