@@ -68,14 +68,21 @@ func run(t *testing.T, args ...string) string {
 
 const counter = `trap "exit 0" TERM; echo keep > /keep; i=0; while :; do i=$((i+1)); echo $i > /count; /bin/true; sleep 0.1; done`
 
+// count reads the counter, again if it caught the write between `>`
+// truncating /count and echo filling it (an exec per tick there is what
+// the time-travel tests count, so it is not replaced by a rename).
 func count(t *testing.T, id string) int {
 	t.Helper()
-	out := must(t, "exec", id, "cat", "/count")
-	n, err := strconv.Atoi(out)
-	if err != nil {
-		t.Fatalf("count: %q", out)
+	var out string
+	for range 10 {
+		out = must(t, "exec", id, "cat", "/count")
+		if n, err := strconv.Atoi(out); err == nil {
+			return n
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	return n
+	t.Fatalf("count: %q", out)
+	return 0
 }
 
 func TestBasics(t *testing.T) {
