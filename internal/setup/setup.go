@@ -126,6 +126,10 @@ func Run(o Options) error {
 		if _, err := registerK0s(shim, say); err != nil {
 			return fmt.Errorf("k0s: %w", err)
 		}
+	} else if d := detectDistro(); d != nil {
+		if err := registerDistro(d, shim, o.NoRestart, say); err != nil {
+			return fmt.Errorf("%s: %w", d.Name, err)
+		}
 	} else if err := setupContainerd(o, shim, say); err != nil {
 		return fmt.Errorf("containerd: %w", err)
 	}
