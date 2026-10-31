@@ -44,7 +44,10 @@ sudo ./gcr setup           # -docker to register with dockerd too
   what to do about what it lacks.
 
 The Go binaries are static; the CRIU needs glibc 2.35 or later (Ubuntu
-22.04, Debian 12, RHEL 10, and later). Running `gcr setup` again with a new
+22.04, Debian 12, RHEL 10, and later). Where it does not run, as on Alpine
+(k0s's node image), setup installs a static CRIU instead, which loads no
+plugins, so no GPU checkpoints there; and, where the node's `tar` is not GNU
+tar (busybox's), a static GNU tar for CRIU, in `/var/lib/gcr/bin`. Running `gcr setup` again with a new
 `gcr` upgrades it; running containers keep the shim they started with.
 
 `gcr doctor` on its own checks a node any time:
@@ -135,9 +138,8 @@ turn; deleting the DaemonSet unlabels the nodes and leaves gcr on them.
   containerd their own way (k3s, RKE2).
 - The image is `ghcr.io/makhov/gcr:VERSION`; while the repository is
   private, the DaemonSet needs an `imagePullSecrets` for it.
-- Nodes whose CRIU cannot run (gcr's needs glibc 2.35 or later, so not
-  Alpine) run containers on gcr without checkpoints, forks, time travel
-  or migration; `gcr doctor` says so.
+- Nodes without glibc (Alpine) get a static CRIU and GNU tar: everything
+  but GPU checkpoints works there.
 
 Or by hand: register the runtime with containerd's CRI plugin in
 `/etc/containerd/config.toml` (or `sudo gcr setup`) and restart containerd:

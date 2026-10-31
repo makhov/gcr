@@ -86,7 +86,9 @@ and gcr's CRIU with its CUDA plugin. All are stamped with the version;
   (`RELEASE_CRIU_SRC=DIR` builds a tree instead, to try a change). It is built in
   an Ubuntu 22.04 container (`hack/criu-build.sh`, `CRIU_IMAGE`) with its
   libraries linked in and glibc dynamic (`STATIC=libs`), so it runs on
-  glibc 2.35 and later and loads its plugins.
+  glibc 2.35 and later and loads its plugins; and again wholly static
+  (`STATIC=1`), for hosts without glibc, with a static GNU tar (1.35,
+  checksum pinned) for CRIU, as busybox's tar lacks options CRIU uses.
 - **The host** needs Docker (`DOCKER="sudo docker"` where its socket is
   root's), `zstd`, and Go with cgo for both architectures. On the arm64 dev
   VM, building amd64 takes Ubuntu's cross compiler and amd64 libseccomp:
