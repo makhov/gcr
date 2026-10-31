@@ -225,8 +225,24 @@ func (c *Container) Remove() {
 		logs, _ := filepath.Glob(filepath.Join("/run/containerd/io.containerd.runtime.v2.task", c.ns.Name, c.ID, "criu-restore-*", "lazy-pages.log"))
 		for _, l := range logs {
 			b, _ := os.ReadFile(l)
-			lines := strings.Split(strings.TrimSpace(string(b)), "\n")
-			c.ns.t.Logf("%s, last lines:\n%s", l, strings.Join(lines[max(0, len(lines)-25):], "\n"))
+			var notable []string
+			from := map[string]int{}
+			for _, line := range strings.Split(string(b), "\n") {
+				switch {
+				case strings.Contains(line, "Read page from"):
+					// "from self", "from parent": which image of a chain.
+					f := strings.Fields(line[strings.Index(line, "Read page from")+len("Read page from"):])
+					if len(f) > 0 {
+						from[f[0]]++
+					}
+				case strings.Contains(line, "transferred"), strings.Contains(line, "zero page"),
+					strings.Contains(line, "REMOVE"), strings.Contains(line, "UNMAP"), strings.Contains(line, "REMAP"),
+					strings.Contains(line, "FORK"), strings.Contains(line, "Error"), strings.Contains(line, "Warn"),
+					strings.Contains(line, "pages to be handled"):
+					notable = append(notable, line)
+				}
+			}
+			c.ns.t.Logf("%s: page reads by image %v; notable lines:\n%s", l, from, strings.Join(notable[:min(len(notable), 60)], "\n"))
 		}
 	}
 	if c.ns.t.Failed() {
