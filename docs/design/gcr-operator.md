@@ -1,6 +1,6 @@
 # gcr-operator: evictions that migrate
 
-Status: proposal. Nothing here exists yet, except what [Today](#today) lists.
+Status: milestones 1 (`kubectl gcr migrate`) and 2 (evictions, and Deployments' pods handed over) are built; see [migration](../migration.md#draining-nodes-gcr-operator). The rest is a proposal.
 
 ## The goal
 
