@@ -639,37 +639,60 @@ func eexistPages(log string) []string {
 	return pages
 }
 
-// restoreLines are the lines of a CRIU restore log about the mapping that
-// holds addr ("premap", "vma", "Opening" with its range) and about pages
-// it left to the lazy-pages daemon there ("Lazy restore skips N pages at").
+// restoreLines are the lines of a CRIU restore log whose range covers
+// addr: the mapping that holds it ("vma S E", "premap S-E -> P"), the
+// reads that filled pages there ("Read A N pages", from any image of a
+// chain) and the pages it left to the lazy-pages daemon ("Lazy restore
+// skips N pages at A"). A read covering a page it left lazy is a page
+// filled twice.
 func restoreLines(log string, addr uint64) []string {
+	hex := func(f string) (uint64, bool) {
+		n, err := strconv.ParseUint(strings.TrimPrefix(f, "0x"), 16, 64)
+		return n, err == nil
+	}
+	covers := func(start, n uint64) bool { return addr >= start && addr < start+n }
 	var out []string
 	for _, line := range strings.Split(log, "\n") {
-		var nums []uint64
-		for _, f := range strings.FieldsFunc(line, func(r rune) bool {
-			return !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r == 'x')
-		}) {
-			if len(strings.TrimPrefix(f, "0x")) >= 6 {
-				if n, err := strconv.ParseUint(strings.TrimPrefix(f, "0x"), 16, 64); err == nil {
-					nums = append(nums, n)
-				}
-			}
+		// "(00.036577)      1: ...": drop the timestamp.
+		body := line
+		if i := strings.Index(line, ") "); strings.HasPrefix(line, "(") && i > 0 {
+			body = line[i+2:]
 		}
-		switch {
-		case strings.Contains(line, "Lazy restore skips") && len(nums) > 0:
-			if f := strings.Fields(line[strings.Index(line, "skips")+5:]); len(f) > 0 {
-				if pages, err := strconv.ParseUint(f[0], 10, 64); err == nil && addr >= nums[len(nums)-1] && addr < nums[len(nums)-1]+pages*4096 {
+		f := strings.Fields(body)
+		for i := range f {
+			switch {
+			case f[i] == "vma" && i+2 < len(f):
+				a, ok1 := hex(f[i+1])
+				b, ok2 := hex(f[i+2])
+				if ok1 && ok2 && covers(a, b-a) {
+					out = append(out, line)
+				}
+			case f[i] == "premap" && i+1 < len(f):
+				r := strings.SplitN(f[i+1], "-", 2)
+				if len(r) == 2 {
+					a, ok1 := hex(r[0])
+					b, ok2 := hex(r[1])
+					if ok1 && ok2 && covers(a, b-a) {
+						out = append(out, line)
+					}
+				}
+			case f[i] == "Read" && i+3 < len(f) && f[i+3] == "pages":
+				a, ok1 := hex(f[i+1])
+				n, err := strconv.ParseUint(f[i+2], 10, 64)
+				if ok1 && err == nil && covers(a, n*4096) {
+					out = append(out, line)
+				}
+			case f[i] == "skips" && i+4 < len(f) && f[i+3] == "at":
+				n, err := strconv.ParseUint(f[i+1], 10, 64)
+				a, ok := hex(f[i+4])
+				if ok && err == nil && covers(a, n*4096) {
 					out = append(out, line)
 				}
 			}
-		case (strings.Contains(line, "premap") || strings.Contains(line, "vma") || strings.Contains(line, "VMA")) && len(nums) >= 2:
-			if addr >= nums[0] && addr < nums[1] {
-				out = append(out, line)
-			}
 		}
 	}
-	if len(out) > 12 {
-		out = out[:12]
+	if len(out) > 16 {
+		out = out[:16]
 	}
 	return out
 }
