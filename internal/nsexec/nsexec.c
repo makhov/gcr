@@ -321,6 +321,9 @@ static void do_mount(void)
 	source = fd_path(arg("_GCR_SOURCE"), pidfd, sbuf, sizeof(sbuf));
 	target = fd_path(arg("_GCR_TARGET"), pidfd, tbuf, sizeof(tbuf));
 
+	// Here, in the host's mount namespace: a container's has no selinuxfs.
+	if (selinux_label(procfd, label, sizeof(label)) < 0)
+		FAIL(errno);
 	int fds[NNS];
 	if (open_namespaces(pid, fds) < 0)
 		FAIL(errno);
@@ -328,8 +331,6 @@ static void do_mount(void)
 		if (join(fds, i) < 0)
 			FAIL(errno);
 	if (read_creds(procfd, &c) < 0)
-		FAIL(errno);
-	if (selinux_label(procfd, label, sizeof(label)) < 0)
 		FAIL(errno);
 	// Root and working directory as the caller sees them, opened once in
 	// its mount namespace (the kernel will not mount onto a path taken
