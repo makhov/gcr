@@ -1376,9 +1376,14 @@ func startLazyPages(images, work string, onDemand bool, pageServer string) (*laz
 		return nil, err
 	}
 	defer signal.Close()
-	args := []string{"lazy-pages", "--images-dir", images, "--work-dir", work, "--status-fd", "3"}
+	// Its log, in the work directory: every page it copies or zero-fills
+	// and every fault, where that is bounded by the memory (it copies all
+	// of it, then exits); warnings and errors only for one that serves
+	// faults for as long as the container runs.
+	args := []string{"lazy-pages", "--images-dir", images, "--work-dir", work, "--status-fd", "3",
+		"-o", "lazy-pages.log", "-v4"}
 	if onDemand {
-		args = append(args, "--lazy-pages-on-demand")
+		args = append(args, "--lazy-pages-on-demand", "-v2")
 	}
 	if pageServer != "" {
 		host, port, err := net.SplitHostPort(pageServer)
