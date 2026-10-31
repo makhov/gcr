@@ -89,7 +89,8 @@ func main() {
 		log.Fatalf("webhook %s: %v", *webhook, err)
 	}
 
-	op := &operator{cs: cs, opts: kubemigrate.Options{Namespace: *namespace, Image: *image, GCR: *gcrPath}, moving: map[string]bool{}}
+	op := &operator{cs: cs, opts: kubemigrate.Options{Namespace: *namespace, Image: *image, GCR: *gcrPath}, moving: map[string]bool{},
+		self: metav1.ObjectMeta{Namespace: *namespace, Name: os.Getenv("POD_NAME")}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /evict", op.evict)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -113,6 +114,8 @@ type operator struct {
 	moving map[string]bool // namespace/name of pods being moved
 	// start moves a pod in the background: move, but for tests.
 	start func(*corev1.Pod)
+	// self is the operator's own pod.
+	self metav1.ObjectMeta
 }
 
 // evict answers an eviction's admission review.
@@ -134,6 +137,17 @@ func (o *operator) evict(w http.ResponseWriter, r *http.Request) {
 func (o *operator) decide(ctx context.Context, req *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse {
 	allow := &admissionv1.AdmissionResponse{Allowed: true}
 	if req.DryRun != nil && *req.DryRun {
+		return allow
+	}
+	if req.Namespace == o.self.Namespace && req.Name == o.self.Name {
+		// Draining its own node evicts it with the pods it is moving:
+		// not before it has moved them.
+		o.mu.Lock()
+		n := len(o.moving)
+		o.mu.Unlock()
+		if n > 0 {
+			return tooMany(&corev1.Pod{ObjectMeta: o.self}, fmt.Sprintf("is moving %d pods to other nodes", n))
+		}
 		return allow
 	}
 	pod, err := o.cs.CoreV1().Pods(req.Namespace).Get(ctx, req.Name, metav1.GetOptions{})

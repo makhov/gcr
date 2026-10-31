@@ -94,6 +94,9 @@ spec:
           env:
             - name: POD_NAMESPACE
               valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+            # Its own evictions wait for the migrations it runs.
+            - name: POD_NAME
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
           ports:
             - containerPort: 8443
           readinessProbe:

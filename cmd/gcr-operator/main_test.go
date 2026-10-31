@@ -68,3 +68,16 @@ func TestDecideDryRun(t *testing.T) {
 		t.Fatal("dry run refused")
 	}
 }
+
+// Draining the operator's node waits for the pods it is moving.
+func TestDecideSelf(t *testing.T) {
+	o := &operator{cs: fake.NewSimpleClientset(), moving: map[string]bool{}, self: metav1.ObjectMeta{Namespace: "gcr-system", Name: "op"}}
+	req := &admissionv1.AdmissionRequest{Name: "op", Namespace: "gcr-system"}
+	if !o.decide(context.Background(), req).Allowed {
+		t.Fatal("refused while moving nothing")
+	}
+	o.moving["default/p"] = true
+	if resp := o.decide(context.Background(), req); resp.Allowed || resp.Result.Code != 429 {
+		t.Fatalf("allowed while moving a pod: %+v", resp)
+	}
+}
