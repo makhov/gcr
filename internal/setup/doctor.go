@@ -87,6 +87,8 @@ func Doctor() []Check {
 	}
 	if _, k0s := os.Stat(k0sConfig); k0s == nil {
 		which, err = "k0s's", nil // its own, off PATH
+	} else if d := detectDistro(); d != nil {
+		which, err = d.Name+"'s", nil
 	}
 	if err != nil {
 		add("containerd", Missing, "not found", "install containerd 1.7 or later")
@@ -112,9 +114,9 @@ func Doctor() []Check {
 	default:
 		v, verr := exec.Command(criu, "--version").Output()
 		if verr != nil {
-			// gcr's needs glibc: it does not start on musl (Alpine).
+			// Built for glibc, on musl (Alpine).
 			add("CRIU", Optional, criu+" does not run here: no checkpoints, forks, time travel or migration",
-				"it needs glibc 2.35 or later; on other nodes, build CRIU for them (make criu)")
+				"a release's gcr setup installs a static CRIU where glibc is missing; or make criu STATIC=1 from makhov/criu")
 			break
 		}
 		help, _ := exec.Command(criu, "--help").CombinedOutput()
@@ -135,6 +137,8 @@ func Doctor() []Check {
 			add("CRIU", Optional, detail+", not gcr's: no "+strings.Join(lacks, ", "), "a release's gcr setup installs gcr's; or make criu from makhov/criu")
 		} else if out, err := exec.Command(criu, "check").CombinedOutput(); err != nil {
 			add("CRIU", Missing, detail+": criu check fails", lastLine(string(out)))
+		} else if t := gnuTar(); t != "" {
+			add("CRIU", Missing, detail+": "+t, "install GNU tar (apk add tar, on Alpine)")
 		} else {
 			add("CRIU", OK, detail, "")
 		}
@@ -194,7 +198,11 @@ var runtimePath = regexp.MustCompile(`(?m)^\s*runtime_path\s*=\s*['"]([^'"]+)['"
 
 // registeredShim is the shim gcr setup's drop-in names, if it exists.
 func registeredShim() string {
-	for _, f := range []string{"/etc/containerd/conf.d/gcr.toml", filepath.Join(filepath.Dir(k0sConfig), "containerd.d", "gcr.toml")} {
+	candidates := []string{"/etc/containerd/conf.d/gcr.toml", filepath.Join(filepath.Dir(k0sConfig), "containerd.d", "gcr.toml")}
+	for _, d := range distros {
+		candidates = append(candidates, filepath.Join(d.Dir, "config-v3.toml.d", "gcr.toml"), filepath.Join(d.Dir, "config.toml.d", "gcr.toml"))
+	}
+	for _, f := range candidates {
 		b, err := os.ReadFile(f)
 		if err != nil {
 			continue
@@ -212,7 +220,12 @@ func registeredShim() string {
 func registered() bool {
 	files, _ := filepath.Glob("/etc/containerd/conf.d/*.toml")
 	k0s, _ := filepath.Glob("/etc/k0s/containerd.d/*.toml")
-	for _, f := range append(append(files, k0s...), "/etc/containerd/config.toml", k0sConfig) {
+	files = append(append(files, k0s...), "/etc/containerd/config.toml", k0sConfig)
+	for _, d := range distros {
+		dropIns, _ := filepath.Glob(filepath.Join(d.Dir, "*.toml.d", "*.toml"))
+		files = append(append(files, dropIns...), filepath.Join(d.Dir, "config.toml"))
+	}
+	for _, f := range files {
 		if b, err := os.ReadFile(f); err == nil && bytes.Contains(b, []byte(RuntimeType)) {
 			return true
 		}
@@ -252,4 +265,19 @@ func field(s, key string) string {
 func lastLine(s string) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
 	return lines[len(lines)-1]
+}
+
+// gnuTar says what is wrong with the tar on PATH, "" if it is GNU tar:
+// CRIU runs it to dump the contents of a container's tmpfs mounts (its
+// /dev, at least), with options busybox's lacks, so no dump works without.
+func gnuTar() string {
+	out, err := exec.Command("tar", "--version").CombinedOutput()
+	switch {
+	case err != nil && len(out) == 0:
+		return "no tar in PATH, which CRIU needs to dump tmpfs mounts (every container's /dev)"
+	case !bytes.Contains(out, []byte("GNU tar")):
+		first, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+		return "tar is not GNU tar (" + first + "), which CRIU needs to dump tmpfs mounts (every container's /dev)"
+	}
+	return ""
 }

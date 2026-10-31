@@ -25,6 +25,10 @@ ctr run -d --runtime io.containerd.gcr.v2 \
     that has them.
   - Both are counted like snapshots taken there (`gcr snapshot-users`,
     `gcr snapshot-rm`).
+- **A registry that stops answering** fails the push or pull: gcr waits up
+  to 5 minutes for a response once a request is sent (time enough for a
+  registry to commit a large upload), however long the upload or download
+  itself takes.
 - **Credentials** come from Docker's config (`docker login`). Registries
   on loopback are spoken to over plain HTTP; `-plain-http` forces it for
   others.
@@ -69,7 +73,8 @@ reads either.
 - **`nydus`**: each part is a [nydus](https://github.com/dragonflyoss/nydus)
   image (RAFS v6, which EROFS can read): a bootstrap, the part's metadata,
   and a blob of its file data in compressed chunks, deduplicated within the
-  part. A node can mount such a part with `nydusd` and read only what it
+  part. A push builds them in `/var/lib/gcr/tmp`, on disk: a blob is about
+  as large as the part's data. A node can mount such a part with `nydusd` and read only what it
   touches, instead of downloading all of it. Pushing and pulling need
   `nydus-image` and `nydusd` (nydus 2.4) in `PATH`.
 

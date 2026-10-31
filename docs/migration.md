@@ -22,7 +22,22 @@ source pre-copies memory in rounds to CRIU page servers on the target while
 it keeps running. It then freezes, sends the remaining memory, the rest of
 the checkpoint and the writable layer, and the target restores. The source
 stays frozen until the target runs and is thawed if anything fails before;
-afterwards it is killed. Open TCP connections reset.
+afterwards it is killed. Open TCP connections reset (see below).
+
+What happens to the processes' open files and sockets:
+
+| | on the target |
+| --- | --- |
+| files in the container's filesystem | reopened at the same offset: the writable layer moves, and the image is the same |
+| files on volumes | reopened by path. ConfigMaps, Secrets and projected volumes have the same contents there; a node's own files (`emptyDir`, `hostPath`) do not, and `kubectl gcr migrate` refuses such pods |
+| files deleted while open or mapped | kept: CRIU stores small ones and links back mapped ones |
+| pipes, sockets between the container's processes, eventfd, epoll, signalfd, timerfd, memfd, shared memory | restored with their contents |
+| stdin, stdout, stderr | the target's: its log carries on |
+| listening sockets, UDP sockets | recreated, on the same ports |
+| **established TCP connections** | **closed**: the peer sees them reset. The address changes on another node, so they cannot follow (CRIU's `tcp-close`) |
+| file locks | moved with their files (CRIU's `file-locks`) |
+
+A migration is refused, and the source carries on, for a Unix socket connected to something outside the container (a host daemon's), io_uring (CRIU does not support it), and inotify or fanotify watches whose files the target cannot find by handle.
 
 ## Pre-copy
 
@@ -108,3 +123,67 @@ What it costs:
   Where the kernel tracks dirty memory, pre-copy (above) keeps the downtime
   as short without needing the source afterwards.
 
+
+## Between Kubernetes nodes
+
+`kubectl gcr migrate`, gcr's kubectl plugin (`cmd/kubectl-gcr`), moves a running pod to another node:
+
+```console
+$ kubectl gcr migrate pod/counter
+asking km-worker-0 for counter's user namespace
+target counter-b853d1 created; waiting for it to be scheduled
+migrating counter from km-worker-0 to km-worker-1 (http://172.20.0.4:17394)
+deleting counter
+pod/counter moved to km-worker-1 as pod/counter-b853d1 (downtime 331ms)
+```
+
+That run was on a three-node k0da cluster (k0s v1.37, arm64), where a pod counting in memory carried on counting on the other node. The command took 15 s, most of it two Jobs starting; the pod's processes paused for 331 ms.
+
+How it works:
+1. **A Job on the pod's node** runs `gcr info` for its user namespace range.
+2. **It creates the target:** the pod's spec, named after it, on the `gcr-migrate` runtime class, with a random port and token (`gcr.dev/migrate-in`, `gcr.dev/migrate-token`). The scheduler places it on another node, or `--to NODE` does.
+3. **A second Job on the pod's node** runs `gcr migrate` into it. The token reaches the Job through a Secret, not its spec.
+4. **On success, the pod is deleted** and the target carries on. On failure, the target is deleted and the pod carries on.
+
+The Jobs run gcr's installer image, privileged, in the node's namespaces; the plugin finds the image from the installer's DaemonSet, or takes `-image`. Running the plugin needs a cluster admin: only `system:masters` and gcr's operator may create pods on `gcr-migrate` (`gcr.yaml`'s `ValidatingAdmissionPolicy`), since its pods make a node's shim listen for a migration.
+
+What can move, for now:
+- **Bare pods:** a pod with an owner is refused, since its controller would replace it with a cold one. Handing pods over to their controllers is the operator's job ([gcr-operator](design/gcr-operator.md)).
+- **One container** (no sidecars).
+- **Volumes the target mounts afresh:** ConfigMaps, Secrets, projected and downward API volumes. An `emptyDir`, or a volume holding files on the node, is refused.
+- **No user namespace.** A pod with `hostUsers: false` is refused: the kubelet picks its range, and would give the target another one. Pods in gcr's own user namespace (`gcr.dev/host-users: "false"`) can't be checkpointed in Kubernetes yet either. CRIU checks every namespace belongs to the container's user namespace, and the pod's network namespace, made by CRI, belongs to the host's ([#70](https://github.com/makhov/gcr/issues/70)).
+
+The pod gets a new name and IP, and its TCP connections reset. Services select it by its labels, which it keeps.
+
+## Draining nodes: gcr-operator
+
+`deploy/gcr-operator.yaml` runs gcr's operator. It turns evictions (`kubectl drain`, the cluster autoscaler, node upgrades) of pods that opt in into migrations:
+
+```yaml
+spec:
+  template:
+    metadata:
+      annotations:
+        gcr.dev/migrate-on-evict: "true"
+```
+
+```console
+$ kubectl drain ns-worker-1 --ignore-daemonsets
+evicting pod default/counter-dc564fd68-qctk2
+error when evicting pods/"counter-dc564fd68-qctk2" -n "default" (will retry after 5s): admission webhook "evictions.gcr.dev" denied the request: pod default/counter-dc564fd68-qctk2 is moving to another node
+evicting pod default/counter-dc564fd68-qctk2
+node/ns-worker-1 drained
+```
+
+That Deployment's pod moved from `ns-worker-1` to another node in 10 s, with 346 ms of downtime, and carried on counting there (three-node k0da cluster, k0s v1.33, arm64).
+
+- **The webhook** (a `ValidatingWebhookConfiguration` on `pods/eviction`) answers an opted-in pod's eviction 429, as a PodDisruptionBudget does, and moves the pod as `kubectl gcr migrate` does. The drain retries; once the pod has moved, its source is gone and the drain goes on.
+- **A pod that can't move is evicted.** If the move fails (see [what can move](#between-kubernetes-nodes)), the next retry is let through and the pod restarts elsewhere, as without gcr. The pod's `gcr.dev/migration` annotation says why. A drain is never held by a pod that can't move, and `failurePolicy: Ignore` lets evictions through when the operator is down.
+- **A Deployment's pods** (a ReplicaSet's) are handed over:
+  - the target is created without the labels its ReplicaSet selects by, so the ReplicaSet doesn't see it while it waits for the migration;
+  - once the target is Ready, the source is marked cheapest to delete (`controller.kubernetes.io/pod-deletion-cost`), and the target gets the labels and the ReplicaSet as its owner;
+  - the ReplicaSet then has one pod too many, deletes the source, and never starts a cold one.
+- **Draining the operator's own node** waits for the migrations it runs: its eviction is answered 429 until they're done.
+- **A mark left by an operator that went away** mid-migration counts as failed after 15 minutes.
+
+The operator runs unprivileged. Its migrations' Jobs, and the `gcr-migrate` runtime class its targets run on, are what touch the nodes.

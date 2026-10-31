@@ -9,6 +9,7 @@
 //	gcr [-n namespace] rewind ID POINT
 //	gcr [-n namespace] point ID [LABEL]
 //	gcr [-n namespace] snapshot ID DIR
+//	gcr [-n namespace] info ID
 //	gcr snapshot-users DIR
 //	gcr snapshot-rm DIR...
 //	gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF
@@ -18,6 +19,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -48,6 +50,7 @@ func main() {
 			"       gcr [-n namespace] rewind ID POINT\n"+
 			"       gcr [-n namespace] point ID [LABEL]\n"+
 			"       gcr [-n namespace] snapshot ID DIR\n"+
+			"       gcr [-n namespace] info ID\n"+
 			"       gcr snapshot-users DIR\n"+
 			"       gcr snapshot-rm DIR...\n"+
 			"       gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF\n"+
@@ -152,6 +155,13 @@ func run(ctx context.Context, ns string, args []string) error {
 			fmt.Fprintf(w, "%s\t%s\t%s\n", u.Kind, name, u.Since.Local().Format(time.DateTime))
 		}
 		return w.Flush()
+	case len(args) == 2 && args[0] == "info":
+		// What a migration's target must match, as JSON.
+		info, err := control.NewClient(ns, args[1]).Info(ctx)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(info)
 	case len(args) >= 2 && args[0] == "snapshot-rm":
 		// Refused while anything uses it.
 		var errs []error

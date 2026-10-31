@@ -2,8 +2,11 @@
 # Builds gcr's CRIU and its CUDA plugin for ARCH (amd64, arm64) into OUT,
 # from the source tree in SRC: libraries linked in statically, glibc
 # dynamically (makhov/criu's STATIC=libs), so they run on a glibc as old as
-# this host's. Run by hack/release.sh in an Ubuntu 22.04 container
-# (glibc 2.35), as root; it installs the build dependencies itself.
+# this host's. And, for hosts without glibc (Alpine's musl): criu-static,
+# linked wholly statically (STATIC=1), which loads no plugins, and tar, a
+# static GNU tar, which CRIU runs and busybox's tar cannot stand in for.
+# Run by hack/release.sh in an Ubuntu 22.04 container (glibc 2.35), as
+# root; it installs the build dependencies itself.
 #
 #   hack/criu-build.sh ARCH SRC OUT
 set -euo pipefail
@@ -12,8 +15,8 @@ HOST=$(dpkg --print-architecture)
 export DEBIAN_FRONTEND=noninteractive
 
 deps=(libprotobuf-c-dev libnl-3-dev libnet1-dev libcap-dev libbsd-dev libbpf-dev uuid-dev
-	libelf-dev zlib1g-dev libzstd-dev libmd-dev libprotobuf-dev)
-cross=()
+	libelf-dev zlib1g-dev libzstd-dev libmd-dev libprotobuf-dev libacl1-dev)
+cross=() tar_cross=()
 if [ "$ARCH" != "$HOST" ]; then
 	# Ubuntu serves amd64 from archive and arm64 from ports.
 	. /etc/os-release
@@ -23,10 +26,12 @@ if [ "$ARCH" != "$HOST" ]; then
 		echo "deb [arch=$ARCH] $(url "$ARCH") $s main universe"
 	done >/etc/apt/sources.list.d/cross.list
 	dpkg --add-architecture "$ARCH"
-	t=$([ "$ARCH" = amd64 ] && echo x86_64-linux-gnu || echo aarch64-linux-gnu)
+	triplet() { [ "$1" = amd64 ] && echo x86_64-linux-gnu || echo aarch64-linux-gnu; }
+	t=$(triplet "$ARCH")
 	criu_arch=$([ "$ARCH" = amd64 ] && echo x86 || echo aarch64)
 	cross=(ARCH="$criu_arch" CROSS_COMPILE="$t-" CC="$t-gcc")
-	export PKG_CONFIG_LIBDIR=/usr/lib/$t/pkgconfig:/usr/share/pkgconfig:/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/pkgconfig
+	tar_cross=(--host="$t" CC="$t-gcc")
+	export PKG_CONFIG_LIBDIR=/usr/lib/$t/pkgconfig:/usr/share/pkgconfig:/usr/lib/$(triplet "$HOST")/pkgconfig
 	# gcc and libc6-dev for compel-host, which runs here.
 	pkgs=(gcc libc6-dev "gcc-${t//_/-}" "libc6-dev-$ARCH-cross" "${deps[@]/%/:$ARCH}")
 else
@@ -34,7 +39,7 @@ else
 fi
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends make pkg-config protobuf-c-compiler protobuf-compiler \
-	python3 git ca-certificates "${pkgs[@]}" >/dev/null
+	python3 git ca-certificates curl xz-utils "${pkgs[@]}" >/dev/null
 
 build=$(mktemp -d)
 cp -r "$SRC/." "$build" 2>/dev/null || true # sockets its tests leave
@@ -44,3 +49,15 @@ make -s -C "$build" -j"$(nproc)" criu cuda_plugin "${cross[@]}" STATIC=libs NO_G
 mkdir -p "$OUT"
 install -m 0755 "$build/criu/criu" "$OUT/criu"
 install -m 0755 "$build/plugins/cuda/cuda_plugin.so" "$OUT/cuda_plugin.so"
+make -s -C "$build" mrproper >/dev/null
+make -s -C "$build" -j"$(nproc)" criu "${cross[@]}" STATIC=1 NO_GNUTLS=1 NO_NFTABLES=1 \
+	2> >(grep -v "warning: Using\|in function\|RWX permissions" >&2)
+install -m 0755 "$build/criu/criu" "$OUT/criu-static"
+
+TAR=tar-1.35
+curl -fsSL "https://ftp.gnu.org/gnu/tar/$TAR.tar.xz" -o "$build/$TAR.tar.xz"
+echo "4d62ff37342ec7aed748535323930c7cf94acf71c3591882b26a7ea50f3edc16  $build/$TAR.tar.xz" | sha256sum -c --quiet
+tar -C "$build" -xJf "$build/$TAR.tar.xz"
+(cd "$build/$TAR" && FORCE_UNSAFE_CONFIGURE=1 ./configure -q "${tar_cross[@]}" LDFLAGS=-static \
+	--disable-nls --without-selinux >/dev/null && make -s -j"$(nproc)" >/dev/null 2>&1)
+install -m 0755 "$build/$TAR/src/tar" "$OUT/tar"

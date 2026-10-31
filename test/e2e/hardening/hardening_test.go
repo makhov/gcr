@@ -138,7 +138,9 @@ func TestSupervisedMountShell(t *testing.T) {
 		try remount mount -o remount,bind,ro /mnt
 		# A read-only volume stays read-only.
 		try rw-remount mount -o remount,bind,rw /ro
-		echo x > /ro/x 2>/dev/null && echo "ro-write OK" || echo "ro-write EPERM"`
+		# The shell reports a redirection it cannot make before 2> applies:
+		# around the command, not after it, or its error lands in the output.
+		{ echo x > /ro/x; } 2>/dev/null && echo "ro-write OK" || echo "ro-write EPERM"`
 	vol := framework.TempDir(t)
 	ro := specs.Mount{Type: "bind", Source: vol, Destination: "/ro", Options: []string{"rbind", "ro"}}
 	for _, image := range []string{"", "docker.io/library/debian:trixie"} {

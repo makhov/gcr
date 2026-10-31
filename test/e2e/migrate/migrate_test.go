@@ -250,3 +250,43 @@ func TestMigratePostCopyFails(t *testing.T) {
 		return err == nil && n >= last+10
 	})
 }
+
+// TestMigrateOpenConnectionAndLock: a container holding an established
+// TCP connection and a file lock moves; the connection is closed on the
+// target (its address changes across nodes), the lock moves with its
+// file, and the processes carry on. Without tcp-close and file-locks,
+// CRIU refused to dump it at all.
+func TestMigrateOpenConnectionAndLock(t *testing.T) {
+	script := []string{"sh", "-c", `
+		sleep 100000 | nc -l -p 9000 >/dev/null &
+		sleep 0.5
+		(while :; do echo x; sleep 1; done) | nc 127.0.0.1 9000 &
+		flock /tmp/lock -c "sleep 100000" &
+		i=0; while :; do i=$((i+1)); echo $i > /tmp/count; sleep 0.1; done`}
+	id := framework.UniqueID("mig-tcp")
+	token := fmt.Sprintf("secret-%d", time.Now().UnixNano())
+	hostUsers := map[string]string{userns.AnnotationHostUsers: "true"}
+	src := framework.NewNamespace(t, "gcr-e2e-src").Run(id, framework.Spec{Args: script, Annotations: hostUsers})
+	in := map[string]string{migrate.AnnotationIn: addr, migrate.AnnotationToken: token, userns.AnnotationHostUsers: "true"}
+	dst := framework.NewNamespace(t, "gcr-e2e-dst").Create(id, framework.Spec{Args: script, Annotations: in})
+	started := make(chan error, 1)
+	go func() { started <- dst.Start() }()
+	framework.Eventually(t, 30*time.Second, "the source's connection to be established", func() bool {
+		out, _ := src.Exec("netstat", "-tn")
+		return strings.Contains(out, "ESTABLISHED")
+	})
+	if _, err := control.NewClient("gcr-e2e-src", src.ID).Migrate(t.Context(), "http://"+addr, token, migrate.Options{}); err != nil {
+		t.Fatalf("migrate with an open connection and a lock: %v", err)
+	}
+	if err := <-started; err != nil {
+		t.Fatalf("target: %v", err)
+	}
+	last := src.ReadInt("/tmp/count")
+	time.Sleep(time.Second)
+	if moved := dst.ReadInt("/tmp/count"); moved <= last {
+		t.Fatalf("target restarted instead of resuming (%d -> %d)", last, moved)
+	}
+	if out, _ := dst.Exec("netstat", "-tn"); strings.Contains(out, "ESTABLISHED") {
+		t.Errorf("the connection is still established on the target:\n%s", out)
+	}
+}

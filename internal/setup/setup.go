@@ -110,11 +110,40 @@ func Run(o Options) error {
 		say("this gcr carries no shim or CRIU: using the installed %s", payload.Shim)
 	}
 	if payload.Has(payload.CRIU) {
-		if err := payload.Install(payload.CRIU, filepath.Join(CRIUDir, "criu"), 0o755); err != nil {
+		criu := filepath.Join(CRIUDir, "criu")
+		if err := payload.Install(payload.CRIU, criu, 0o755); err != nil {
 			return fmt.Errorf("install CRIU: %w", err)
 		}
-		say("installed %s", filepath.Join(CRIUDir, "criu"))
-		if payload.Has(payload.CUDAPlugin) {
+		static := false
+		if exec.Command(criu, "--version").Run() != nil && payload.Has(payload.CRIUStatic) {
+			// No glibc here (Alpine's musl, as on k0s's nodes): the static
+			// one runs, without plugins.
+			if err := payload.Install(payload.CRIUStatic, criu, 0o755); err != nil {
+				return fmt.Errorf("install CRIU: %w", err)
+			}
+			static = true
+		}
+		if static {
+			say("installed %s, linked statically: this host has no glibc (no GPU checkpoints)", criu)
+		} else {
+			say("installed %s", criu)
+		}
+		// CRIU runs tar from PATH, where CRIUDir comes first (UseOwnCRIU):
+		// gcr's goes there if the node's is not GNU tar (busybox's).
+		tar := filepath.Join(CRIUDir, "tar")
+		if err := os.Remove(tar); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if t := gnuTar(); t != "" {
+			if !payload.Has(payload.Tar) {
+				say("warning: %s; install GNU tar (apk add tar, on Alpine)", t)
+			} else if err := payload.Install(payload.Tar, tar, 0o755); err != nil {
+				return fmt.Errorf("install GNU tar: %w", err)
+			} else {
+				say("installed %s, GNU tar, for CRIU: the node's is not", tar)
+			}
+		}
+		if payload.Has(payload.CUDAPlugin) && !static {
 			if err := payload.Install(payload.CUDAPlugin, filepath.Join(PluginDir, payload.CUDAPlugin), 0o755); err != nil {
 				return fmt.Errorf("install CRIU's CUDA plugin: %w", err)
 			}
@@ -125,6 +154,10 @@ func Run(o Options) error {
 	if _, err := os.Stat(k0sConfig); err == nil {
 		if _, err := registerK0s(shim, say); err != nil {
 			return fmt.Errorf("k0s: %w", err)
+		}
+	} else if d := detectDistro(); d != nil {
+		if err := registerDistro(d, shim, o.NoRestart, say); err != nil {
+			return fmt.Errorf("%s: %w", d.Name, err)
 		}
 	} else if err := setupContainerd(o, shim, say); err != nil {
 		return fmt.Errorf("containerd: %w", err)
@@ -148,7 +181,7 @@ func Run(o Options) error {
 // checked containerd loads the new configuration; if it would not, or
 // does not start with it, the configuration is put back as it was.
 func setupContainerd(o Options, shim string, say func(string, ...any)) error {
-	changed, undo, err := registerContainerd(o.ContainerdConfig, shim, containerdMajor(), say)
+	changed, undo, err := registerContainerd(o.ContainerdConfig, shim, containerdMajor("containerd"), say)
 	if err != nil {
 		if undo != nil {
 			undo()
@@ -198,17 +231,30 @@ version = %d
   # gcr's pod annotations; the handler's PodAnnotations says which a pod
   # may use (docs/configuration.md).
   pod_annotations = ['gcr.dev/*']
-`, version, table, RuntimeType, shim)
+
+# The same runtime for the targets of migrations between nodes (kubectl gcr
+# migrate): its pods may make the shim listen for one. gcr.yaml's
+# admission policy lets only cluster admins and gcr's operator use it.
+%s
+  runtime_type = '%s'
+  runtime_path = '%s'
+  pod_annotations = ['gcr.dev/*']
+%s
+  PodAnnotations = ['gcr.dev/migrate-in', 'gcr.dev/migrate-token', 'gcr.dev/userns-base']
+`, version, table, RuntimeType, shim,
+		strings.Replace(table, ".gcr]", ".gcr-migrate]", 1), RuntimeType, shim,
+		strings.Replace(table, ".gcr]", ".gcr-migrate.options]", 1))
 }
 
-// containerdMajor is the installed containerd's major version, 2 if it
-// cannot tell.
-func containerdMajor() int {
-	out, err := exec.Command("containerd", "--version").Output()
+// containerdMajor is the major version of the containerd binary (a path,
+// or a name on PATH), 2 if it cannot tell. Releases print "v2.4.2", k0s's
+// builds "1.7.27".
+func containerdMajor(binary string) int {
+	out, err := exec.Command(binary, "--version").Output()
 	if err != nil {
 		return 2
 	}
-	m := regexp.MustCompile(` v(\d+)\.`).FindSubmatch(out)
+	m := regexp.MustCompile(` v?(\d+)\.\d+\.\d+`).FindSubmatch(out)
 	if m == nil || string(m[1]) != "1" {
 		return 2
 	}
@@ -345,6 +391,10 @@ func validate(config string) error {
 // a file there changes.
 var k0sConfig = "/etc/k0s/containerd.toml"
 
+// k0sContainerd is the containerd k0s runs: v1.33 and earlier bundle
+// containerd 1.7, which reads only version 2 drop-ins.
+var k0sContainerd = "/var/lib/k0s/bin/containerd"
+
 // registerK0s writes gcr's drop-in into k0s's containerd.d, which k0s
 // imports and applies without a restart while it manages the
 // configuration (its first line says so).
@@ -358,7 +408,11 @@ func registerK0s(shim string, say func(string, ...any)) (bool, error) {
 			"register runtime %s there yourself, or remove it and restart k0s to have k0s manage it again", k0sConfig, RuntimeType)
 	}
 	dropIn := filepath.Join(filepath.Dir(k0sConfig), "containerd.d", "gcr.toml")
-	changed, err := writeIfChanged(dropIn, []byte(containerdDropIn(3, shim)), 0o644)
+	version := 3
+	if containerdMajor(k0sContainerd) == 1 {
+		version = 2
+	}
+	changed, err := writeIfChanged(dropIn, []byte(containerdDropIn(version, shim)), 0o644)
 	if err != nil {
 		return false, err
 	}

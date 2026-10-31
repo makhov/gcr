@@ -49,6 +49,18 @@ type Handlers struct {
 	// layer to dir, and leaves it running; containers can then be forked
 	// from it.
 	Snapshot func(ctx context.Context, dir string) error
+	// Info describes the container to a migration's caller.
+	Info func() Info
+}
+
+// Info is what a target for a migration of the container must match.
+type Info struct {
+	// IDBase is the first host ID of the container's user namespace
+	// range, 0 if it has none: the target is created with it
+	// (gcr.dev/userns-base).
+	IDBase uint32 `json:"idBase"`
+	// Layers are the read-only layers beneath its writable one.
+	Layers []string `json:"layers,omitempty"`
 }
 
 type pointRequest struct {
@@ -140,6 +152,13 @@ func Serve(ctx context.Context, namespace, id string, h Handlers) (*Server, erro
 			httpError(w, err)
 		}
 	})
+	mux.HandleFunc("GET /info", func(w http.ResponseWriter, r *http.Request) {
+		if h.Info == nil {
+			http.Error(w, "no information for this container", http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(h.Info())
+	})
 	mux.HandleFunc("POST /migrate", func(w http.ResponseWriter, r *http.Request) {
 		if h.Migrate == nil {
 			http.Error(w, "migration is not supported for this container", http.StatusNotFound)
@@ -221,6 +240,12 @@ func (c *Client) Migrate(ctx context.Context, target, token string, opts migrate
 	var res migrate.Result
 	err := c.do(ctx, http.MethodPost, "/migrate", migrateRequest{Target: target, Token: token, PostCopy: opts.PostCopy}, &res)
 	return res, err
+}
+
+func (c *Client) Info(ctx context.Context) (Info, error) {
+	var info Info
+	err := c.do(ctx, http.MethodGet, "/info", nil, &info)
+	return info, err
 }
 
 func (c *Client) do(ctx context.Context, method, path string, in, out any) error {

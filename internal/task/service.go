@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -93,6 +95,7 @@ type extras struct {
 	recorder   *timetravel.Recorder   // time travel, if enabled
 	supervisor *supervisor.Supervisor // if the filter hands calls to user space
 	receiver   *migrate.Receiver      // incoming migration, if requested
+	arrived    string                 // migrate.ArrivedKey of the container a migration comes into
 	migrateTLS migrate.TLS            // the handler's MigrationTLS
 	userns     *userns.Range          // the container's user namespace range
 	control    *control.Server
@@ -135,6 +138,23 @@ func NewTaskService(ctx context.Context, publisher shim.Publisher, sd shutdown.S
 		containers: make(map[string]*container.Container),
 		extras:     make(map[string]*extras),
 	}
+	// containerd's shim library ends the shim on SIGTERM or SIGINT, and
+	// says so at debug level only: a shim ended so with containers in it
+	// takes them down, so say it where it shows (gcr#74).
+	go func() {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
+		sig := <-ch
+		s.mu.Lock()
+		ids := slices.Sorted(maps.Keys(s.containers))
+		s.mu.Unlock()
+		l := log.G(ctx).WithField("signal", sig.String()).WithField("containers", ids)
+		if len(ids) > 0 {
+			l.Warn("shim ending on a signal with containers in it, which go with it")
+		} else {
+			l.Info("shim ending on a signal")
+		}
+	}()
 	sd.RegisterCallback(func(context.Context) error {
 		publisher.Close()
 		return nil
@@ -302,7 +322,16 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		}
 		// gcr's user namespace or one Kubernetes asked for.
 		prep.CgroupOwner = userns.DelegateCgroup(spec)
-		if addr, ok := spec.Annotations[migrate.AnnotationIn]; ok {
+		addr, ok := spec.Annotations[migrate.AnnotationIn]
+		if key := migrate.ArrivedKey(spec.Annotations); ok && migrate.Arrived(key) {
+			// A container that restarts in a pod a migration came into
+			// (the pod keeps the annotation): it starts as a new one.
+			log.G(ctx).Info("a migration came into this pod's container before: starting it anew")
+			ok = false
+		} else if ok {
+			ex.arrived = key
+		}
+		if ok {
 			recv, err := migrate.NewReceiver(s.ctx, addr, spec.Annotations[migrate.AnnotationToken], cfg.MigrationTLS,
 				filepath.Join(ex.stateDir, "migrate-in"),
 				func() (string, error) { return c.UpperDir() },
@@ -426,12 +455,11 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			// Restores hand the restored listeners back to this supervisor.
 			criuOpts = append(criuOpts, sup.CRIUOption())
 		}
-		if len(criuOpts) > 0 || len(restoreOpts) > 0 {
-			prep.CRIU = container.CRIUConfig{
-				Path:           filepath.Join(ex.stateDir, "criu.conf"),
-				Options:        criuOpts,
-				RestoreOptions: restoreOpts,
-			}
+		// Always, even empty: a migration adds options of its own.
+		prep.CRIU = container.CRIUConfig{
+			Path:           filepath.Join(ex.stateDir, "criu.conf"),
+			Options:        criuOpts,
+			RestoreOptions: restoreOpts,
 		}
 		return prep, nil
 	}
@@ -450,6 +478,9 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 	}
 
 	h := control.Handlers{
+		Info: func() control.Info {
+			return control.Info{IDBase: c.IDBase(), Layers: c.Layers()}
+		},
 		Migrate: func(ctx context.Context, target, token string, opts migrate.Options) (migrate.Result, error) {
 			return s.migrateOut(ctx, c, ex, target, token, opts)
 		},
@@ -517,6 +548,11 @@ func (s *service) Start(ctx context.Context, r *taskAPI.StartRequest) (*taskAPI.
 		// Tell the migration source how the restore went; it keeps its copy
 		// running unless this succeeded.
 		ex.receiver.Done(err)
+		if err == nil {
+			if merr := migrate.MarkArrived(ex.arrived); merr != nil {
+				log.G(ctx).WithError(merr).Warn("recording the migration: a restart of this container would wait for another")
+			}
+		}
 	}
 	if err != nil {
 		return nil, errgrpc.ToGRPC(err)
@@ -710,6 +746,7 @@ func (s *service) Shutdown(ctx context.Context, r *taskAPI.ShutdownRequest) (*pt
 	n := len(s.containers)
 	s.mu.Unlock()
 	if n == 0 {
+		log.G(ctx).Debug("shim shutting down: containerd asked, and it has no containers")
 		s.shutdown.Shutdown()
 	}
 	return empty, nil

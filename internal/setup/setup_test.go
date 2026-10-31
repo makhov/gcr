@@ -124,6 +124,7 @@ func TestRegisterContainerdUndo(t *testing.T) {
 func TestRegisterK0s(t *testing.T) {
 	dir := t.TempDir()
 	k0sConfig = filepath.Join(dir, "containerd.toml")
+	k0sContainerd = filepath.Join(dir, "no-containerd")
 	if err := os.WriteFile(k0sConfig, []byte("# k0s_managed=true\nversion = 3\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -175,6 +176,89 @@ func TestKernelAtLeast(t *testing.T) {
 	} {
 		if got := kernelAtLeast(release, 6, 12); got != want {
 			t.Errorf("%s: %v", release, got)
+		}
+	}
+}
+
+func TestDistroDropInDir(t *testing.T) {
+	for _, tc := range []struct {
+		name, config, want string
+		version            int
+	}{
+		{"v3 importing config-v3.toml.d", "version = 3\nimports = [\"DIR/config-v3.toml.d/*.toml\"]\n", "config-v3.toml.d", 3},
+		{"v2 importing config.toml.d", "version = 2\nimports = [\"DIR/config.toml.d/*.toml\"]\n", "config.toml.d", 2},
+		{"an older release, importing nothing", "version = 3\n", "", 0},
+		{"a custom template importing elsewhere", "version = 3\nimports = [\"/etc/other/*.toml\"]\n", "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := distro{Name: "k3s", Dir: t.TempDir()}
+			config := strings.ReplaceAll(tc.config, "DIR", d.Dir)
+			if err := os.WriteFile(filepath.Join(d.Dir, "config.toml"), []byte(config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			dir, version, err := d.dropInDir()
+			if tc.want == "" {
+				if err == nil || !strings.Contains(err.Error(), "does not import") {
+					t.Fatalf("got %q, %v; want a refusal", dir, err)
+				}
+				return
+			}
+			if err != nil || dir != filepath.Join(d.Dir, tc.want) || version != tc.version {
+				t.Fatalf("got %q version %d, %v; want %s version %d", dir, version, err, tc.want, tc.version)
+			}
+		})
+	}
+}
+
+// k0s v1.33 and earlier run containerd 1.7, which reads version 2 drop-ins
+// only: a version 3 one registers nothing there.
+func TestRegisterK0sContainerd17(t *testing.T) {
+	dir := t.TempDir()
+	k0sConfig = filepath.Join(dir, "containerd.toml")
+	if err := os.WriteFile(k0sConfig, []byte("# k0s_managed=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	k0sContainerd = filepath.Join(dir, "containerd")
+	fake := "#!/bin/sh\necho containerd github.com/containerd/containerd 1.7.27 05044ec0a9a75232cad458027ca83437aae3f4da\n"
+	if err := os.WriteFile(k0sContainerd, []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registerK0s("/x/shim", quiet); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, filepath.Join(dir, "containerd.d", "gcr.toml")); !strings.Contains(got, "version = 2") ||
+		!strings.Contains(got, `"io.containerd.grpc.v1.cri"`) {
+		t.Fatalf("drop-in for containerd 1.7:\n%s", got)
+	}
+}
+
+func TestContainerdMajor(t *testing.T) {
+	for out, want := range map[string]int{
+		"containerd github.com/containerd/containerd/v2 v2.4.2 b7a25261": 2,
+		"containerd github.com/containerd/containerd v1.7.29 442cb34b":   1,
+		"containerd github.com/containerd/containerd 1.7.27 05044ec0":    1, // k0s's build
+		"garbage": 2,
+	} {
+		bin := filepath.Join(t.TempDir(), "containerd")
+		if err := os.WriteFile(bin, []byte("#!/bin/sh\necho '"+out+"'\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if got := containerdMajor(bin); got != want {
+			t.Errorf("%q: major %d, want %d", out, got, want)
+		}
+	}
+}
+
+func TestDropInMigrateHandler(t *testing.T) {
+	for _, version := range []int{2, 3} {
+		d := containerdDropIn(version, "/x/shim")
+		for _, want := range []string{"runtimes.gcr]", "runtimes.gcr-migrate]", "runtimes.gcr-migrate.options]", "'gcr.dev/migrate-in', 'gcr.dev/migrate-token'"} {
+			if !strings.Contains(d, want) {
+				t.Errorf("version %d drop-in has no %s:\n%s", version, want, d)
+			}
+		}
+		if strings.Count(d, "PodAnnotations = ") != 1 {
+			t.Errorf("version %d: PodAnnotations on more than gcr-migrate:\n%s", version, d)
 		}
 	}
 }

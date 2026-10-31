@@ -1,10 +1,14 @@
 #!/bin/bash
 # Builds a release into dist/: for each architecture one file,
-# gcr-VERSION-linux-ARCH, the gcr command carrying the shim, gcr's CRIU and
-# CRIU's CUDA plugin (internal/payload) for `gcr setup` to install;
-# gcr.yaml, the installer DaemonSet with this release's image; and
-# SHA256SUMS. The Go binaries are static; CRIU, built in an Ubuntu 22.04
-# container (hack/criu-build.sh), needs glibc 2.35 or later. Runs on a
+# gcr-VERSION-linux-ARCH, the gcr command carrying the shim, gcr's CRIU (and
+# a static one and GNU tar, for hosts without glibc) and CRIU's CUDA plugin
+# (internal/payload) for `gcr setup` to install;
+# gcr-operator-VERSION-linux-ARCH, the operator, for the image;
+# kubectl-gcr-VERSION-OS-ARCH, the kubectl plugin, for Linux and macOS;
+# gcr.yaml and gcr-operator.yaml, the installer DaemonSet and the operator
+# with this release's image; and SHA256SUMS. The Go binaries are static; CRIU, built in an Ubuntu 22.04
+# container (hack/criu-build.sh), needs glibc 2.35 or later, or, the static
+# one, nothing. Runs on a
 # Linux host with Docker that can build Go with cgo for each architecture
 # (docs/development.md#releases).
 #
@@ -35,6 +39,11 @@ gobuild() { # ARCH OUT PKG TAGS
 		-o "$2" "$3"
 }
 
+# Plain Go, no cgo: the operator and the kubectl plugin.
+gopure() { # OS ARCH OUT PKG
+	CGO_ENABLED=0 GOOS=$1 GOARCH=$2 go build -trimpath -ldflags "-s -w" -o "$3" "$4"
+}
+
 rm -rf dist && mkdir -p dist
 work=$(mktemp -d)
 trap 'rm -rf "$work"; find "$PAYLOAD" -name "*.zst" -delete' EXIT
@@ -56,11 +65,17 @@ for arch in "$@"; do
 		echo "gcr $VERSION ($REVISION)"
 		echo "criu $(git -C "$CRIU_SRC" describe --tags --always --dirty), built on $CRIU_IMAGE"
 	} >"$work/VERSIONS"
-	for f in "$work/containerd-shim-gcr-v2" "$work/criu-$arch/criu" "$work/criu-$arch/cuda_plugin.so" "$work/VERSIONS"; do
+	for f in "$work/containerd-shim-gcr-v2" "$work/criu-$arch/criu" "$work/criu-$arch/criu-static" "$work/criu-$arch/tar" "$work/criu-$arch/cuda_plugin.so" "$work/VERSIONS"; do
 		zstd -q -19 -T0 "$f" -o "$PAYLOAD/$(basename "$f").zst"
 	done
 	gobuild "$arch" "dist/gcr-$VERSION-linux-$arch" ./cmd/gcr gcr_payload
+	gopure linux "$arch" "dist/gcr-operator-$VERSION-linux-$arch" ./cmd/gcr-operator
+	for os in linux darwin; do
+		gopure "$os" "$arch" "dist/kubectl-gcr-$VERSION-$os-$arch" ./cmd/kubectl-gcr
+	done
 done
 # The installer DaemonSet for this release's image.
-sed "s#image: ghcr.io/makhov/gcr:.*#image: ghcr.io/makhov/gcr:$VERSION#" deploy/gcr.yaml >dist/gcr.yaml
-(cd dist && sha256sum gcr-* gcr.yaml >SHA256SUMS)
+for m in gcr gcr-operator; do
+	sed "s#image: ghcr.io/makhov/gcr:.*#image: ghcr.io/makhov/gcr:$VERSION#" "deploy/$m.yaml" >"dist/$m.yaml"
+done
+(cd dist && sha256sum gcr-* kubectl-gcr-* gcr.yaml gcr-operator.yaml | sort -u -k2 >SHA256SUMS)

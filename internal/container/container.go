@@ -84,8 +84,9 @@ type CRIUConfig struct {
 	Options, RestoreOptions []string
 }
 
-// write writes the configuration for a checkpoint, or a restore.
-func (cc CRIUConfig) write(restore bool) error {
+// write writes the configuration for a checkpoint, or a restore, with
+// extra lines for this one.
+func (cc CRIUConfig) write(restore bool, extra ...string) error {
 	if cc.Path == "" {
 		return nil
 	}
@@ -93,11 +94,19 @@ func (cc CRIUConfig) write(restore bool) error {
 	if restore {
 		lines = append(lines, cc.RestoreOptions...)
 	}
+	lines = append(lines, extra...)
 	if err := os.MkdirAll(filepath.Dir(cc.Path), 0o700); err != nil {
 		return err
 	}
 	return os.WriteFile(cc.Path, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
 }
+
+// migrationCRIU are the CRIU options of a migration's dump and its
+// restore. A connection to a peer outside the container cannot follow it
+// to another node (the pod's address changes there): it is closed on the
+// target, and the peer sees it reset; without this CRIU refuses to dump a
+// connected socket at all. File locks move with the files they lock.
+var migrationCRIU = []string{"tcp-close", "file-locks"}
 
 // Prepared is what PrepareSpec decided.
 type Prepared struct {
@@ -403,6 +412,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	if err != nil {
 		return nil, fmt.Errorf("convert spec: %w", err)
 	}
+	resolveBindSources(cfg)
 	if spec.Process.Terminal && (o.Checkpoint != "" || prep.CheckpointFrom != nil) {
 		// CRIU restores only pipes for stdio; a pty would need --shell-job.
 		return nil, fmt.Errorf("restore and migration need a container without a terminal: %w", errdefs.ErrNotImplemented)
@@ -609,7 +619,11 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 	if err := gpu.Compatible(saved, c.gpu); err != nil {
 		return fmt.Errorf("restore: %w", err)
 	}
-	if err := c.criu.write(true); err != nil {
+	var extra []string
+	if c.checkpointFrom != nil {
+		extra = migrationCRIU // an incoming migration's
+	}
+	if err := c.criu.write(true, extra...); err != nil {
 		return fmt.Errorf("CRIU config: %w", err)
 	}
 	defer c.criu.write(false)
@@ -718,6 +732,7 @@ func (c *Container) Checkpoint(ctx context.Context, opts CheckpointOpts) error {
 		TcpEstablished:          opts.OpenTCP,
 		ExternalUnixConnections: opts.UnixSockets,
 		FileLocks:               opts.FileLocks,
+		LinkRemap:               true,
 	})
 	if err != nil {
 		return fmt.Errorf("checkpoint (criu log in %s): %w%s", work, err, criuErrors(filepath.Join(work, "dump.log")))
@@ -824,6 +839,10 @@ func (c *Container) snapshot(ctx context.Context, dir, parent string) (retErr er
 		ImagesDirectory: filepath.Join(dir, "images"),
 		WorkDirectory:   work,
 		LeaveRunning:    true,
+		// Files deleted while still open or mapped (a POSIX semaphore
+		// in /dev/shm, as Python's multiprocessing leaves) are linked
+		// back for the dump; CRIU refuses them otherwise.
+		LinkRemap: true,
 	}
 	if parent != "" {
 		// Relative to the images directory; CRIU links it as "parent"
@@ -1143,12 +1162,19 @@ func (c *Container) FreezeDump(ctx context.Context, dir, parent, host string, po
 
 func (c *Container) dump(dir, parent, host string, port int, pre bool) error {
 	c.trackedSince = ""
+	if !pre {
+		if err := c.criu.write(false, migrationCRIU...); err != nil {
+			return fmt.Errorf("CRIU config: %w", err)
+		}
+		defer c.criu.write(false)
+	}
 	err := c.lc.Checkpoint(&libcontainer.CriuOpts{
 		ImagesDirectory: dir,
 		WorkDirectory:   dir,
 		ParentImage:     parent,
 		PreDump:         pre,
 		LeaveRunning:    !pre,
+		LinkRemap:       !pre,
 		PageServer:      libcontainer.CriuPageServerInfo{Address: host, Port: int32(port)},
 	})
 	if err != nil {
@@ -1194,13 +1220,20 @@ func (c *Container) LazyDump(ctx context.Context, dir, host string, port int) (w
 		return fail(fmt.Errorf("freeze: %w", err))
 	}
 	init := c.Pid()
+	if err := c.criu.write(false, migrationCRIU...); err != nil {
+		_ = c.lc.Resume()
+		unix.Close(statusFd)
+		return fail(fmt.Errorf("CRIU config: %w", err))
+	}
 	done := make(chan error, 1)
 	go func() {
+		defer c.criu.write(false)
 		err := c.lc.Checkpoint(&libcontainer.CriuOpts{
 			ImagesDirectory: dir,
 			WorkDirectory:   dir,
 			LazyPages:       true,
 			StatusFd:        statusFd,
+			LinkRemap:       true,
 			PageServer:      libcontainer.CriuPageServerInfo{Address: host, Port: int32(port)},
 		})
 		if err != nil {
@@ -1729,11 +1762,17 @@ func (c *Container) Kill(sig syscall.Signal, all bool) error {
 			if errors.Is(err, libcontainer.ErrNotRunning) {
 				return fmt.Errorf("container not running: %w", errdefs.ErrNotFound)
 			}
+			if cgroupGone(err) {
+				return nil
+			}
 			return err
 		}
 		return nil
 	}
 	pids, err := lc.Processes()
+	if cgroupGone(err) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -1743,6 +1782,14 @@ func (c *Container) Kill(sig syscall.Signal, all bool) error {
 		}
 	}
 	return nil
+}
+
+// cgroupGone says whether err is the container's cgroup having been
+// removed, which happens once every process in it has exited: killing
+// them, or all of them, has nothing left to do. libcontainer checks the
+// cgroup exists, then reads it, and it can go in between.
+func cgroupGone(err error) bool {
+	return errors.Is(err, libcontainer.ErrCgroupNotExist) || errors.Is(err, fs.ErrNotExist)
 }
 
 // Delete removes a stopped container: libcontainer state, rootfs mounts, stdio.
@@ -1960,6 +2007,22 @@ func loadSpec(bundle string) (*specs.Spec, error) {
 		return nil, fmt.Errorf("spec has no root: %w", errdefs.ErrInvalidArgument)
 	}
 	return &s, nil
+}
+
+// resolveBindSources replaces bind mounts' sources that are symlinks
+// (/etc/resolv.conf, on hosts where systemd-resolved manages it) with
+// what they point to. A bind mount follows them as it is made, but a
+// restore hands CRIU the source as written, and CRIU binds the symlink
+// itself, which then cannot be mounted on.
+func resolveBindSources(cfg *configs.Config) {
+	for _, m := range cfg.Mounts {
+		if m.Device != "bind" {
+			continue
+		}
+		if src, err := filepath.EvalSymlinks(m.Source); err == nil {
+			m.Source = src
+		}
+	}
 }
 
 // newProcess converts the spec's process, as runc does.
