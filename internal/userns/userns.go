@@ -82,6 +82,20 @@ func (m Mode) Validate() error {
 	return fmt.Errorf("UserNamespaces = %q, want auto, always or never: %w", m, errdefs.ErrInvalidArgument)
 }
 
+// InSpec says whether spec runs in a user namespace: gcr's, or one its
+// caller asked for.
+func InSpec(spec *specs.Spec) bool {
+	if spec.Linux == nil {
+		return false
+	}
+	for _, ns := range spec.Linux.Namespaces {
+		if ns.Type == specs.UserNamespace {
+			return true
+		}
+	}
+	return false
+}
+
 // Decide reports whether gcr should add a user namespace to spec under
 // mode, and why not if it should not. It fails when mode is Always and the
 // container cannot have one.
@@ -92,11 +106,9 @@ func Decide(spec *specs.Spec, mode Mode) (bool, string, error) {
 	if spec.Linux == nil {
 		return false, "no linux config", nil
 	}
-	for _, ns := range spec.Linux.Namespaces {
-		if ns.Type == specs.UserNamespace {
-			// Kubernetes hostUsers: false, or a caller's own mapping.
-			return false, "spec already has a user namespace", nil
-		}
+	if InSpec(spec) {
+		// Kubernetes hostUsers: false, or a caller's own mapping.
+		return false, "spec already has a user namespace", nil
 	}
 	if why := blocker(spec); why != "" {
 		if mode == Always {
