@@ -137,6 +137,8 @@ func Doctor() []Check {
 			add("CRIU", Optional, detail+", not gcr's: no "+strings.Join(lacks, ", "), "a release's gcr setup installs gcr's; or make criu from makhov/criu")
 		} else if out, err := exec.Command(criu, "check").CombinedOutput(); err != nil {
 			add("CRIU", Missing, detail+": criu check fails", lastLine(string(out)))
+		} else if t := gnuTar(); t != "" {
+			add("CRIU", Missing, detail+": "+t, "install GNU tar (apk add tar, on Alpine)")
 		} else {
 			add("CRIU", OK, detail, "")
 		}
@@ -263,4 +265,19 @@ func field(s, key string) string {
 func lastLine(s string) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")
 	return lines[len(lines)-1]
+}
+
+// gnuTar says what is wrong with the tar on PATH, "" if it is GNU tar:
+// CRIU runs it to dump the contents of a container's tmpfs mounts (its
+// /dev, at least), with options busybox's lacks, so no dump works without.
+func gnuTar() string {
+	out, err := exec.Command("tar", "--version").CombinedOutput()
+	switch {
+	case err != nil && len(out) == 0:
+		return "no tar in PATH, which CRIU needs to dump tmpfs mounts (every container's /dev)"
+	case !bytes.Contains(out, []byte("GNU tar")):
+		first, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
+		return "tar is not GNU tar (" + first + "), which CRIU needs to dump tmpfs mounts (every container's /dev)"
+	}
+	return ""
 }
