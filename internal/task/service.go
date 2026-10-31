@@ -446,6 +446,9 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 	}
 
 	h := control.Handlers{
+		Info: func() control.Info {
+			return control.Info{IDBase: c.IDBase(), Layers: c.Layers()}
+		},
 		Migrate: func(ctx context.Context, target, token string, opts migrate.Options) (migrate.Result, error) {
 			return s.migrateOut(ctx, c, ex, target, token, opts)
 		},

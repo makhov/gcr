@@ -248,3 +248,17 @@ func TestContainerdMajor(t *testing.T) {
 		}
 	}
 }
+
+func TestDropInMigrateHandler(t *testing.T) {
+	for _, version := range []int{2, 3} {
+		d := containerdDropIn(version, "/x/shim")
+		for _, want := range []string{"runtimes.gcr]", "runtimes.gcr-migrate]", "runtimes.gcr-migrate.options]", "'gcr.dev/migrate-in', 'gcr.dev/migrate-token'"} {
+			if !strings.Contains(d, want) {
+				t.Errorf("version %d drop-in has no %s:\n%s", version, want, d)
+			}
+		}
+		if strings.Count(d, "PodAnnotations = ") != 1 {
+			t.Errorf("version %d: PodAnnotations on more than gcr-migrate:\n%s", version, d)
+		}
+	}
+}

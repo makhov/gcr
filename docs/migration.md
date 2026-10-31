@@ -80,3 +80,34 @@ What it costs:
 - **No pre-copy rounds yet.** Post-copy starts from a full dump; pages
   the target touches early wait on the network instead of on the freeze.
 
+
+## Between Kubernetes nodes
+
+`kubectl gcr migrate`, gcr's kubectl plugin (`cmd/kubectl-gcr`), moves a running pod to another node:
+
+```console
+$ kubectl gcr migrate pod/counter
+asking km-worker-0 for counter's user namespace
+target counter-b853d1 created; waiting for it to be scheduled
+migrating counter from km-worker-0 to km-worker-1 (http://172.20.0.4:17394)
+deleting counter
+pod/counter moved to km-worker-1 as pod/counter-b853d1 (downtime 331ms)
+```
+
+That run was on a three-node k0da cluster (k0s v1.37, arm64), where a pod counting in memory carried on counting on the other node. The command took 15 s, most of it two Jobs starting; the pod's processes paused for 331 ms.
+
+How it works:
+1. **A Job on the pod's node** runs `gcr info` for its user namespace range.
+2. **It creates the target:** the pod's spec, named after it, on the `gcr-migrate` runtime class, with a random port and token (`gcr.dev/migrate-in`, `gcr.dev/migrate-token`). The scheduler places it on another node, or `--to NODE` does.
+3. **A second Job on the pod's node** runs `gcr migrate` into it. The token reaches the Job through a Secret, not its spec.
+4. **On success, the pod is deleted** and the target carries on. On failure, the target is deleted and the pod carries on.
+
+The Jobs run gcr's installer image, privileged, in the node's namespaces; the plugin finds the image from the installer's DaemonSet, or takes `-image`. Running the plugin needs a cluster admin: only `system:masters` and gcr's operator may create pods on `gcr-migrate` (`gcr.yaml`'s `ValidatingAdmissionPolicy`), since its pods make a node's shim listen for a migration.
+
+What can move, for now:
+- **Bare pods:** a pod with an owner is refused, since its controller would replace it with a cold one. Handing pods over to their controllers is the operator's job ([gcr-operator](design/gcr-operator.md)).
+- **One container** (no sidecars).
+- **Volumes the target mounts afresh:** ConfigMaps, Secrets, projected and downward API volumes. An `emptyDir`, or a volume holding files on the node, is refused.
+- **No user namespace.** A pod with `hostUsers: false` is refused: the kubelet picks its range, and would give the target another one. Pods in gcr's own user namespace (`gcr.dev/host-users: "false"`) can't be checkpointed in Kubernetes yet either. CRIU checks every namespace belongs to the container's user namespace, and the pod's network namespace, made by CRI, belongs to the host's.
+
+The pod gets a new name and IP, and its TCP connections reset. Services select it by its labels, which it keeps.
