@@ -22,7 +22,22 @@ source pre-copies memory in rounds to CRIU page servers on the target while
 it keeps running. It then freezes, sends the remaining memory, the rest of
 the checkpoint and the writable layer, and the target restores. The source
 stays frozen until the target runs and is thawed if anything fails before;
-afterwards it is killed. Open TCP connections reset.
+afterwards it is killed. Open TCP connections reset (see below).
+
+What happens to the processes' open files and sockets:
+
+| | on the target |
+| --- | --- |
+| files in the container's filesystem | reopened at the same offset: the writable layer moves, and the image is the same |
+| files on volumes | reopened by path. ConfigMaps, Secrets and projected volumes have the same contents there; a node's own files (`emptyDir`, `hostPath`) do not, and `kubectl gcr migrate` refuses such pods |
+| files deleted while open or mapped | kept: CRIU stores small ones and links back mapped ones |
+| pipes, sockets between the container's processes, eventfd, epoll, signalfd, timerfd, memfd, shared memory | restored with their contents |
+| stdin, stdout, stderr | the target's: its log carries on |
+| listening sockets, UDP sockets | recreated, on the same ports |
+| **established TCP connections** | **closed**: the peer sees them reset. The address changes on another node, so they cannot follow (CRIU's `tcp-close`) |
+| file locks | moved with their files (CRIU's `file-locks`) |
+
+A migration is refused, and the source carries on, for a Unix socket connected to something outside the container (a host daemon's), io_uring (CRIU does not support it), and inotify or fanotify watches whose files the target cannot find by handle.
 
 Everything goes over the one address the target listens on. Its page
 servers listen on loopback only, and each round's memory is carried to
@@ -108,6 +123,6 @@ What can move, for now:
 - **Bare pods:** a pod with an owner is refused, since its controller would replace it with a cold one. Handing pods over to their controllers is the operator's job ([gcr-operator](design/gcr-operator.md)).
 - **One container** (no sidecars).
 - **Volumes the target mounts afresh:** ConfigMaps, Secrets, projected and downward API volumes. An `emptyDir`, or a volume holding files on the node, is refused.
-- **No user namespace.** A pod with `hostUsers: false` is refused: the kubelet picks its range, and would give the target another one. Pods in gcr's own user namespace (`gcr.dev/host-users: "false"`) can't be checkpointed in Kubernetes yet either. CRIU checks every namespace belongs to the container's user namespace, and the pod's network namespace, made by CRI, belongs to the host's.
+- **No user namespace.** A pod with `hostUsers: false` is refused: the kubelet picks its range, and would give the target another one. Pods in gcr's own user namespace (`gcr.dev/host-users: "false"`) can't be checkpointed in Kubernetes yet either. CRIU checks every namespace belongs to the container's user namespace, and the pod's network namespace, made by CRI, belongs to the host's ([#70](https://github.com/makhov/gcr/issues/70)).
 
 The pod gets a new name and IP, and its TCP connections reset. Services select it by its labels, which it keeps.

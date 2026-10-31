@@ -84,8 +84,9 @@ type CRIUConfig struct {
 	Options, RestoreOptions []string
 }
 
-// write writes the configuration for a checkpoint, or a restore.
-func (cc CRIUConfig) write(restore bool) error {
+// write writes the configuration for a checkpoint, or a restore, with
+// extra lines for this one.
+func (cc CRIUConfig) write(restore bool, extra ...string) error {
 	if cc.Path == "" {
 		return nil
 	}
@@ -93,11 +94,19 @@ func (cc CRIUConfig) write(restore bool) error {
 	if restore {
 		lines = append(lines, cc.RestoreOptions...)
 	}
+	lines = append(lines, extra...)
 	if err := os.MkdirAll(filepath.Dir(cc.Path), 0o700); err != nil {
 		return err
 	}
 	return os.WriteFile(cc.Path, []byte(strings.Join(lines, "\n")+"\n"), 0o600)
 }
+
+// migrationCRIU are the CRIU options of a migration's dump and its
+// restore. A connection to a peer outside the container cannot follow it
+// to another node (the pod's address changes there): it is closed on the
+// target, and the peer sees it reset; without this CRIU refuses to dump a
+// connected socket at all. File locks move with the files they lock.
+var migrationCRIU = []string{"tcp-close", "file-locks"}
 
 // Prepared is what PrepareSpec decided.
 type Prepared struct {
@@ -607,7 +616,11 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 	if err := gpu.Compatible(saved, c.gpu); err != nil {
 		return fmt.Errorf("restore: %w", err)
 	}
-	if err := c.criu.write(true); err != nil {
+	var extra []string
+	if c.checkpointFrom != nil {
+		extra = migrationCRIU // an incoming migration's
+	}
+	if err := c.criu.write(true, extra...); err != nil {
 		return fmt.Errorf("CRIU config: %w", err)
 	}
 	defer c.criu.write(false)
@@ -1132,6 +1145,12 @@ func (c *Container) FreezeDump(ctx context.Context, dir, parent, host string, po
 
 func (c *Container) dump(dir, parent, host string, port int, pre bool) error {
 	c.trackedSince = ""
+	if !pre {
+		if err := c.criu.write(false, migrationCRIU...); err != nil {
+			return fmt.Errorf("CRIU config: %w", err)
+		}
+		defer c.criu.write(false)
+	}
 	err := c.lc.Checkpoint(&libcontainer.CriuOpts{
 		ImagesDirectory: dir,
 		WorkDirectory:   dir,
@@ -1184,8 +1203,14 @@ func (c *Container) LazyDump(ctx context.Context, dir, host string, port int) (w
 		return fail(fmt.Errorf("freeze: %w", err))
 	}
 	init := c.Pid()
+	if err := c.criu.write(false, migrationCRIU...); err != nil {
+		_ = c.lc.Resume()
+		unix.Close(statusFd)
+		return fail(fmt.Errorf("CRIU config: %w", err))
+	}
 	done := make(chan error, 1)
 	go func() {
+		defer c.criu.write(false)
 		err := c.lc.Checkpoint(&libcontainer.CriuOpts{
 			ImagesDirectory: dir,
 			WorkDirectory:   dir,

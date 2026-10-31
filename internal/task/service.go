@@ -422,12 +422,11 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			// Restores hand the restored listeners back to this supervisor.
 			criuOpts = append(criuOpts, sup.CRIUOption())
 		}
-		if len(criuOpts) > 0 || len(restoreOpts) > 0 {
-			prep.CRIU = container.CRIUConfig{
-				Path:           filepath.Join(ex.stateDir, "criu.conf"),
-				Options:        criuOpts,
-				RestoreOptions: restoreOpts,
-			}
+		// Always, even empty: a migration adds options of its own.
+		prep.CRIU = container.CRIUConfig{
+			Path:           filepath.Join(ex.stateDir, "criu.conf"),
+			Options:        criuOpts,
+			RestoreOptions: restoreOpts,
 		}
 		return prep, nil
 	}
