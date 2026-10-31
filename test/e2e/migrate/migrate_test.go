@@ -189,9 +189,10 @@ func testMigrateMemory(t *testing.T, postCopy bool) {
 			t.Errorf("the target restored its memory before running (gcr.dev/host-users: no user namespace, no GPU)")
 		}
 	}
-	if st := src.Status(); st != containerd.Stopped {
-		t.Fatalf("source is %s once the target has its memory", st)
-	}
+	// Stopped as the migration returns, which a status read can just miss.
+	framework.Eventually(t, 5*time.Second, "the source to stop once the target has its memory", func() bool {
+		return src.Status() == containerd.Stopped
+	})
 	last := dst.ReadInt("/tmp/count")
 	framework.Eventually(t, time.Minute, "the target to read 25 more pages back", func() bool {
 		s, _ := dst.ReadFile("/tmp/count")

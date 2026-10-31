@@ -221,6 +221,15 @@ func (c *Container) Remove() {
 		c.diagnose()
 	}
 	if c.ns.t.Failed() {
+		// A lazy restore's daemon log: what it copied and zero-filled.
+		logs, _ := filepath.Glob(filepath.Join("/run/containerd/io.containerd.runtime.v2.task", c.ns.Name, c.ID, "criu-restore-*", "lazy-pages.log"))
+		for _, l := range logs {
+			b, _ := os.ReadFile(l)
+			lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+			c.ns.t.Logf("%s, last lines:\n%s", l, strings.Join(lines[max(0, len(lines)-25):], "\n"))
+		}
+	}
+	if c.ns.t.Failed() {
 		if b, err := os.ReadFile(c.logPath()); err == nil && len(b) > 0 {
 			lines := strings.Split(strings.TrimSpace(string(b)), "\n")
 			c.ns.t.Logf("output of %s (%s), last lines:\n%s", c.ID, c.ns.Name, strings.Join(lines[max(0, len(lines)-30):], "\n"))
