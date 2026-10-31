@@ -65,6 +65,17 @@ type Result struct {
 	// from the source in PostCopyTook (from the freeze).
 	PostCopy     bool          `json:"postCopy,omitempty"`
 	PostCopyTook time.Duration `json:"postCopyTook,omitempty"`
+	// LazyRestore: after pre-copy, the target ran before loading the
+	// memory from the images it received, which it then did as it ran.
+	LazyRestore bool `json:"lazyRestore,omitempty"`
+	// Phases split the downtime of a migration that is not post-copy.
+	Phases []Phase `json:"phases,omitempty"`
+}
+
+// Phase is one step of the downtime and how long it took.
+type Phase struct {
+	Name string        `json:"name"`
+	Took time.Duration `json:"took"`
 }
 
 // Options say how to migrate.
@@ -155,10 +166,17 @@ func Send(ctx context.Context, src Source, target, token string, t TLS, work str
 		return res, err
 	}
 	frozen := time.Now()
+	mark := frozen
+	phase := func(name string) {
+		now := time.Now()
+		res.Phases = append(res.Phases, Phase{name, now.Sub(mark)})
+		mark = now
+	}
 	if err := src.FreezeDump(ctx, dir, parent, loopback, port); err != nil {
 		return res, fmt.Errorf("final dump: %w", err)
 	}
 	stop()
+	phase("final dump")
 	defer func() {
 		if retErr != nil && !handedOver {
 			if err := src.Thaw(); err != nil {
@@ -170,6 +188,7 @@ func Send(ctx context.Context, src Source, target, token string, t TLS, work str
 	if err := c.putDir(ctx, "/images", dir); err != nil {
 		return res, fmt.Errorf("send images: %w", err)
 	}
+	phase("images")
 	upper, err := src.UpperDir()
 	if err != nil {
 		return res, err
@@ -177,11 +196,15 @@ func Send(ctx context.Context, src Source, target, token string, t TLS, work str
 	if err := c.putDir(ctx, "/upper", upper); err != nil {
 		return res, fmt.Errorf("send writable layer: %w", err)
 	}
-	if err := c.post(ctx, "/restore", nil); err != nil {
+	phase("writable layer")
+	var restored struct{ Lazy bool }
+	if err := c.post(ctx, "/restore", &restored); err != nil {
 		return res, fmt.Errorf("restore on target: %w", err)
 	}
+	phase("restore")
 	handedOver = true
 	res.Downtime = time.Since(frozen)
+	res.LazyRestore = restored.Lazy
 	if err := src.Stop(); err != nil {
 		return res, fmt.Errorf("target is running but stopping the source failed: %w", err)
 	}

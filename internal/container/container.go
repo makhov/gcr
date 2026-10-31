@@ -530,9 +530,11 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 
 // Incoming is what an incoming migration restores from: CRIU images, and
 // for a post-copy one the page server (host:port) that serves its memory.
+// Lazy restores without the memory, loaded from the images after.
 type Incoming struct {
 	Images     string
 	PageServer string
+	Lazy       bool
 }
 
 // Start runs the created container, or restores it from its checkpoint.
@@ -543,6 +545,7 @@ func (c *Container) Start(ctx context.Context) error {
 			return err
 		}
 		c.checkpoint, c.remotePages = in.Images, in.PageServer
+		c.lazyPages = c.lazyPages || in.Lazy
 	}
 	switch {
 	case c.frozen:
@@ -620,6 +623,7 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 	}
 	keepWork := false // the log of a lazy-pages daemon that runs on
 	lazy := c.lazyPages || c.remotePages != ""
+	began := time.Now()
 	if lazy {
 		// Must be serving before the restore asks it for a page, and it
 		// keeps going afterwards: the container faults pages in as it
@@ -633,8 +637,9 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 			return err
 		}
 		c.lazyDaemon.stop()
-		c.lazyDaemon, keepWork = d, onDemand
+		c.lazyDaemon, keepWork = d, true
 	}
+	daemonUp := time.Now()
 	opts := &libcontainer.CriuOpts{
 		ImagesDirectory: images,
 		WorkDirectory:   work,
@@ -650,6 +655,18 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 		c.io.detach() // restore requires pipes, never a terminal
 		return fmt.Errorf("restore (criu log in %s): %w%s", work, err, criuErrors(filepath.Join(work, "restore.log")))
 	}
+	restored := time.Now()
+	inCRIU, gaps := criuTimes(filepath.Join(work, "restore.log"), 3)
+	defer func() {
+		log.G(context.Background()).WithFields(log.Fields{
+			"lazy":         lazy,
+			"daemon":       daemonUp.Sub(began).Round(time.Millisecond),
+			"criu":         restored.Sub(daemonUp).Round(time.Millisecond),
+			"criu-own":     inCRIU.Round(time.Millisecond),
+			"criu-longest": gaps,
+			"after":        time.Since(restored).Round(time.Millisecond),
+		}).Info("restore took")
+	}()
 	if freshNetwork {
 		pid, err := proc.Pid()
 		if err == nil {
@@ -1286,6 +1303,7 @@ type lazyDaemon struct {
 	done     chan struct{}
 	err      error // how it exited, once done
 	stopping atomic.Bool
+	log      string
 }
 
 // drain has the daemon copy the pages it has not, and waits until it has
@@ -1326,6 +1344,17 @@ func (d *lazyDaemon) stop() {
 		return
 	}
 	d.stopping.Store(true)
+	select {
+	case <-d.done:
+		return
+	default:
+	}
+	if !d.onDemand {
+		// It exits once it has copied every page: still running, it has
+		// not, and the container may be stuck on a fault it never served.
+		log.G(context.Background()).WithField("log", d.log).
+			Warn("lazy pages daemon stopped before it copied every page: " + logTail(d.log, 15))
+	}
 	_ = d.cmd.Process.Signal(unix.SIGTERM)
 	select {
 	case <-d.done:
@@ -1347,9 +1376,18 @@ func startLazyPages(images, work string, onDemand bool, pageServer string) (*laz
 		return nil, err
 	}
 	defer signal.Close()
-	args := []string{"lazy-pages", "--images-dir", images, "--work-dir", work, "--status-fd", "3"}
+	// Its log, in the work directory: every page it copies or zero-fills
+	// and every fault, where that is bounded by the memory (it copies all
+	// of it, then exits); warnings and errors only for one that serves
+	// faults for as long as the container runs, unless the shim runs with
+	// GCR_LAZY_PAGES_DEBUG set.
+	args := []string{"lazy-pages", "--images-dir", images, "--work-dir", work, "--status-fd", "3",
+		"-o", "lazy-pages.log", "-v4"}
 	if onDemand {
 		args = append(args, "--lazy-pages-on-demand")
+		if os.Getenv("GCR_LAZY_PAGES_DEBUG") == "" {
+			args = append(args, "-v2")
+		}
 	}
 	if pageServer != "" {
 		host, port, err := net.SplitHostPort(pageServer)
@@ -1376,10 +1414,15 @@ func startLazyPages(images, work string, onDemand bool, pageServer string) (*laz
 		return nil, fmt.Errorf("lazy pages: not serving: %w%s", err, criuErrors(filepath.Join(work, "lazy-pages.log")))
 	}
 	ready.Close()
-	d := &lazyDaemon{cmd: cmd, onDemand: onDemand, done: make(chan struct{})}
+	started := time.Now()
+	d := &lazyDaemon{cmd: cmd, onDemand: onDemand, done: make(chan struct{}), log: filepath.Join(work, "lazy-pages.log")}
 	go func() {
 		defer close(d.done)
 		d.err = cmd.Wait()
+		if d.err == nil && !d.stopping.Load() {
+			log.G(context.Background()).WithField("took", time.Since(started).Round(time.Millisecond)).
+				Info("lazy pages daemon copied every page")
+		}
 		if err := d.err; err != nil && !d.stopping.Load() {
 			// The container is left with pages nobody will send it; it
 			// gets SIGBUS when it touches one.
@@ -1388,6 +1431,59 @@ func startLazyPages(images, work string, onDemand bool, pageServer string) (*laz
 		}
 	}()
 	return d, nil
+}
+
+// criuTimes reads a CRIU log's timestamps ("(00.123456)" opening each
+// line): how long CRIU took by its own clock, and its n longest gaps
+// between lines, each with the line that ended it.
+func criuTimes(path string, n int) (time.Duration, string) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, ""
+	}
+	type gap struct {
+		d    time.Duration
+		line string
+	}
+	var gaps []gap
+	var last time.Duration
+	for _, l := range strings.Split(string(b), "\n") {
+		l = strings.TrimSpace(l)
+		end := strings.IndexByte(l, ')')
+		if !strings.HasPrefix(l, "(") || end < 0 {
+			continue
+		}
+		secs, err := strconv.ParseFloat(l[1:end], 64)
+		if err != nil {
+			continue
+		}
+		at := time.Duration(secs * float64(time.Second))
+		gaps = append(gaps, gap{at - last, strings.TrimSpace(l[end+1:])})
+		last = at
+	}
+	slices.SortFunc(gaps, func(a, b gap) int { return int(b.d - a.d) })
+	var out []string
+	for _, g := range gaps[:min(n, len(gaps))] {
+		line := g.line
+		if len(line) > 100 {
+			line = line[:100]
+		}
+		out = append(out, fmt.Sprintf("%s before %q", g.d.Round(time.Millisecond), line))
+	}
+	return last, strings.Join(out, "; ")
+}
+
+// logTail returns the last n lines of a log, joined with " | ".
+func logTail(path string, n int) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err.Error()
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, " | ")
 }
 
 // criuErrors returns the error lines of a CRIU log, for error messages.

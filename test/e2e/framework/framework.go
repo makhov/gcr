@@ -168,7 +168,7 @@ func (n *Namespace) Create(id string, s Spec) *Container {
 // test, so it can run in another goroutine (an incoming migration's task
 // starts only once the checkpoint arrives).
 func (c *Container) Start() error {
-	task, err := c.C.NewTask(c.ns.Ctx, cio.NullIO)
+	task, err := c.C.NewTask(c.ns.Ctx, c.output())
 	if err != nil {
 		return fmt.Errorf("task %s: %w", c.ID, err)
 	}
@@ -213,9 +213,60 @@ func (n *Namespace) Output(id string, s Spec) (string, int) {
 	return out.String(), int(st.ExitCode())
 }
 
-// Remove kills and deletes the container, if it is still there.
+// Remove kills and deletes the container, if it is still there. After a
+// failed test it first logs what the container's processes are doing.
 func (c *Container) Remove() {
 	ctx := c.ns.Ctx
+	if c.Task != nil && c.ns.t.Failed() {
+		c.diagnose()
+	}
+	if c.ns.t.Failed() {
+		// A lazy restore's daemon log: what it copied and zero-filled.
+		logs, _ := filepath.Glob(filepath.Join("/run/containerd/io.containerd.runtime.v2.task", c.ns.Name, c.ID, "criu-restore-*", "lazy-pages.log"))
+		for _, l := range logs {
+			b, _ := os.ReadFile(l)
+			var notable []string
+			from := map[string]int{}
+			for _, line := range strings.Split(string(b), "\n") {
+				switch {
+				case strings.Contains(line, "Read page from"):
+					// "from self", "from parent": which image of a chain.
+					f := strings.Fields(line[strings.Index(line, "Read page from")+len("Read page from"):])
+					if len(f) > 0 {
+						from[f[0]]++
+					}
+				case strings.Contains(line, "transferred"), strings.Contains(line, "zero page"),
+					strings.Contains(line, "REMOVE"), strings.Contains(line, "UNMAP"), strings.Contains(line, "REMAP"),
+					strings.Contains(line, "FORK"), strings.Contains(line, "Error"), strings.Contains(line, "Warn"),
+					strings.Contains(line, "pages to be handled"), strings.Contains(line, "mcopy_rc"):
+					notable = append(notable, line)
+				}
+			}
+			c.ns.t.Logf("%s: page reads by image %v; notable lines:\n%s", l, from, strings.Join(notable[:min(len(notable), 60)], "\n"))
+			// What the daemon did with the pages a crash names.
+			out, _ := os.ReadFile(c.logPath())
+			for _, page := range crashPages(string(out)) {
+				var hits []string
+				for _, line := range strings.Split(string(b), "\n") {
+					if strings.Contains(line, page) {
+						hits = append(hits, line)
+					}
+				}
+				c.ns.t.Logf("page %s000 in the daemon's log: %d lines\n%s", page, len(hits), strings.Join(hits[:min(len(hits), 12)], "\n"))
+				// The mapping the restore put it in, and whether it left
+				// that page to the daemon.
+				rl, _ := os.ReadFile(filepath.Join(filepath.Dir(l), "restore.log"))
+				addr, _ := strconv.ParseUint(page+"000", 16, 64)
+				c.ns.t.Logf("page %s000 in restore.log:\n%s", page, strings.Join(restoreLines(string(rl), addr), "\n"))
+			}
+		}
+	}
+	if c.ns.t.Failed() {
+		if b, err := os.ReadFile(c.logPath()); err == nil && len(b) > 0 {
+			lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+			c.ns.t.Logf("output of %s (%s), last lines:\n%s", c.ID, c.ns.Name, strings.Join(lines[max(0, len(lines)-30):], "\n"))
+		}
+	}
 	if c.Task != nil {
 		_ = c.Task.Kill(ctx, syscall.SIGKILL)
 		if exit, err := c.Task.Wait(ctx); err == nil {
@@ -350,7 +401,7 @@ func (c *Container) CheckpointRestore() {
 		t.Fatalf("restore %s: %v", c.ID, err)
 	}
 	c.C = restored
-	task, err := restored.NewTask(ctx, cio.NullIO, containerd.WithTaskCheckpoint(img))
+	task, err := restored.NewTask(ctx, c.output(), containerd.WithTaskCheckpoint(img))
 	if err != nil {
 		t.Fatalf("restore task %s: %v", c.ID, err)
 	}
@@ -456,4 +507,122 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// output sends the container's stdout and stderr to a file, which a
+// failed test shows: what a process that crashed said.
+func (c *Container) output() cio.Creator {
+	_ = os.MkdirAll(filepath.Dir(c.logPath()), 0o755)
+	f, err := os.OpenFile(c.logPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return cio.NullIO
+	}
+	c.ns.t.Cleanup(func() { f.Close() })
+	return cio.NewCreator(cio.WithStreams(nil, f, f))
+}
+
+func (c *Container) logPath() string {
+	return filepath.Join(os.TempDir(), "gcr-e2e-output", c.ns.Name+"-"+c.ID+".log")
+}
+
+// diagnose logs, for each process in the container's cgroup, each
+// thread's state, what it waits in, and its kernel stack, and whether the
+// cgroup is frozen: what a container that stopped making progress is
+// stuck on.
+func (c *Container) diagnose() {
+	t := c.ns.t
+	// Not Task.Pid: that is the pid when the task was created, and a
+	// container restored at start (a migration's target) has another.
+	if st, err := c.Task.Status(c.ns.Ctx); err == nil {
+		t.Logf("diagnose %s: task %s, exit status %d", c.ID, st.Status, st.ExitStatus)
+	}
+	pids, err := c.Task.Pids(c.ns.Ctx)
+	if err != nil || len(pids) == 0 {
+		t.Logf("diagnose %s: no processes (%v)", c.ID, err)
+		return
+	}
+	cg, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pids[0].Pid))
+	if err != nil {
+		t.Logf("diagnose %s: %v", c.ID, err)
+		return
+	}
+	dir := filepath.Join("/sys/fs/cgroup", strings.TrimPrefix(strings.TrimSpace(string(cg)), "0::"))
+	events, _ := os.ReadFile(filepath.Join(dir, "cgroup.events"))
+	t.Logf("diagnose %s: cgroup %s: %s", c.ID, dir, strings.Join(strings.Fields(string(events)), " "))
+	procs, _ := os.ReadFile(filepath.Join(dir, "cgroup.procs"))
+	for _, p := range strings.Fields(string(procs)) {
+		tids, _ := os.ReadDir(filepath.Join("/proc", p, "task"))
+		for _, tid := range tids {
+			base := filepath.Join("/proc", p, "task", tid.Name())
+			stat, _ := os.ReadFile(filepath.Join(base, "stat"))
+			state := "?"
+			if i := strings.LastIndexByte(string(stat), ')'); i > 0 && i+2 < len(stat) {
+				state = string(stat[i+2])
+			}
+			wchan, _ := os.ReadFile(filepath.Join(base, "wchan"))
+			stack, _ := os.ReadFile(filepath.Join(base, "stack"))
+			lines := strings.Split(strings.TrimSpace(string(stack)), "\n")
+			if len(lines) > 8 {
+				lines = lines[:8]
+			}
+			t.Logf("diagnose %s: pid %s tid %s state %s wchan %s stack: %s", c.ID, p, tid.Name(), state, wchan, strings.Join(lines, " <- "))
+		}
+	}
+}
+
+// crashPages are the pages (as hex without the last three digits, as
+// CRIU logs addresses) of the addresses a Go crash names: its arguments,
+// frame and stack pointers.
+func crashPages(output string) []string {
+	seen := map[string]bool{}
+	var pages []string
+	for _, f := range strings.FieldsFunc(output, func(r rune) bool {
+		return !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r == 'x')
+	}) {
+		hex, ok := strings.CutPrefix(f, "0x")
+		if !ok || len(hex) < 9 || seen[hex[:len(hex)-3]] {
+			continue
+		}
+		seen[hex[:len(hex)-3]] = true
+		pages = append(pages, hex[:len(hex)-3])
+	}
+	if len(pages) > 8 {
+		pages = pages[:8]
+	}
+	return pages
+}
+
+// restoreLines are the lines of a CRIU restore log about the mapping that
+// holds addr ("premap", "vma", "Opening" with its range) and about pages
+// it left to the lazy-pages daemon there ("Lazy restore skips N pages at").
+func restoreLines(log string, addr uint64) []string {
+	var out []string
+	for _, line := range strings.Split(log, "\n") {
+		var nums []uint64
+		for _, f := range strings.FieldsFunc(line, func(r rune) bool {
+			return !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r == 'x')
+		}) {
+			if len(strings.TrimPrefix(f, "0x")) >= 6 {
+				if n, err := strconv.ParseUint(strings.TrimPrefix(f, "0x"), 16, 64); err == nil {
+					nums = append(nums, n)
+				}
+			}
+		}
+		switch {
+		case strings.Contains(line, "Lazy restore skips") && len(nums) > 0:
+			if f := strings.Fields(line[strings.Index(line, "skips")+5:]); len(f) > 0 {
+				if pages, err := strconv.ParseUint(f[0], 10, 64); err == nil && addr >= nums[len(nums)-1] && addr < nums[len(nums)-1]+pages*4096 {
+					out = append(out, line)
+				}
+			}
+		case (strings.Contains(line, "premap") || strings.Contains(line, "vma") || strings.Contains(line, "VMA")) && len(nums) >= 2:
+			if addr >= nums[0] && addr < nums[1] {
+				out = append(out, line)
+			}
+		}
+	}
+	if len(out) > 12 {
+		out = out[:12]
+	}
+	return out
 }
