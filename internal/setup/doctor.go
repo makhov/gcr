@@ -114,9 +114,9 @@ func Doctor() []Check {
 	default:
 		v, verr := exec.Command(criu, "--version").Output()
 		if verr != nil {
-			// gcr's needs glibc: it does not start on musl (Alpine).
+			// Built for glibc, on musl (Alpine).
 			add("CRIU", Optional, criu+" does not run here: no checkpoints, forks, time travel or migration",
-				"it needs glibc 2.35 or later; on other nodes, build CRIU for them (make criu)")
+				"a release's gcr setup installs a static CRIU where glibc is missing; or make criu STATIC=1 from makhov/criu")
 			break
 		}
 		help, _ := exec.Command(criu, "--help").CombinedOutput()

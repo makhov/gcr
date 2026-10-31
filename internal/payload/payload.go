@@ -18,6 +18,8 @@ import (
 const (
 	Shim       = "containerd-shim-gcr-v2"
 	CRIU       = "criu"
+	CRIUStatic = "criu-static" // linked wholly statically, for hosts without glibc; loads no plugins
+	Tar        = "tar"         // GNU tar, static, which CRIU runs, for hosts whose tar is busybox's
 	CUDAPlugin = "cuda_plugin.so"
 	// Versions says which commits the files were built from.
 	Versions = "VERSIONS"

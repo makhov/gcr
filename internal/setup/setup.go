@@ -110,11 +110,40 @@ func Run(o Options) error {
 		say("this gcr carries no shim or CRIU: using the installed %s", payload.Shim)
 	}
 	if payload.Has(payload.CRIU) {
-		if err := payload.Install(payload.CRIU, filepath.Join(CRIUDir, "criu"), 0o755); err != nil {
+		criu := filepath.Join(CRIUDir, "criu")
+		if err := payload.Install(payload.CRIU, criu, 0o755); err != nil {
 			return fmt.Errorf("install CRIU: %w", err)
 		}
-		say("installed %s", filepath.Join(CRIUDir, "criu"))
-		if payload.Has(payload.CUDAPlugin) {
+		static := false
+		if exec.Command(criu, "--version").Run() != nil && payload.Has(payload.CRIUStatic) {
+			// No glibc here (Alpine's musl, as on k0s's nodes): the static
+			// one runs, without plugins.
+			if err := payload.Install(payload.CRIUStatic, criu, 0o755); err != nil {
+				return fmt.Errorf("install CRIU: %w", err)
+			}
+			static = true
+		}
+		if static {
+			say("installed %s, linked statically: this host has no glibc (no GPU checkpoints)", criu)
+		} else {
+			say("installed %s", criu)
+		}
+		// CRIU runs tar from PATH, where CRIUDir comes first (UseOwnCRIU):
+		// gcr's goes there if the node's is not GNU tar (busybox's).
+		tar := filepath.Join(CRIUDir, "tar")
+		if err := os.Remove(tar); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if t := gnuTar(); t != "" {
+			if !payload.Has(payload.Tar) {
+				say("warning: %s; install GNU tar (apk add tar, on Alpine)", t)
+			} else if err := payload.Install(payload.Tar, tar, 0o755); err != nil {
+				return fmt.Errorf("install GNU tar: %w", err)
+			} else {
+				say("installed %s, GNU tar, for CRIU: the node's is not", tar)
+			}
+		}
+		if payload.Has(payload.CUDAPlugin) && !static {
 			if err := payload.Install(payload.CUDAPlugin, filepath.Join(PluginDir, payload.CUDAPlugin), 0o755); err != nil {
 				return fmt.Errorf("install CRIU's CUDA plugin: %w", err)
 			}

@@ -68,7 +68,6 @@ Other owners:
 ## Open questions
 
 - **The x86 lazy-restore crash.** Post-copy migration and lazy restores crash intermittently on x86 (makhov/gcr#60). Pre-copy, which restores in full, isn't affected. The operator should use pre-copy until that's fixed.
-- **Node images.** On Alpine nodes, such as k0s's image, CRIU needs to be static and GNU tar must be installed (makhov/gcr#67). The installer should handle both.
 - **Choosing the target node:** leave it to the scheduler (simplest), or prefer nodes that already have the image, or are close by.
 - **Spot and node shutdown.** With a shutdown notice instead of an eviction, there may be no time to migrate. Checkpointing to a registry and restoring the replacement from it is a related feature, sharing the agent and the ownership handover.
 
