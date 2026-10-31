@@ -137,6 +137,8 @@ namespace or when `vm.unprivileged_userfaultfd` is 1. The restricted form
 restored process's pages on its behalf, during a read into one for
 instance, and those faults would reach nobody. Without the setting gcr
 refuses the container and says so, rather than leaving a CRIU log to read.
+Containers without a user namespace (`gcr.dev/host-users=true`) need no
+setting: their restored tasks are host root.
 
 Setting it to 1 lets any unprivileged process on the node use userfaultfd
 to handle faults from kernel mode, which is a step in several kernel

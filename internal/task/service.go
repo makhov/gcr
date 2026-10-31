@@ -238,14 +238,6 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 				return prep, fmt.Errorf("%s needs a container that is restored or forked: %w",
 					container.AnnotationLazyRestore, errdefs.ErrInvalidArgument)
 			}
-			if prep.LazyPages && !container.LazyPagesAvailable() {
-				// Said here rather than left to a CRIU log: the node has to
-				// allow it, and an operator should know what they are
-				// allowing (docs/fork.md, Lazy restore).
-				return prep, fmt.Errorf("%s: this node has vm.unprivileged_userfaultfd = 0, so a container "+
-					"in a user namespace cannot open the userfaultfd a lazy restore needs; set it to 1 to "+
-					"allow lazy restores: %w", container.AnnotationLazyRestore, errdefs.ErrFailedPrecondition)
-			}
 		}
 		if v, ok := spec.Annotations[container.AnnotationMemoryMerge]; ok {
 			if prep.MemoryMerge, err = strconv.ParseBool(v); err != nil {
@@ -319,6 +311,15 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			prep.IDMap, prep.IDMapRoot, prep.IDKey = rng.IDMapOption(), int(rng.Base), rng.Key
 		} else {
 			log.G(ctx).WithField("reason", why).Debug("no user namespace")
+		}
+		if prep.LazyPages && userns.InSpec(spec) && !container.LazyPagesAvailable() {
+			// Said here rather than left to a CRIU log: the node has to
+			// allow it, and an operator should know what they are
+			// allowing (docs/fork.md, Lazy restore). Outside a user
+			// namespace the restored tasks are host root, which may.
+			return prep, fmt.Errorf("%s: this node has vm.unprivileged_userfaultfd = 0, so a container "+
+				"in a user namespace cannot open the userfaultfd a lazy restore needs; set it to 1 to "+
+				"allow lazy restores: %w", container.AnnotationLazyRestore, errdefs.ErrFailedPrecondition)
 		}
 		// gcr's user namespace or one Kubernetes asked for.
 		prep.CgroupOwner = userns.DelegateCgroup(spec)
