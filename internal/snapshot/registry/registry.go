@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,6 +88,19 @@ type blobs struct {
 	NydusImages []ocispec.Descriptor `json:"nydusImages,omitempty"`
 }
 
+// client speaks to registries. A registry that takes a request and never
+// answers fails it after ResponseHeaderTimeout, rather than holding a push
+// or pull forever; the limit runs from when the request has been sent, so
+// a large upload or download is not cut short. The wait covers a registry
+// committing a large blob it was just sent (an S3 multipart upload).
+var client = newClient(5 * time.Minute)
+
+func newClient(responseHeaderTimeout time.Duration) *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = responseHeaderTimeout
+	return &http.Client{Transport: retry.NewTransport(t)}
+}
+
 // Repository opens the repository ref names, with the credentials in
 // Docker's config (docker login). Registries on loopback are spoken to
 // over plain HTTP, as Docker does; plainHTTP forces it for others.
@@ -105,7 +119,7 @@ func Repository(ref string, plainHTTP bool) (*remote.Repository, error) {
 		return nil, err
 	}
 	repo.Client = &auth.Client{
-		Client:     retry.DefaultClient,
+		Client:     client,
 		Cache:      auth.NewCache(),
 		Credential: credentials.Credential(creds),
 	}

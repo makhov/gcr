@@ -102,7 +102,7 @@ func pushNydusPart(ctx context.Context, target oras.Target, dir, name string) ([
 			return *slot, nil
 		}
 	}
-	work, err := os.MkdirTemp("", "gcr-nydus-")
+	work, err := workDir("gcr-nydus-")
 	if err != nil {
 		return nil, err
 	}
@@ -423,4 +423,20 @@ func remount(dir, name string, reg nydus.Registry) error {
 		return nil
 	}
 	return mountPart(dir, name, reg)
+}
+
+// WorkDir is where a push builds nydus parts, on gcr's disk: as large as
+// the part's data, it may not fit where os.TempDir is (a tmpfs, in
+// memory, on Fedora).
+var WorkDir = "/var/lib/gcr/tmp"
+
+// workDir makes a directory for a push's work in WorkDir, or in
+// os.TempDir where WorkDir cannot be made (not root).
+func workDir(pattern string) (string, error) {
+	if err := os.MkdirAll(WorkDir, 0o700); err == nil {
+		if d, err := os.MkdirTemp(WorkDir, pattern); err == nil {
+			return d, nil
+		}
+	}
+	return os.MkdirTemp("", pattern)
 }
