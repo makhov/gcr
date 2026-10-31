@@ -243,6 +243,17 @@ func (c *Container) Remove() {
 				}
 			}
 			c.ns.t.Logf("%s: page reads by image %v; notable lines:\n%s", l, from, strings.Join(notable[:min(len(notable), 60)], "\n"))
+			// What the daemon did with the pages a crash names.
+			out, _ := os.ReadFile(c.logPath())
+			for _, page := range crashPages(string(out)) {
+				var hits []string
+				for _, line := range strings.Split(string(b), "\n") {
+					if strings.Contains(line, page) {
+						hits = append(hits, line)
+					}
+				}
+				c.ns.t.Logf("page %s000 in the daemon's log: %d lines\n%s", page, len(hits), strings.Join(hits[:min(len(hits), 12)], "\n"))
+			}
 		}
 	}
 	if c.ns.t.Failed() {
@@ -552,4 +563,26 @@ func (c *Container) diagnose() {
 			t.Logf("diagnose %s: pid %s tid %s state %s wchan %s stack: %s", c.ID, p, tid.Name(), state, wchan, strings.Join(lines, " <- "))
 		}
 	}
+}
+
+// crashPages are the pages (as hex without the last three digits, as
+// CRIU logs addresses) of the addresses a Go crash names: its arguments,
+// frame and stack pointers.
+func crashPages(output string) []string {
+	seen := map[string]bool{}
+	var pages []string
+	for _, f := range strings.FieldsFunc(output, func(r rune) bool {
+		return !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r == 'x')
+	}) {
+		hex, ok := strings.CutPrefix(f, "0x")
+		if !ok || len(hex) < 9 || seen[hex[:len(hex)-3]] {
+			continue
+		}
+		seen[hex[:len(hex)-3]] = true
+		pages = append(pages, hex[:len(hex)-3])
+	}
+	if len(pages) > 8 {
+		pages = pages[:8]
+	}
+	return pages
 }

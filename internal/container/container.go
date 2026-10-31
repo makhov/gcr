@@ -1379,11 +1379,15 @@ func startLazyPages(images, work string, onDemand bool, pageServer string) (*laz
 	// Its log, in the work directory: every page it copies or zero-fills
 	// and every fault, where that is bounded by the memory (it copies all
 	// of it, then exits); warnings and errors only for one that serves
-	// faults for as long as the container runs.
+	// faults for as long as the container runs, unless the shim runs with
+	// GCR_LAZY_PAGES_DEBUG set.
 	args := []string{"lazy-pages", "--images-dir", images, "--work-dir", work, "--status-fd", "3",
 		"-o", "lazy-pages.log", "-v4"}
 	if onDemand {
-		args = append(args, "--lazy-pages-on-demand", "-v2")
+		args = append(args, "--lazy-pages-on-demand")
+		if os.Getenv("GCR_LAZY_PAGES_DEBUG") == "" {
+			args = append(args, "-v2")
+		}
 	}
 	if pageServer != "" {
 		host, port, err := net.SplitHostPort(pageServer)
