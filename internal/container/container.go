@@ -403,6 +403,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	if err != nil {
 		return nil, fmt.Errorf("convert spec: %w", err)
 	}
+	resolveBindSources(cfg)
 	if spec.Process.Terminal && (o.Checkpoint != "" || prep.CheckpointFrom != nil) {
 		// CRIU restores only pipes for stdio; a pty would need --shell-job.
 		return nil, fmt.Errorf("restore and migration need a container without a terminal: %w", errdefs.ErrNotImplemented)
@@ -701,6 +702,7 @@ func (c *Container) Checkpoint(ctx context.Context, opts CheckpointOpts) error {
 		TcpEstablished:          opts.OpenTCP,
 		ExternalUnixConnections: opts.UnixSockets,
 		FileLocks:               opts.FileLocks,
+		LinkRemap:               true,
 	})
 	if err != nil {
 		return fmt.Errorf("checkpoint (criu log in %s): %w%s", work, err, criuErrors(filepath.Join(work, "dump.log")))
@@ -807,6 +809,10 @@ func (c *Container) snapshot(ctx context.Context, dir, parent string) (retErr er
 		ImagesDirectory: filepath.Join(dir, "images"),
 		WorkDirectory:   work,
 		LeaveRunning:    true,
+		// Files deleted while still open or mapped (a POSIX semaphore
+		// in /dev/shm, as Python's multiprocessing leaves) are linked
+		// back for the dump; CRIU refuses them otherwise.
+		LinkRemap: true,
 	}
 	if parent != "" {
 		// Relative to the images directory; CRIU links it as "parent"
@@ -1132,6 +1138,7 @@ func (c *Container) dump(dir, parent, host string, port int, pre bool) error {
 		ParentImage:     parent,
 		PreDump:         pre,
 		LeaveRunning:    !pre,
+		LinkRemap:       !pre,
 		PageServer:      libcontainer.CriuPageServerInfo{Address: host, Port: int32(port)},
 	})
 	if err != nil {
@@ -1184,6 +1191,7 @@ func (c *Container) LazyDump(ctx context.Context, dir, host string, port int) (w
 			WorkDirectory:   dir,
 			LazyPages:       true,
 			StatusFd:        statusFd,
+			LinkRemap:       true,
 			PageServer:      libcontainer.CriuPageServerInfo{Address: host, Port: int32(port)},
 		})
 		if err != nil {
@@ -1878,6 +1886,22 @@ func loadSpec(bundle string) (*specs.Spec, error) {
 		return nil, fmt.Errorf("spec has no root: %w", errdefs.ErrInvalidArgument)
 	}
 	return &s, nil
+}
+
+// resolveBindSources replaces bind mounts' sources that are symlinks
+// (/etc/resolv.conf, on hosts where systemd-resolved manages it) with
+// what they point to. A bind mount follows them as it is made, but a
+// restore hands CRIU the source as written, and CRIU binds the symlink
+// itself, which then cannot be mounted on.
+func resolveBindSources(cfg *configs.Config) {
+	for _, m := range cfg.Mounts {
+		if m.Device != "bind" {
+			continue
+		}
+		if src, err := filepath.EvalSymlinks(m.Source); err == nil {
+			m.Source = src
+		}
+	}
 }
 
 // newProcess converts the spec's process, as runc does.

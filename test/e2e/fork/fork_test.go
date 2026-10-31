@@ -432,3 +432,36 @@ func TestForkIdentity(t *testing.T) {
 		t.Fatalf("the signalled fork is %s", st)
 	}
 }
+
+// TestForkSymlinkedBind: a bind mount whose source is a symlink, as
+// ctr --net-host's /etc/resolv.conf is where systemd-resolved manages it,
+// comes back in a fork, which reads the file it points to.
+func TestForkSymlinkedBind(t *testing.T) {
+	ns := framework.NewNamespace(t, "gcr-e2e")
+	dir := framework.TempDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "target.conf"), []byte("nameserver 127.0.0.53\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("target.conf", filepath.Join(dir, "link.conf")); err != nil {
+		t.Fatal(err)
+	}
+	spec := func(annotations map[string]string) framework.Spec {
+		return framework.Spec{
+			Args:        []string{"sh", "-c", counter},
+			Mounts:      []specs.Mount{framework.BindRO(filepath.Join(dir, "link.conf"), "/etc/resolv.conf")},
+			Annotations: annotations,
+		}
+	}
+	parent := ns.Run(framework.UniqueID("parent"), spec(nil))
+	framework.Eventually(t, time.Minute, "the parent to start counting", func() bool {
+		return parent.ReadInt("/tmp/count") > 0
+	})
+	snap := filepath.Join(framework.TempDir(t), "snap")
+	if err := control.NewClient(ns.Name, parent.ID).Snapshot(t.Context(), snap); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	fork := ns.Run(framework.UniqueID("fork"), spec(map[string]string{container.AnnotationForkFrom: snap}))
+	if out, code := fork.Exec("cat", "/etc/resolv.conf"); code != 0 || !strings.Contains(out, "127.0.0.53") {
+		t.Fatalf("fork's /etc/resolv.conf: %q (exit %d)", out, code)
+	}
+}

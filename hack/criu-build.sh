@@ -23,10 +23,11 @@ if [ "$ARCH" != "$HOST" ]; then
 		echo "deb [arch=$ARCH] $(url "$ARCH") $s main universe"
 	done >/etc/apt/sources.list.d/cross.list
 	dpkg --add-architecture "$ARCH"
-	t=$([ "$ARCH" = amd64 ] && echo x86_64-linux-gnu || echo aarch64-linux-gnu)
+	triplet() { [ "$1" = amd64 ] && echo x86_64-linux-gnu || echo aarch64-linux-gnu; }
+	t=$(triplet "$ARCH")
 	criu_arch=$([ "$ARCH" = amd64 ] && echo x86 || echo aarch64)
 	cross=(ARCH="$criu_arch" CROSS_COMPILE="$t-" CC="$t-gcc")
-	export PKG_CONFIG_LIBDIR=/usr/lib/$t/pkgconfig:/usr/share/pkgconfig:/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/pkgconfig
+	export PKG_CONFIG_LIBDIR=/usr/lib/$t/pkgconfig:/usr/share/pkgconfig:/usr/lib/$(triplet "$HOST")/pkgconfig
 	# gcc and libc6-dev for compel-host, which runs here.
 	pkgs=(gcc libc6-dev "gcc-${t//_/-}" "libc6-dev-$ARCH-cross" "${deps[@]/%/:$ARCH}")
 else
