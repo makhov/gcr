@@ -152,7 +152,7 @@ func Run(o Options) error {
 // checked containerd loads the new configuration; if it would not, or
 // does not start with it, the configuration is put back as it was.
 func setupContainerd(o Options, shim string, say func(string, ...any)) error {
-	changed, undo, err := registerContainerd(o.ContainerdConfig, shim, containerdMajor(), say)
+	changed, undo, err := registerContainerd(o.ContainerdConfig, shim, containerdMajor("containerd"), say)
 	if err != nil {
 		if undo != nil {
 			undo()
@@ -205,14 +205,15 @@ version = %d
 `, version, table, RuntimeType, shim)
 }
 
-// containerdMajor is the installed containerd's major version, 2 if it
-// cannot tell.
-func containerdMajor() int {
-	out, err := exec.Command("containerd", "--version").Output()
+// containerdMajor is the major version of the containerd binary (a path,
+// or a name on PATH), 2 if it cannot tell. Releases print "v2.4.2", k0s's
+// builds "1.7.27".
+func containerdMajor(binary string) int {
+	out, err := exec.Command(binary, "--version").Output()
 	if err != nil {
 		return 2
 	}
-	m := regexp.MustCompile(` v(\d+)\.`).FindSubmatch(out)
+	m := regexp.MustCompile(` v?(\d+)\.\d+\.\d+`).FindSubmatch(out)
 	if m == nil || string(m[1]) != "1" {
 		return 2
 	}
@@ -349,6 +350,10 @@ func validate(config string) error {
 // a file there changes.
 var k0sConfig = "/etc/k0s/containerd.toml"
 
+// k0sContainerd is the containerd k0s runs: v1.33 and earlier bundle
+// containerd 1.7, which reads only version 2 drop-ins.
+var k0sContainerd = "/var/lib/k0s/bin/containerd"
+
 // registerK0s writes gcr's drop-in into k0s's containerd.d, which k0s
 // imports and applies without a restart while it manages the
 // configuration (its first line says so).
@@ -362,7 +367,11 @@ func registerK0s(shim string, say func(string, ...any)) (bool, error) {
 			"register runtime %s there yourself, or remove it and restart k0s to have k0s manage it again", k0sConfig, RuntimeType)
 	}
 	dropIn := filepath.Join(filepath.Dir(k0sConfig), "containerd.d", "gcr.toml")
-	changed, err := writeIfChanged(dropIn, []byte(containerdDropIn(3, shim)), 0o644)
+	version := 3
+	if containerdMajor(k0sContainerd) == 1 {
+		version = 2
+	}
+	changed, err := writeIfChanged(dropIn, []byte(containerdDropIn(version, shim)), 0o644)
 	if err != nil {
 		return false, err
 	}
