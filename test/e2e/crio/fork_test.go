@@ -38,11 +38,13 @@ func TestFork(t *testing.T) {
 		t.Skip("no CRI-O")
 	}
 	c := framework.NewCRIAt(t, socket)
+	// The count is replaced in one step (rename), so a reader never finds
+	// it truncated and empty.
 	counter := func(name string, annotations map[string]string) *cri.ContainerConfig {
 		return &cri.ContainerConfig{
 			Metadata:    &cri.ContainerMetadata{Name: name},
 			Image:       &cri.ImageSpec{Image: framework.Busybox},
-			Command:     []string{"sh", "-c", "trap 'exit 0' TERM; i=0; while :; do i=$((i+1)); echo $i > /count; sleep 0.1; done"},
+			Command:     []string{"sh", "-c", "trap 'exit 0' TERM; i=0; while :; do i=$((i+1)); echo $i > /count.new; mv /count.new /count; sleep 0.1; done"},
 			LogPath:     name + ".log",
 			Annotations: annotations,
 			// As PID 1 it would ignore SIGTERM, and every stop would wait
