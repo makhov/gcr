@@ -238,7 +238,7 @@ func (c *Container) Remove() {
 				case strings.Contains(line, "transferred"), strings.Contains(line, "zero page"),
 					strings.Contains(line, "REMOVE"), strings.Contains(line, "UNMAP"), strings.Contains(line, "REMAP"),
 					strings.Contains(line, "FORK"), strings.Contains(line, "Error"), strings.Contains(line, "Warn"),
-					strings.Contains(line, "pages to be handled"):
+					strings.Contains(line, "pages to be handled"), strings.Contains(line, "mcopy_rc"):
 					notable = append(notable, line)
 				}
 			}
