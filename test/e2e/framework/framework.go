@@ -253,6 +253,11 @@ func (c *Container) Remove() {
 					}
 				}
 				c.ns.t.Logf("page %s000 in the daemon's log: %d lines\n%s", page, len(hits), strings.Join(hits[:min(len(hits), 12)], "\n"))
+				// The mapping the restore put it in, and whether it left
+				// that page to the daemon.
+				rl, _ := os.ReadFile(filepath.Join(filepath.Dir(l), "restore.log"))
+				addr, _ := strconv.ParseUint(page+"000", 16, 64)
+				c.ns.t.Logf("page %s000 in restore.log:\n%s", page, strings.Join(restoreLines(string(rl), addr), "\n"))
 			}
 		}
 	}
@@ -585,4 +590,39 @@ func crashPages(output string) []string {
 		pages = pages[:8]
 	}
 	return pages
+}
+
+// restoreLines are the lines of a CRIU restore log about the mapping that
+// holds addr ("premap", "vma", "Opening" with its range) and about pages
+// it left to the lazy-pages daemon there ("Lazy restore skips N pages at").
+func restoreLines(log string, addr uint64) []string {
+	var out []string
+	for _, line := range strings.Split(log, "\n") {
+		var nums []uint64
+		for _, f := range strings.FieldsFunc(line, func(r rune) bool {
+			return !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r == 'x')
+		}) {
+			if len(strings.TrimPrefix(f, "0x")) >= 6 {
+				if n, err := strconv.ParseUint(strings.TrimPrefix(f, "0x"), 16, 64); err == nil {
+					nums = append(nums, n)
+				}
+			}
+		}
+		switch {
+		case strings.Contains(line, "Lazy restore skips") && len(nums) > 0:
+			if f := strings.Fields(line[strings.Index(line, "skips")+5:]); len(f) > 0 {
+				if pages, err := strconv.ParseUint(f[0], 10, 64); err == nil && addr >= nums[len(nums)-1] && addr < nums[len(nums)-1]+pages*4096 {
+					out = append(out, line)
+				}
+			}
+		case (strings.Contains(line, "premap") || strings.Contains(line, "vma") || strings.Contains(line, "VMA")) && len(nums) >= 2:
+			if addr >= nums[0] && addr < nums[1] {
+				out = append(out, line)
+			}
+		}
+	}
+	if len(out) > 12 {
+		out = out[:12]
+	}
+	return out
 }
