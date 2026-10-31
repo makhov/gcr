@@ -93,6 +93,7 @@ type extras struct {
 	recorder   *timetravel.Recorder   // time travel, if enabled
 	supervisor *supervisor.Supervisor // if the filter hands calls to user space
 	receiver   *migrate.Receiver      // incoming migration, if requested
+	arrived    string                 // migrate.ArrivedKey of the container a migration comes into
 	migrateTLS migrate.TLS            // the handler's MigrationTLS
 	userns     *userns.Range          // the container's user namespace range
 	control    *control.Server
@@ -302,7 +303,16 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		}
 		// gcr's user namespace or one Kubernetes asked for.
 		prep.CgroupOwner = userns.DelegateCgroup(spec)
-		if addr, ok := spec.Annotations[migrate.AnnotationIn]; ok {
+		addr, ok := spec.Annotations[migrate.AnnotationIn]
+		if key := migrate.ArrivedKey(spec.Annotations); ok && migrate.Arrived(key) {
+			// A container that restarts in a pod a migration came into
+			// (the pod keeps the annotation): it starts as a new one.
+			log.G(ctx).Info("a migration came into this pod's container before: starting it anew")
+			ok = false
+		} else if ok {
+			ex.arrived = key
+		}
+		if ok {
 			recv, err := migrate.NewReceiver(s.ctx, addr, spec.Annotations[migrate.AnnotationToken], cfg.MigrationTLS,
 				filepath.Join(ex.stateDir, "migrate-in"),
 				func() (string, error) { return c.UpperDir() },
@@ -515,6 +525,11 @@ func (s *service) Start(ctx context.Context, r *taskAPI.StartRequest) (*taskAPI.
 		// Tell the migration source how the restore went; it keeps its copy
 		// running unless this succeeded.
 		ex.receiver.Done(err)
+		if err == nil {
+			if merr := migrate.MarkArrived(ex.arrived); merr != nil {
+				log.G(ctx).WithError(merr).Warn("recording the migration: a restart of this container would wait for another")
+			}
+		}
 	}
 	if err != nil {
 		return nil, errgrpc.ToGRPC(err)
