@@ -183,7 +183,19 @@ echo "$out"; exit 1`, o.GCR, containerdNamespace, id, target)
 	if held != nil {
 		// Before the source goes: the ReplicaSet then finds the target
 		// its, and one pod too many, rather than one too few, and never
-		// starts a cold one.
+		// starts a cold one. Of two pods, it deletes a not-Ready one
+		// first, then the one costing less to delete: the target must be
+		// Ready, and the source, should its kubelet have restarted it in
+		// the meantime, cost the least.
+		log("waiting for %s to be Ready", dst.Name)
+		if err := waitReady(ctx, cs, ns, dst.Name, o.Timeout); err != nil {
+			return res, fmt.Errorf("the pod runs in %s now, but it is not Ready: %w", dst.Name, err)
+		}
+		cost, _ := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]string{
+			"controller.kubernetes.io/pod-deletion-cost": "-2147483648"}}})
+		if _, err := cs.CoreV1().Pods(ns).Patch(ctx, name, types.MergePatchType, cost, metav1.PatchOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return res, fmt.Errorf("the pod runs in %s now, but marking %s for deletion failed: %w", dst.Name, name, err)
+		}
 		log("handing %s over to %s %s", dst.Name, src.OwnerReferences[0].Kind, src.OwnerReferences[0].Name)
 		if err := handOver(ctx, cs, src, dst.Name, held); err != nil {
 			return res, fmt.Errorf("the pod runs in %s now, but handing it over to its ReplicaSet failed: %w", dst.Name, err)
@@ -240,6 +252,22 @@ func Movable(p *corev1.Pod) (string, error) {
 		return "", fmt.Errorf("container %q is not containerd's", p.Status.ContainerStatuses[0].ContainerID)
 	}
 	return id, nil
+}
+
+// waitReady waits for pod name to be Ready.
+func waitReady(ctx context.Context, cs kubernetes.Interface, ns, name string, timeout time.Duration) error {
+	return wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
+		p, err := cs.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		for _, c := range p.Status.Conditions {
+			if c.Type == corev1.PodReady {
+				return c.Status == corev1.ConditionTrue, nil
+			}
+		}
+		return false, nil
+	})
 }
 
 func ownedByReplicaSet(p *corev1.Pod) bool {
