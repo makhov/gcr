@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -136,6 +138,23 @@ func NewTaskService(ctx context.Context, publisher shim.Publisher, sd shutdown.S
 		containers: make(map[string]*container.Container),
 		extras:     make(map[string]*extras),
 	}
+	// containerd's shim library ends the shim on SIGTERM or SIGINT, and
+	// says so at debug level only: a shim ended so with containers in it
+	// takes them down, so say it where it shows (gcr#74).
+	go func() {
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
+		sig := <-ch
+		s.mu.Lock()
+		ids := slices.Sorted(maps.Keys(s.containers))
+		s.mu.Unlock()
+		l := log.G(ctx).WithField("signal", sig.String()).WithField("containers", ids)
+		if len(ids) > 0 {
+			l.Warn("shim ending on a signal with containers in it, which go with it")
+		} else {
+			l.Info("shim ending on a signal")
+		}
+	}()
 	sd.RegisterCallback(func(context.Context) error {
 		publisher.Close()
 		return nil
@@ -723,6 +742,7 @@ func (s *service) Shutdown(ctx context.Context, r *taskAPI.ShutdownRequest) (*pt
 	n := len(s.containers)
 	s.mu.Unlock()
 	if n == 0 {
+		log.G(ctx).Debug("shim shutting down: containerd asked, and it has no containers")
 		s.shutdown.Shutdown()
 	}
 	return empty, nil
