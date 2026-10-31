@@ -6,12 +6,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/containerd/console"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/fifo"
 	"github.com/opencontainers/runc/libcontainer"
 	"github.com/opencontainers/runc/libcontainer/utils"
@@ -36,6 +38,9 @@ type ttyIO struct {
 }
 
 func openTTY(ctx context.Context, stdin, stdout string) (_ *ttyIO, retErr error) {
+	if u, err := url.Parse(stdout); err == nil && u.Scheme != "" && u.Scheme != "fifo" {
+		return nil, fmt.Errorf("a terminal's output goes to a fifo, not %s: %w", u.Scheme, errdefs.ErrNotImplemented)
+	}
 	parent, child, err := utils.NewSockPair("console")
 	if err != nil {
 		return nil, err

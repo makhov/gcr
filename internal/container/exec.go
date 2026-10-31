@@ -44,7 +44,7 @@ func (c *Container) AddExec(ctx context.Context, id string, spec *specs.Process,
 	if spec.Terminal {
 		e.tty, err = openTTY(ctx, stdin, stdout)
 	} else {
-		e.pipes, err = openStdio(ctx, stdin, stdout, stderr)
+		e.pipes, err = openStdio(ctx, id, stdin, stdout, stderr)
 	}
 	if err != nil {
 		return nil, err
