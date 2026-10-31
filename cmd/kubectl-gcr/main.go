@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 
@@ -31,7 +30,7 @@ func main() {
 	ns := fs.String("n", "", "the pod's namespace (default: the kubeconfig context's)")
 	to := fs.String("to", "", "the node to move it to (default: one the scheduler picks, not its own)")
 	system := fs.String("gcr-namespace", "gcr-system", "gcr's namespace, where the migration's Jobs run")
-	image := fs.String("image", "", "the image the Jobs run (default: gcr's installer's, from its DaemonSet)")
+	image := fs.String("image", "", "the image the Jobs run (default: gcr's installer's, from its DaemonSet, or busybox without one)")
 	gcrPath := fs.String("gcr", "/usr/local/bin/gcr", "gcr's path on the nodes")
 	timeout := fs.Duration("timeout", 5*time.Minute, "how long each step may take")
 	kubeconfig := fs.String("kubeconfig", "", "kubeconfig file (default: $KUBECONFIG, ~/.kube/config)")
@@ -62,11 +61,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	if *image == "" {
-		ds, err := cs.AppsV1().DaemonSets(*system).Get(ctx, "gcr-installer", metav1.GetOptions{})
-		if err != nil {
-			fail(fmt.Errorf("gcr's installer DaemonSet (for its image; or pass -image): %w", err))
+		if *image, err = kubemigrate.JobImage(ctx, cs, *system); err != nil {
+			fail(fmt.Errorf("%w (or pass -image)", err))
 		}
-		*image = ds.Spec.Template.Spec.Containers[0].Image
 	}
 	res, err := kubemigrate.Migrate(ctx, cs, *ns, name, kubemigrate.Options{
 		Node: *to, Namespace: *system, Image: *image, GCR: *gcrPath, Timeout: *timeout,
