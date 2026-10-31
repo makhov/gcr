@@ -126,3 +126,36 @@ What can move, for now:
 - **No user namespace.** A pod with `hostUsers: false` is refused: the kubelet picks its range, and would give the target another one. Pods in gcr's own user namespace (`gcr.dev/host-users: "false"`) can't be checkpointed in Kubernetes yet either. CRIU checks every namespace belongs to the container's user namespace, and the pod's network namespace, made by CRI, belongs to the host's ([#70](https://github.com/makhov/gcr/issues/70)).
 
 The pod gets a new name and IP, and its TCP connections reset. Services select it by its labels, which it keeps.
+
+## Draining nodes: gcr-operator
+
+`deploy/gcr-operator.yaml` runs gcr's operator. It turns evictions (`kubectl drain`, the cluster autoscaler, node upgrades) of pods that opt in into migrations:
+
+```yaml
+spec:
+  template:
+    metadata:
+      annotations:
+        gcr.dev/migrate-on-evict: "true"
+```
+
+```console
+$ kubectl drain ns-worker-1 --ignore-daemonsets
+evicting pod default/counter-dc564fd68-qctk2
+error when evicting pods/"counter-dc564fd68-qctk2" -n "default" (will retry after 5s): admission webhook "evictions.gcr.dev" denied the request: pod default/counter-dc564fd68-qctk2 is moving to another node
+evicting pod default/counter-dc564fd68-qctk2
+node/ns-worker-1 drained
+```
+
+That Deployment's pod moved from `ns-worker-1` to another node in 10 s, with 346 ms of downtime, and carried on counting there (three-node k0da cluster, k0s v1.33, arm64).
+
+- **The webhook** (a `ValidatingWebhookConfiguration` on `pods/eviction`) answers an opted-in pod's eviction 429, as a PodDisruptionBudget does, and moves the pod as `kubectl gcr migrate` does. The drain retries; once the pod has moved, its source is gone and the drain goes on.
+- **A pod that can't move is evicted.** If the move fails (see [what can move](#between-kubernetes-nodes)), the next retry is let through and the pod restarts elsewhere, as without gcr. The pod's `gcr.dev/migration` annotation says why. A drain is never held by a pod that can't move, and `failurePolicy: Ignore` lets evictions through when the operator is down.
+- **A Deployment's pods** (a ReplicaSet's) are handed over:
+  - the target is created without the labels its ReplicaSet selects by, so the ReplicaSet doesn't see it while it waits for the migration;
+  - once the target is Ready, the source is marked cheapest to delete (`controller.kubernetes.io/pod-deletion-cost`), and the target gets the labels and the ReplicaSet as its owner;
+  - the ReplicaSet then has one pod too many, deletes the source, and never starts a cold one.
+- **Draining the operator's own node** waits for the migrations it runs: its eviction is answered 429 until they're done.
+- **A mark left by an operator that went away** mid-migration counts as failed after 15 minutes.
+
+The operator runs unprivileged. Its migrations' Jobs, and the `gcr-migrate` runtime class its targets run on, are what touch the nodes.

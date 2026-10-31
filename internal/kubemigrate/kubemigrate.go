@@ -21,6 +21,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 )
@@ -118,6 +119,17 @@ func Migrate(ctx context.Context, cs kubernetes.Interface, ns, name string, o Op
 	}
 	addr := fmt.Sprintf("0.0.0.0:%d", 17000+n.Int64())
 	dst := targetPod(src, o.Node, addr, token, inf)
+	// A ReplicaSet's pod: the target stays out of its sight until it runs
+	// the pod's processes, or the ReplicaSet would delete it as one too
+	// many while it waits for them.
+	var held map[string]string
+	if ownedByReplicaSet(src) {
+		rs, err := cs.AppsV1().ReplicaSets(ns).Get(ctx, src.OwnerReferences[0].Name, metav1.GetOptions{})
+		if err != nil {
+			return res, fmt.Errorf("the pod's ReplicaSet: %w", err)
+		}
+		held = holdBack(dst, rs.Spec.Selector)
+	}
 	dst, err = cs.CoreV1().Pods(ns).Create(ctx, dst, metav1.CreateOptions{})
 	if err != nil {
 		return res, fmt.Errorf("create the target: %w", err)
@@ -168,6 +180,27 @@ echo "$out"; exit 1`, o.GCR, containerdNamespace, id, target)
 	}
 	// The processes run in the target now; the source's are gone.
 	handedOver = true
+	if held != nil {
+		// Before the source goes: the ReplicaSet then finds the target
+		// its, and one pod too many, rather than one too few, and never
+		// starts a cold one. Of two pods, it deletes a not-Ready one
+		// first, then the one costing less to delete: the target must be
+		// Ready, and the source, should its kubelet have restarted it in
+		// the meantime, cost the least.
+		log("waiting for %s to be Ready", dst.Name)
+		if err := waitReady(ctx, cs, ns, dst.Name, o.Timeout); err != nil {
+			return res, fmt.Errorf("the pod runs in %s now, but it is not Ready: %w", dst.Name, err)
+		}
+		cost, _ := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]string{
+			"controller.kubernetes.io/pod-deletion-cost": "-2147483648"}}})
+		if _, err := cs.CoreV1().Pods(ns).Patch(ctx, name, types.MergePatchType, cost, metav1.PatchOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return res, fmt.Errorf("the pod runs in %s now, but marking %s for deletion failed: %w", dst.Name, name, err)
+		}
+		log("handing %s over to %s %s", dst.Name, src.OwnerReferences[0].Kind, src.OwnerReferences[0].Name)
+		if err := handOver(ctx, cs, src, dst.Name, held); err != nil {
+			return res, fmt.Errorf("the pod runs in %s now, but handing it over to its ReplicaSet failed: %w", dst.Name, err)
+		}
+	}
 	log("deleting %s", name)
 	if err := cs.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: new(int64)}); err != nil && !apierrors.IsNotFound(err) {
 		return res, fmt.Errorf("the pod runs in %s now, but deleting %s failed: %w", dst.Name, name, err)
@@ -190,10 +223,10 @@ func Movable(p *corev1.Pod) (string, error) {
 	switch {
 	case p.Status.Phase != corev1.PodRunning:
 		return "", fmt.Errorf("not running (%s)", p.Status.Phase)
-	case len(p.OwnerReferences) > 0:
-		// Its controller would replace it once it is deleted, beside the
-		// target: the operator hands pods over (docs/design/gcr-operator.md).
-		return "", fmt.Errorf("owned by %s %s: only pods without an owner can be moved yet", p.OwnerReferences[0].Kind, p.OwnerReferences[0].Name)
+	case len(p.OwnerReferences) > 1 || len(p.OwnerReferences) == 1 && !ownedByReplicaSet(p):
+		// Its controller would replace it with a cold one once it is
+		// deleted; ReplicaSets' pods are handed over (handOver).
+		return "", fmt.Errorf("owned by %s %s: only pods without an owner, or a ReplicaSet's, can be moved yet", p.OwnerReferences[0].Kind, p.OwnerReferences[0].Name)
 	case len(p.Spec.Containers) != 1 || len(p.Status.ContainerStatuses) != 1:
 		return "", fmt.Errorf("%d containers: only pods with one can be moved yet", len(p.Spec.Containers))
 	case p.Spec.HostUsers != nil && !*p.Spec.HostUsers:
@@ -219,6 +252,69 @@ func Movable(p *corev1.Pod) (string, error) {
 		return "", fmt.Errorf("container %q is not containerd's", p.Status.ContainerStatuses[0].ContainerID)
 	}
 	return id, nil
+}
+
+// waitReady waits for pod name to be Ready.
+func waitReady(ctx context.Context, cs kubernetes.Interface, ns, name string, timeout time.Duration) error {
+	return wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
+		p, err := cs.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		for _, c := range p.Status.Conditions {
+			if c.Type == corev1.PodReady {
+				return c.Status == corev1.ConditionTrue, nil
+			}
+		}
+		return false, nil
+	})
+}
+
+func ownedByReplicaSet(p *corev1.Pod) bool {
+	return len(p.OwnerReferences) == 1 && p.OwnerReferences[0].Kind == "ReplicaSet" &&
+		p.OwnerReferences[0].Controller != nil && *p.OwnerReferences[0].Controller
+}
+
+// holdBack takes off dst the labels sel selects by, so that its
+// ReplicaSet does not see it, and returns them.
+func holdBack(dst *corev1.Pod, sel *metav1.LabelSelector) map[string]string {
+	held := map[string]string{}
+	labels := map[string]string{}
+	for k, v := range dst.Labels {
+		labels[k] = v
+	}
+	if sel != nil {
+		for k := range sel.MatchLabels {
+			if v, ok := labels[k]; ok {
+				held[k] = v
+				delete(labels, k)
+			}
+		}
+		for _, e := range sel.MatchExpressions {
+			if v, ok := labels[e.Key]; ok {
+				held[e.Key] = v
+				delete(labels, e.Key)
+			}
+		}
+	}
+	dst.Labels = labels
+	return held
+}
+
+// handOver gives the target the labels held back and src's owner, which
+// adopts it: the ReplicaSet then has one pod too many, and deletes the
+// source, which no longer runs, first.
+func handOver(ctx context.Context, cs kubernetes.Interface, src *corev1.Pod, target string, held map[string]string) error {
+	patch := map[string]any{"metadata": map[string]any{
+		"labels":          held,
+		"ownerReferences": src.OwnerReferences,
+	}}
+	b, err := json.Marshal(patch)
+	if err != nil {
+		return err
+	}
+	_, err = cs.CoreV1().Pods(src.Namespace).Patch(ctx, target, types.StrategicMergePatchType, b, metav1.PatchOptions{})
+	return err
 }
 
 // targetPod is the pod the migration goes into: the source's spec on the
