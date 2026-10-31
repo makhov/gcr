@@ -208,6 +208,7 @@ static int become(struct creds *c)
 // mediated by it as the caller's own would be (a profile may refuse
 // mounts, as docker-default does). The shim is unconfined, which may
 // change to any profile. Without AppArmor there is nothing to take on.
+// SELinux's label is taken on separately, just before the mount.
 static int confine_like(int procfd, int hostproc)
 {
 	char label[256], cmd[300];
@@ -232,6 +233,29 @@ static int confine_like(int procfd, int hostproc)
 	n = write(fd, cmd, strlen(cmd));
 	close(fd);
 	return n < 0 ? -1 : 0;
+}
+
+// selinux_label reads the caller's SELinux label into label, or leaves it
+// empty where SELinux is not enabled (an AppArmor host, whose
+// attr/current is AppArmor's).
+static int selinux_label(int procfd, char *label, size_t size)
+{
+	ssize_t n;
+	int fd;
+
+	label[0] = '\0';
+	if (access("/sys/fs/selinux/enforce", F_OK) < 0)
+		return 0;
+	fd = openat(procfd, "attr/current", O_RDONLY | O_CLOEXEC);
+	if (fd < 0)
+		return -1;
+	n = read(fd, label, size - 1);
+	close(fd);
+	if (n < 0)
+		return -1;
+	label[n] = '\0';
+	label[strcspn(label, "\n")] = '\0';
+	return 0;
 }
 
 static const char *arg(const char *name)
@@ -270,7 +294,7 @@ static void do_mount(void)
 {
 	const char *pidstr = getenv("_GCR_PID");
 	const char *source, *target;
-	char path[64], sbuf[4200], tbuf[4200];
+	char path[64], sbuf[4200], tbuf[4200], label[256];
 	int pid, hostproc, procfd, pidfd, rootfd, cwdfd, status;
 	struct creds c = {0};
 	struct ids caller;
@@ -305,6 +329,8 @@ static void do_mount(void)
 			FAIL(errno);
 	if (read_creds(procfd, &c) < 0)
 		FAIL(errno);
+	if (selinux_label(procfd, label, sizeof(label)) < 0)
+		FAIL(errno);
 	// Root and working directory as the caller sees them, opened once in
 	// its mount namespace (the kernel will not mount onto a path taken
 	// from another one).
@@ -327,6 +353,18 @@ static void do_mount(void)
 			_exit(errno ? errno : EPERM);
 		if (become(&c) < 0)
 			_exit(errno ? errno : EPERM);
+		// The caller's SELinux label is taken on last, just before the
+		// mount: SELinux then checks the mount as the caller's own (Fedora's
+		// policy refuses container_t a proc mount or a context= option,
+		// which the runtime's domain may make), and this process does what
+		// it must first as the runtime. Its handle on its own label is
+		// opened now, while it holds the host's /proc.
+		int labelfd = -1;
+		if (label[0] != '\0') {
+			labelfd = openat(hostproc, "thread-self/attr/current", O_WRONLY | O_CLOEXEC);
+			if (labelfd < 0)
+				_exit(errno ? errno : EPERM);
+		}
 		// Paths through the caller's descriptors are copies already.
 		if (source == arg("_GCR_SOURCE"))
 			source = self_path(source, hostproc, &caller, sbuf, sizeof(sbuf));
@@ -352,6 +390,8 @@ static void do_mount(void)
 			if (st.f_flag & ST_RDONLY)
 				_exit(EPERM);
 		}
+		if (labelfd >= 0 && write(labelfd, label, strlen(label)) < 0)
+			_exit(errno ? errno : EPERM);
 		if (mount(source, target, arg("_GCR_FSTYPE"), flags, arg("_GCR_DATA")) < 0)
 			_exit(errno ? errno : EPERM);
 		_exit(0);
