@@ -1,3 +1,8 @@
 bin/
 __pycache__/
 dist/
+# What `go build ./cmd/...` leaves in the root (make builds into bin/).
+/containerd-shim-gcr-v2
+/gcr
+/gcr-operator
+/kubectl-gcr
