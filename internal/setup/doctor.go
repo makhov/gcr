@@ -87,6 +87,8 @@ func Doctor() []Check {
 	}
 	if _, k0s := os.Stat(k0sConfig); k0s == nil {
 		which, err = "k0s's", nil // its own, off PATH
+	} else if d := detectDistro(); d != nil {
+		which, err = d.Name+"'s", nil
 	}
 	if err != nil {
 		add("containerd", Missing, "not found", "install containerd 1.7 or later")
@@ -194,7 +196,11 @@ var runtimePath = regexp.MustCompile(`(?m)^\s*runtime_path\s*=\s*['"]([^'"]+)['"
 
 // registeredShim is the shim gcr setup's drop-in names, if it exists.
 func registeredShim() string {
-	for _, f := range []string{"/etc/containerd/conf.d/gcr.toml", filepath.Join(filepath.Dir(k0sConfig), "containerd.d", "gcr.toml")} {
+	candidates := []string{"/etc/containerd/conf.d/gcr.toml", filepath.Join(filepath.Dir(k0sConfig), "containerd.d", "gcr.toml")}
+	for _, d := range distros {
+		candidates = append(candidates, filepath.Join(d.Dir, "config-v3.toml.d", "gcr.toml"), filepath.Join(d.Dir, "config.toml.d", "gcr.toml"))
+	}
+	for _, f := range candidates {
 		b, err := os.ReadFile(f)
 		if err != nil {
 			continue
@@ -212,7 +218,12 @@ func registeredShim() string {
 func registered() bool {
 	files, _ := filepath.Glob("/etc/containerd/conf.d/*.toml")
 	k0s, _ := filepath.Glob("/etc/k0s/containerd.d/*.toml")
-	for _, f := range append(append(files, k0s...), "/etc/containerd/config.toml", k0sConfig) {
+	files = append(append(files, k0s...), "/etc/containerd/config.toml", k0sConfig)
+	for _, d := range distros {
+		dropIns, _ := filepath.Glob(filepath.Join(d.Dir, "*.toml.d", "*.toml"))
+		files = append(append(files, dropIns...), filepath.Join(d.Dir, "config.toml"))
+	}
+	for _, f := range files {
 		if b, err := os.ReadFile(f); err == nil && bytes.Contains(b, []byte(RuntimeType)) {
 			return true
 		}

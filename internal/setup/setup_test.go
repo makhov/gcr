@@ -178,3 +178,33 @@ func TestKernelAtLeast(t *testing.T) {
 		}
 	}
 }
+
+func TestDistroDropInDir(t *testing.T) {
+	for _, tc := range []struct {
+		name, config, want string
+		version          int
+	}{
+		{"v3 importing config-v3.toml.d", "version = 3\nimports = [\"DIR/config-v3.toml.d/*.toml\"]\n", "config-v3.toml.d", 3},
+		{"v2 importing config.toml.d", "version = 2\nimports = [\"DIR/config.toml.d/*.toml\"]\n", "config.toml.d", 2},
+		{"an older release, importing nothing", "version = 3\n", "", 0},
+		{"a custom template importing elsewhere", "version = 3\nimports = [\"/etc/other/*.toml\"]\n", "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := distro{Name: "k3s", Dir: t.TempDir()}
+			config := strings.ReplaceAll(tc.config, "DIR", d.Dir)
+			if err := os.WriteFile(filepath.Join(d.Dir, "config.toml"), []byte(config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			dir, version, err := d.dropInDir()
+			if tc.want == "" {
+				if err == nil || !strings.Contains(err.Error(), "does not import") {
+					t.Fatalf("got %q, %v; want a refusal", dir, err)
+				}
+				return
+			}
+			if err != nil || dir != filepath.Join(d.Dir, tc.want) || version != tc.version {
+				t.Fatalf("got %q version %d, %v; want %s version %d", dir, version, err, tc.want, tc.version)
+			}
+		})
+	}
+}
