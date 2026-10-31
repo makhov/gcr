@@ -202,7 +202,19 @@ version = %d
   # gcr's pod annotations; the handler's PodAnnotations says which a pod
   # may use (docs/configuration.md).
   pod_annotations = ['gcr.dev/*']
-`, version, table, RuntimeType, shim)
+
+# The same runtime for the targets of migrations between nodes (kubectl gcr
+# migrate): its pods may make the shim listen for one. gcr.yaml's
+# admission policy lets only cluster admins and gcr's operator use it.
+%s
+  runtime_type = '%s'
+  runtime_path = '%s'
+  pod_annotations = ['gcr.dev/*']
+%s
+  PodAnnotations = ['gcr.dev/migrate-in', 'gcr.dev/migrate-token', 'gcr.dev/userns-base']
+`, version, table, RuntimeType, shim,
+		strings.Replace(table, ".gcr]", ".gcr-migrate]", 1), RuntimeType, shim,
+		strings.Replace(table, ".gcr]", ".gcr-migrate.options]", 1))
 }
 
 // containerdMajor is the major version of the containerd binary (a path,
