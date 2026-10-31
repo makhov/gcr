@@ -8,6 +8,8 @@ set -euxo pipefail
 uname -a
 grep -H . /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/transparent_hugepage/defrag \
 	/proc/sys/vm/unprivileged_userfaultfd 2>/dev/null || true
+grep -m1 "model name" /proc/cpuinfo || true
+nproc
 
 CONTAINERD_VERSION=${CONTAINERD_VERSION:-2.4.2}
 CNI_VERSION=${CNI_VERSION:-v1.9.1}
