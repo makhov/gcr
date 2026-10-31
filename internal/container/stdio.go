@@ -4,17 +4,23 @@ package container
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/fifo"
 )
 
-// stdio connects the container to containerd's fifos through anonymous
+// stdio connects the container to containerd's fifos (or a file, or a
+// logging binary: openStdio) through anonymous
 // pipes. The container only ever sees pipes, which CRIU can checkpoint and
 // re-attach on restore; the fifos stay on the shim side for the container's
 // whole life. Each incarnation of the container's processes (start, restore,
@@ -36,7 +42,11 @@ type stdio struct {
 	copies sync.WaitGroup
 }
 
-func openStdio(ctx context.Context, stdin, stdout, stderr string) (_ *stdio, retErr error) {
+// openStdio opens what containerd asked for: fifos (paths), or, as a URI,
+// a file both streams go to (file://) or a logging binary that reads them
+// (binary://); the container's pipes are copied to either the same way.
+// id is the process's, for the logging binary.
+func openStdio(ctx context.Context, id, stdin, stdout, stderr string) (_ *stdio, retErr error) {
 	s := &stdio{}
 	defer func() {
 		if retErr != nil {
@@ -63,6 +73,36 @@ func openStdio(ctx context.Context, stdin, stdout, stderr string) (_ *stdio, ret
 			w.Close()
 			close(s.stdinCopied)
 		}()
+	}
+
+	u, err := url.Parse(stdout)
+	if err != nil {
+		return nil, fmt.Errorf("stdout %q: %w", stdout, err)
+	}
+	switch u.Scheme {
+	case "", "fifo":
+	case "file":
+		// Both streams to one file, as containerd's runc shim does.
+		if err := os.MkdirAll(filepath.Dir(u.Path), 0o755); err != nil {
+			return nil, err
+		}
+		f, err := os.OpenFile(u.Path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return nil, err
+		}
+		s.closers = append(s.closers, f)
+		s.stdout, s.stderr = f, f
+		return s, nil
+	case "binary", "binary-v2":
+		l, err := startLogger(ctx, id, u)
+		if err != nil {
+			return nil, err
+		}
+		s.closers = append(s.closers, l)
+		s.stdout, s.stderr = l.out, l.err
+		return s, nil
+	default:
+		return nil, fmt.Errorf("stdout %q: unknown scheme %s", stdout, u.Scheme)
 	}
 
 	for _, out := range []struct {
@@ -191,4 +231,94 @@ func (s *stdio) Close() {
 	for _, c := range s.closers {
 		c.Close()
 	}
+}
+
+// logger is a logging binary (binary:// stdio, as nerdctl uses): it reads
+// stdout on fd 3 and stderr on fd 4, and closes fd 5 (binary-v2: writes a
+// byte first) once it is ready, as containerd's runc shim starts it.
+type logger struct {
+	cmd      *exec.Cmd
+	out, err *os.File // the shim's ends
+}
+
+// loggerStopTimeout is how long a logger has to flush after SIGTERM,
+// containerd's runc shim's.
+const loggerStopTimeout = 12 * time.Second
+
+func startLogger(ctx context.Context, id string, u *url.URL) (_ *logger, retErr error) {
+	var args []string
+	for k, vs := range u.Query() {
+		args = append(args, k)
+		if len(vs) > 0 {
+			args = append(args, vs[0])
+		}
+	}
+	ns, _ := namespaces.Namespace(ctx)
+	cmd := exec.Command(u.Path, args...)
+	cmd.Env = []string{"CONTAINER_ID=" + id, "CONTAINER_NAMESPACE=" + ns}
+
+	var files []*os.File
+	defer func() {
+		for _, f := range files {
+			f.Close()
+		}
+	}()
+	pipe := func() (r, w *os.File, err error) {
+		if r, w, err = os.Pipe(); err == nil {
+			files = append(files, r, w)
+		}
+		return r, w, err
+	}
+	outR, outW, err := pipe()
+	if err != nil {
+		return nil, err
+	}
+	errR, errW, err := pipe()
+	if err != nil {
+		return nil, err
+	}
+	readyR, readyW, err := pipe()
+	if err != nil {
+		return nil, err
+	}
+	cmd.ExtraFiles = []*os.File{outR, errR, readyW}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("logging binary %s: %w", u.Path, err)
+	}
+	l := &logger{cmd: cmd, out: outW, err: errW}
+	defer func() {
+		if retErr != nil {
+			l.Close()
+		}
+	}()
+	readyW.Close()
+	b := make([]byte, 1)
+	n, err := readyR.Read(b)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("logging binary %s: %w", u.Path, err)
+	}
+	if u.Scheme == "binary-v2" && n == 0 {
+		return nil, fmt.Errorf("logging binary %s exited before it was ready", u.Path)
+	}
+	files = []*os.File{outR, errR, readyR} // the shim keeps only its write ends
+	return l, nil
+}
+
+// Close ends the streams, then the logger: SIGTERM, and SIGKILL if it has
+// not exited after loggerStopTimeout.
+func (l *logger) Close() error {
+	l.out.Close()
+	l.err.Close()
+	if err := l.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		_ = l.cmd.Process.Kill()
+	}
+	done := make(chan struct{})
+	go func() { _ = l.cmd.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(loggerStopTimeout):
+		_ = l.cmd.Process.Kill()
+		<-done
+	}
+	return nil
 }

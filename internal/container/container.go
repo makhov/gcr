@@ -440,7 +440,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	if spec.Process.Terminal {
 		tty, err = openTTY(ctx, o.Stdin, o.Stdout)
 	} else {
-		io, err = openStdio(ctx, o.Stdin, o.Stdout, o.Stderr)
+		io, err = openStdio(ctx, o.ID, o.Stdin, o.Stdout, o.Stderr)
 	}
 	if err != nil {
 		return nil, err

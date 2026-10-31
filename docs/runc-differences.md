@@ -24,7 +24,9 @@ container asks for them with an annotation.
   across a restore, need [makhov/criu](https://github.com/makhov/criu).
 - **Checkpoint and restore of a container whose process has a
   terminal** are refused: CRIU restores stdio as pipes. The container
-  itself runs with its terminal as on runc.
+  itself runs with its terminal as on runc. Its output also goes only
+  to containerd's fifo: a `file://` or `binary://` log URI (`ctr
+  --log-uri`, nerdctl's log drivers) works for containers without one.
 - **About 6 MiB of memory per pod** for the shim, against about 4 MiB
   for runc's. Start and stop are faster (no binary per operation):
   [the README](../README.md#compared-with-runc) has the numbers.
