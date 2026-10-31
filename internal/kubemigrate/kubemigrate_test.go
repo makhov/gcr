@@ -1,11 +1,14 @@
 package kubemigrate
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func running(mod func(*corev1.Pod)) *corev1.Pod {
@@ -93,5 +96,18 @@ func TestHoldBack(t *testing.T) {
 	}
 	if len(held) != 3 || held["pod-template-hash"] != "abc" || held["tier"] != "web" {
 		t.Errorf("held back %v", held)
+	}
+}
+
+func TestJobImage(t *testing.T) {
+	ctx := context.Background()
+	if img, err := JobImage(ctx, fake.NewClientset(), "gcr-system"); err != nil || img != BareImage {
+		t.Errorf("without the DaemonSet: %q, %v; want %q", img, err, BareImage)
+	}
+	ds := &appsv1.DaemonSet{ObjectMeta: metav1.ObjectMeta{Name: "gcr-installer", Namespace: "gcr-system"},
+		Spec: appsv1.DaemonSetSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "install", Image: "ghcr.io/makhov/gcr:v0.1.2"}}}}}}
+	if img, err := JobImage(ctx, fake.NewClientset(ds), "gcr-system"); err != nil || img != "ghcr.io/makhov/gcr:v0.1.2" {
+		t.Errorf("with the DaemonSet: %q, %v", img, err)
 	}
 }

@@ -48,6 +48,24 @@ type info struct {
 	IDBase uint32 `json:"idBase"`
 }
 
+// BareImage runs the Jobs where gcr was installed without its installer
+// DaemonSet (k0da installs it on its nodes itself): they need nsenter only,
+// and run the node's gcr.
+const BareImage = "busybox:1.37"
+
+// JobImage is the image for Options.Image: that of gcr's installer
+// DaemonSet in namespace, or BareImage if there is none.
+func JobImage(ctx context.Context, cs kubernetes.Interface, namespace string) (string, error) {
+	ds, err := cs.AppsV1().DaemonSets(namespace).Get(ctx, "gcr-installer", metav1.GetOptions{})
+	switch {
+	case apierrors.IsNotFound(err):
+		return BareImage, nil
+	case err != nil:
+		return "", fmt.Errorf("gcr's installer DaemonSet, for its image: %w", err)
+	}
+	return ds.Spec.Template.Spec.Containers[0].Image, nil
+}
+
 // Options say how to migrate.
 type Options struct {
 	// Node is where the pod goes; the scheduler chooses if empty, among
@@ -55,7 +73,7 @@ type Options struct {
 	Node string
 	// Namespace is where the Jobs and Secrets run: gcr's (gcr-system).
 	Namespace string
-	// Image runs the Jobs: gcr's installer image, which has nsenter.
+	// Image runs the Jobs: one with nsenter (JobImage).
 	Image string
 	// GCR is gcr's path on the nodes.
 	GCR string

@@ -59,7 +59,7 @@ func main() {
 	namespace := flag.String("namespace", envOr("POD_NAMESPACE", "gcr-system"), "gcr's namespace: its Service, and the migrations' Jobs")
 	service := flag.String("service", "gcr-operator", "the webhook's Service, which its certificate names")
 	webhook := flag.String("webhook", "gcr-operator", "the ValidatingWebhookConfiguration to give the certificate's CA")
-	image := flag.String("image", "", "the image migrations' Jobs run (default: gcr's installer's)")
+	image := flag.String("image", "", "the image migrations' Jobs run (default: gcr's installer's, or busybox without its DaemonSet)")
 	gcrPath := flag.String("gcr", "/usr/local/bin/gcr", "gcr's path on the nodes")
 	flag.Parse()
 
@@ -75,11 +75,9 @@ func main() {
 	defer stop()
 
 	if *image == "" {
-		ds, err := cs.AppsV1().DaemonSets(*namespace).Get(ctx, "gcr-installer", metav1.GetOptions{})
-		if err != nil {
-			log.Fatalf("gcr's installer DaemonSet, for its image (or pass -image): %v", err)
+		if *image, err = kubemigrate.JobImage(ctx, cs, *namespace); err != nil {
+			log.Fatalf("%v (or pass -image)", err)
 		}
-		*image = ds.Spec.Template.Spec.Containers[0].Image
 	}
 	cert, ca, err := selfSigned(*service + "." + *namespace + ".svc")
 	if err != nil {
