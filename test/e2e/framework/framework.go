@@ -243,21 +243,45 @@ func (c *Container) Remove() {
 				}
 			}
 			c.ns.t.Logf("%s: page reads by image %v; notable lines:\n%s", l, from, strings.Join(notable[:min(len(notable), 60)], "\n"))
-			// What the daemon did with the pages a crash names.
-			out, _ := os.ReadFile(c.logPath())
-			for _, page := range crashPages(string(out)) {
-				var hits []string
-				for _, line := range strings.Split(string(b), "\n") {
-					if strings.Contains(line, page) {
-						hits = append(hits, line)
+			// khugepaged's collapses so far, against a passing run's.
+			if vm, err := os.ReadFile("/proc/vmstat"); err == nil {
+				var thp []string
+				for _, line := range strings.Split(string(vm), "\n") {
+					if strings.HasPrefix(line, "thp_collapse") || strings.HasPrefix(line, "thp_fault") {
+						thp = append(thp, line)
 					}
 				}
-				c.ns.t.Logf("page %s000 in the daemon's log: %d lines\n%s", page, len(hits), strings.Join(hits[:min(len(hits), 12)], "\n"))
-				// The mapping the restore put it in, and whether it left
-				// that page to the daemon.
-				rl, _ := os.ReadFile(filepath.Join(filepath.Dir(l), "restore.log"))
-				addr, _ := strconv.ParseUint(page+"000", 16, 64)
-				c.ns.t.Logf("page %s000 in restore.log:\n%s", page, strings.Join(restoreLines(string(rl), addr), "\n"))
+				c.ns.t.Logf("/proc/vmstat: %s", strings.Join(thp, ", "))
+			}
+			// What the daemon did with the pages a crash names, and with
+			// those it found already there (EEXIST): something other
+			// than the daemon filled them, and the process kept that.
+			out, _ := os.ReadFile(c.logPath())
+			rl, _ := os.ReadFile(filepath.Join(filepath.Dir(l), "restore.log"))
+			for _, pages := range []struct {
+				why   string
+				pages []string
+			}{{"crash", crashPages(string(out))}, {"EEXIST", eexistPages(string(b))}} {
+				for _, page := range pages.pages {
+					var hits, restored []string
+					for _, line := range strings.Split(string(b), "\n") {
+						if strings.Contains(line, page) {
+							hits = append(hits, line)
+						}
+					}
+					for _, line := range strings.Split(string(rl), "\n") {
+						if strings.Contains(line, page) {
+							restored = append(restored, line)
+						}
+					}
+					// The mapping the restore put it in, whether it left
+					// that page to the daemon, and what else it says of it.
+					addr, _ := strconv.ParseUint(page+"000", 16, 64)
+					c.ns.t.Logf("%s page %s000: %d lines in the daemon's log\n%s\nits mapping in restore.log:\n%s\nrestore.log lines naming it (%d):\n%s",
+						pages.why, page, len(hits), strings.Join(hits[:min(len(hits), 12)], "\n"),
+						strings.Join(restoreLines(string(rl), addr), "\n"),
+						len(restored), strings.Join(restored[:min(len(restored), 12)], "\n"))
+				}
 			}
 		}
 	}
@@ -585,6 +609,29 @@ func crashPages(output string) []string {
 		}
 		seen[hex[:len(hex)-3]] = true
 		pages = append(pages, hex[:len(hex)-3])
+	}
+	if len(pages) > 8 {
+		pages = pages[:8]
+	}
+	return pages
+}
+
+// eexistPages are the pages (as crashPages gives them) a lazy-pages
+// daemon's copies found already filled: the address of the "uffd_copy:"
+// line before each "mcopy_rc:-17".
+func eexistPages(log string) []string {
+	seen := map[string]bool{}
+	var pages []string
+	last := ""
+	for _, line := range strings.Split(log, "\n") {
+		if _, a, ok := strings.Cut(line, "uffd_copy: 0x"); ok {
+			last, _, _ = strings.Cut(a, "/")
+			continue
+		}
+		if strings.Contains(line, "mcopy_rc:-17") && len(last) > 3 && !seen[last[:len(last)-3]] {
+			seen[last[:len(last)-3]] = true
+			pages = append(pages, last[:len(last)-3])
+		}
 	}
 	if len(pages) > 8 {
 		pages = pages[:8]
