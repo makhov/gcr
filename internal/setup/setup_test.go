@@ -124,6 +124,7 @@ func TestRegisterContainerdUndo(t *testing.T) {
 func TestRegisterK0s(t *testing.T) {
 	dir := t.TempDir()
 	k0sConfig = filepath.Join(dir, "containerd.toml")
+	k0sContainerd = filepath.Join(dir, "no-containerd")
 	if err := os.WriteFile(k0sConfig, []byte("# k0s_managed=true\nversion = 3\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -206,5 +207,44 @@ func TestDistroDropInDir(t *testing.T) {
 				t.Fatalf("got %q version %d, %v; want %s version %d", dir, version, err, tc.want, tc.version)
 			}
 		})
+	}
+}
+
+// k0s v1.33 and earlier run containerd 1.7, which reads version 2 drop-ins
+// only: a version 3 one registers nothing there.
+func TestRegisterK0sContainerd17(t *testing.T) {
+	dir := t.TempDir()
+	k0sConfig = filepath.Join(dir, "containerd.toml")
+	if err := os.WriteFile(k0sConfig, []byte("# k0s_managed=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	k0sContainerd = filepath.Join(dir, "containerd")
+	fake := "#!/bin/sh\necho containerd github.com/containerd/containerd 1.7.27 05044ec0a9a75232cad458027ca83437aae3f4da\n"
+	if err := os.WriteFile(k0sContainerd, []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registerK0s("/x/shim", quiet); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, filepath.Join(dir, "containerd.d", "gcr.toml")); !strings.Contains(got, "version = 2") ||
+		!strings.Contains(got, `"io.containerd.grpc.v1.cri"`) {
+		t.Fatalf("drop-in for containerd 1.7:\n%s", got)
+	}
+}
+
+func TestContainerdMajor(t *testing.T) {
+	for out, want := range map[string]int{
+		"containerd github.com/containerd/containerd/v2 v2.4.2 b7a25261": 2,
+		"containerd github.com/containerd/containerd v1.7.29 442cb34b":   1,
+		"containerd github.com/containerd/containerd 1.7.27 05044ec0":    1, // k0s's build
+		"garbage": 2,
+	} {
+		bin := filepath.Join(t.TempDir(), "containerd")
+		if err := os.WriteFile(bin, []byte("#!/bin/sh\necho '"+out+"'\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if got := containerdMajor(bin); got != want {
+			t.Errorf("%q: major %d, want %d", out, got, want)
+		}
 	}
 }
