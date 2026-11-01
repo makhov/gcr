@@ -537,13 +537,14 @@ func nodeReady(ctx context.Context, cs kubernetes.Interface, name string) bool {
 func (o *operator) claim(ctx context.Context, ns string, pod *corev1.Pod) (*kubemigrate.Restore, error) {
 	o.claimMu.Lock()
 	defer o.claimMu.Unlock()
-	if r, err := kubemigrate.ClaimRestore(ctx, o.cs, o.opts.Namespace, ns, pod); r != nil || err != nil {
-		return r, err
-	}
 	owner := pod.OwnerReferences[0].UID
 	deadline := time.Now().Add(2 * time.Second)
 	ready := map[string]bool{} // nodes found Ready: nothing to wait for there
 	for {
+		// Each time round: the informer may have recorded one meanwhile.
+		if r, err := kubemigrate.ClaimRestore(ctx, o.cs, o.opts.Namespace, ns, pod); r != nil || err != nil {
+			return r, err
+		}
 		var stopped []*corev1.Pod
 		var nodes []string
 		o.mu.Lock()
@@ -562,7 +563,7 @@ func (o *operator) claim(ctx context.Context, ns string, pod *corev1.Pod) (*kube
 			o.shutdownStopped(p)
 		}
 		if len(stopped) > 0 {
-			return kubemigrate.ClaimRestore(ctx, o.cs, o.opts.Namespace, ns, pod)
+			continue
 		}
 		down := false
 		for _, n := range nodes {

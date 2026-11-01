@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -314,10 +316,15 @@ func TestShutdownRestoreOwned(t *testing.T) {
 	}
 	for _, informerFirst := range []bool{true, false} {
 		cs := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}})
+		var mu sync.Mutex
 		var restored []*kubemigrate.Restore
 		o := &operator{cs: cs, opts: kubemigrate.Options{Namespace: "gcr-system"}, registry: kubemigrate.RegistryOptions{Repository: "reg/x"},
 			ownedRestores: true, moving: map[string]bool{}, restoring: map[types.UID]*kubemigrate.Restore{}, last: map[string]lastPod{},
-			owned: map[types.UID]map[types.UID]lastPod{}, startRestore: func(_ *corev1.Pod, rs *kubemigrate.Restore) { restored = append(restored, rs) }}
+			owned: map[types.UID]map[types.UID]lastPod{}, startRestore: func(_ *corev1.Pod, rs *kubemigrate.Restore) {
+				mu.Lock()
+				restored = append(restored, rs)
+				mu.Unlock()
+			}}
 		if informerFirst {
 			o.seen(stopped, false)
 		} else {
@@ -327,9 +334,12 @@ func TestShutdownRestoreOwned(t *testing.T) {
 			go func() { time.Sleep(300 * time.Millisecond); o.seen(stopped, false) }()
 		}
 		resp := o.steer(ctx, created())
-		if resp.Patch == nil || len(restored) != 1 || !strings.Contains(string(resp.Patch), restored[0].Token) ||
-			!strings.Contains(string(resp.Patch), restored[0].ID) {
-			t.Fatalf("informer first %v: patch %s, restores %v", informerFirst, resp.Patch, restored)
+		mu.Lock()
+		got := slices.Clone(restored)
+		mu.Unlock()
+		if resp.Patch == nil || len(got) != 1 || !strings.Contains(string(resp.Patch), got[0].Token) ||
+			!strings.Contains(string(resp.Patch), got[0].ID) {
+			t.Fatalf("informer first %v: patch %s, restores %v", informerFirst, resp.Patch, got)
 		}
 		if resp := o.steer(ctx, created()); resp.Patch != nil {
 			t.Fatalf("informer first %v: a second new pod claimed the restore too: %s", informerFirst, resp.Patch)
