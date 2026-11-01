@@ -9,6 +9,7 @@ uname -a
 grep -H . /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/transparent_hugepage/defrag \
 	/proc/sys/vm/unprivileged_userfaultfd 2>/dev/null || true
 grep -m1 "model name" /proc/cpuinfo || true
+grep -H . /sys/kernel/mm/transparent_hugepage/hugepages-*/enabled /sys/kernel/mm/transparent_hugepage/use_zero_page 2>/dev/null || true
 nproc
 
 CONTAINERD_VERSION=${CONTAINERD_VERSION:-2.4.2}

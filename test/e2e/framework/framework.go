@@ -253,6 +253,25 @@ func (c *Container) Remove() {
 					}
 				}
 				c.ns.t.Logf("restore.log, lazy-diag (%d lines):\n%s", len(diag), strings.Join(diag[:min(len(diag), 60)], "\n"))
+				// Everything criu did between the premap check and the
+				// restorer's first remap: lazy pages turned resident there.
+				var window []string
+				in := false
+				for _, line := range strings.Split(string(rl), "\n") {
+					if strings.Contains(line, "lazy pages resident in the premap") {
+						in = true
+					}
+					if in {
+						window = append(window, line)
+					}
+					if in && strings.Contains(line, "pie:") && strings.Contains(line, "Remap") {
+						break
+					}
+				}
+				if len(window) > 250 {
+					window = append(window[:120], append([]string{"..."}, window[len(window)-120:]...)...)
+				}
+				c.ns.t.Logf("restore.log from the premap check to the first remap (%d lines):\n%s", len(window), strings.Join(window, "\n"))
 			}
 			// khugepaged's collapses so far, against a passing run's.
 			if vm, err := os.ReadFile("/proc/vmstat"); err == nil {
@@ -299,6 +318,13 @@ func (c *Container) Remove() {
 	if c.ns.t.Failed() {
 		if b, err := os.ReadFile(c.logPath()); err == nil && len(b) > 0 {
 			lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+			// A crash's first lines say what killed it; its last, where.
+			for i, line := range lines {
+				if strings.HasPrefix(line, "fatal error") || strings.HasPrefix(line, "panic") || strings.HasPrefix(line, "unexpected fault") || strings.HasPrefix(line, "SIGSEGV") {
+					c.ns.t.Logf("output of %s (%s), from line %d:\n%s", c.ID, c.ns.Name, i+1, strings.Join(lines[i:min(len(lines), i+25)], "\n"))
+					break
+				}
+			}
 			c.ns.t.Logf("output of %s (%s), last lines:\n%s", c.ID, c.ns.Name, strings.Join(lines[max(0, len(lines)-30):], "\n"))
 		}
 	}
