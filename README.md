@@ -60,7 +60,7 @@ through Docker, with a small Python helper and nothing else.
 - **Kubernetes migrations.** gcr-operator turns evictions (`kubectl
   drain`, the autoscaler) into live migrations, and moves StatefulSets'
   pods, and pods on nodes that shut down, through checkpoints in a
-  registry. [Live migration](docs/migration.md#draining-nodes-gcr-operator)
+  registry. [gcr-operator](docs/operator.md)
 
 Not yet: the NVIDIA ioctl proxy, restoring onto another GPU index,
 SELinux labels for supervised mounts.
@@ -96,13 +96,19 @@ executing a runc binary per operation. gcr's shim is the bigger binary
   [makhov/criu](https://github.com/makhov/criu) for time travel and for
   Landlock across restores
 
-[Getting started](docs/getting-started.md) installs it and runs a first
-fork.
+[Installation](docs/install.md) sets it up on a host or a Kubernetes
+cluster, and [Getting started](docs/getting-started.md) runs a first fork.
 
 ## Documentation
 
-- [Getting started](docs/getting-started.md): install, and run with
-  `ctr`, Kubernetes or CRI-O
+Also as a site: [makhov.github.io/gcr](https://makhov.github.io/gcr/).
+
+- [Installation](docs/install.md): one host, a Kubernetes cluster, the
+  kubectl plugin, gcr-operator
+- [Getting started](docs/getting-started.md): run with `ctr`, Docker,
+  Kubernetes or CRI-O, and a first fork
+- Using gcr: [Docker](docs/docker.md), [Kubernetes](docs/kubernetes.md),
+  [gcr-operator](docs/operator.md)
 - [What gcr is good for, and where it falls short](docs/tradeoffs.md)
 - [Differences from runc](docs/runc-differences.md): what will not work
   as on runc, and how to turn each protection off

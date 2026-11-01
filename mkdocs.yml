@@ -70,9 +70,13 @@ nav:
   - Home: index.md
   - Start here:
       - Getting started: getting-started.md
-      - Docker: docker.md
+      - Installation: install.md
       - What gcr is good for: tradeoffs.md
       - Differences from runc: runc-differences.md
+  - Using gcr:
+      - Docker: docker.md
+      - Kubernetes: kubernetes.md
+      - gcr-operator: operator.md
   - Features:
       - Fork: fork.md
       - Moving snapshots between hosts: snapshot-registry.md

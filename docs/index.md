@@ -19,6 +19,7 @@ ctr run -d --runtime io.containerd.gcr.v2 \
 ```
 
 [Get started](getting-started.md){ .md-button .md-button--primary }
+[Install](install.md){ .md-button }
 [GitHub](https://github.com/makhov/gcr){ .md-button }
 
 ## What you can do with it
@@ -63,7 +64,7 @@ ctr run -d --runtime io.containerd.gcr.v2 \
     not grow with its memory. In Kubernetes, drains and node shutdowns
     move pods instead of restarting them.
 
-    [:octicons-arrow-right-24: Live migration](migration.md)
+    [:octicons-arrow-right-24: gcr-operator](operator.md)
 
 </div>
 
@@ -103,4 +104,5 @@ ctr run -d --runtime io.containerd.gcr.v2 \
   [makhov/criu](https://github.com/makhov/criu) for time travel and for
   Landlock across restores
 
-[Getting started](getting-started.md) installs it and runs a first fork.
+[Installation](install.md) sets it up on a host or a cluster, and
+[Getting started](getting-started.md) runs a first fork.

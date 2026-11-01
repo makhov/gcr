@@ -4,14 +4,22 @@ Also as a site: [makhov.github.io/gcr](https://makhov.github.io/gcr/).
 
 **Start here**
 
-- [Getting started](getting-started.md): requirements, install, running
-  containers with `ctr`, Docker, Kubernetes (containerd) and CRI-O, a
-  first fork
-- [Docker](docker.md): `docker run --runtime gcr`, and snapshots, forks
-  and time travel on Docker's containers
+- [Getting started](getting-started.md): running containers with `ctr`,
+  Docker, Kubernetes (containerd) and CRI-O, a first fork
+- [Installation](install.md): one host, a Kubernetes cluster, the kubectl
+  plugin, gcr-operator, upgrades and uninstalling
 - [What gcr is good for, and where it falls short](tradeoffs.md)
 - [Differences from runc](runc-differences.md): what will not work as on
   runc, what is on by default, and a runc-compatible handler
+
+**Using gcr**
+
+- [Docker](docker.md): `docker run --runtime gcr`, and snapshots, forks
+  and time travel on Docker's containers
+- [Kubernetes](kubernetes.md): pods on gcr, their annotations, time travel
+  and snapshots of pods, moving a pod
+- [gcr-operator](operator.md): pods that move instead of restarting when
+  nodes are drained or shut down
 
 **Features**
 
