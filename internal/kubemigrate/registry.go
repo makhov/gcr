@@ -2,6 +2,8 @@ package kubemigrate
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -68,6 +70,28 @@ type Restore struct {
 	Node   string    `json:"node"`
 	IDBase uint32    `json:"idBase,omitempty"`
 	Since  time.Time `json:"since"`
+	// An owned restore is a ReplicaSet's or a Job's pod's, which its
+	// controller replaces with a pod by another name: recorded by its
+	// token, it is for a new pod of Owner (its UID), of the same Index for
+	// an Indexed Job's. The pod that claims it (Claimed, when) is labelled
+	// LabelRestore=ID.
+	Owner   string    `json:"owner,omitempty"`
+	Index   string    `json:"index,omitempty"`
+	ID      string    `json:"id,omitempty"`
+	Claimed time.Time `json:"claimed,omitzero"`
+}
+
+// LabelRestore labels the pod that claimed an owned restore: its ID.
+const LabelRestore = "gcr.dev/restore"
+
+// annotationJobIndex is an Indexed Job's pod's completion index.
+const annotationJobIndex = "batch.kubernetes.io/job-completion-index"
+
+// OwnedRestore says whether a pod stopped at its node's shutdown is
+// restored in the pod its controller replaces it with, by another name: a
+// ReplicaSet's (a Deployment's) or a Job's.
+func OwnedRestore(p *corev1.Pod) bool {
+	return ownedBy(p, "ReplicaSet") || ownedBy(p, "Job")
 }
 
 // MovableThroughRegistry says whether MigrateViaRegistry can move the pod,
@@ -78,14 +102,20 @@ func MovableThroughRegistry(p *corev1.Pod) (string, error) {
 	if p.Status.Phase != corev1.PodRunning {
 		return "", fmt.Errorf("not running (%s)", p.Status.Phase)
 	}
-	return MovableAtShutdown(p)
+	return movableThroughRegistry(p, ownedBy(p, "StatefulSet"))
 }
 
 // MovableAtShutdown says whether RestoreAfterShutdown can restore the pod,
 // checkpointed as its node shut down: as MovableThroughRegistry, whether
 // or not it is still running.
 func MovableAtShutdown(p *corev1.Pod) (string, error) {
-	if len(p.OwnerReferences) > 0 && !ownedBy(p, "StatefulSet") {
+	return movableThroughRegistry(p, ownedBy(p, "StatefulSet") || OwnedRestore(p))
+}
+
+// movableThroughRegistry is MovableThroughRegistry's check, but the phase,
+// for a pod with no owner, or one owned is true for.
+func movableThroughRegistry(p *corev1.Pod, owned bool) (string, error) {
+	if len(p.OwnerReferences) > 0 && !owned {
 		return "", fmt.Errorf("owned by %s %s: through a registry, only pods without an owner, or a StatefulSet's, can be moved yet",
 			p.OwnerReferences[0].Kind, p.OwnerReferences[0].Name)
 	}
@@ -459,7 +489,8 @@ func PendingRestore(ctx context.Context, cs kubernetes.Interface, gcrNS, ns, nam
 }
 
 // Steer returns the JSON patch that makes pod, created again by its
-// StatefulSet, restore as r says: on gcr-migrate, from r's checkpoint
+// StatefulSet (or, for an owned restore, by its ReplicaSet or Job), restore
+// as r says: on gcr-migrate, from r's checkpoint
 // once it is pulled to the pod's node, in the user namespace the pod ran
 // in, and with r's token, which lets the StatefulSet controller create it.
 func Steer(pod *corev1.Pod, r Restore) ([]byte, error) {
@@ -477,10 +508,21 @@ func Steer(pod *corev1.Pod, r Restore) ([]byte, error) {
 	} else {
 		ann[annotationHostUsers] = "true"
 	}
-	return json.Marshal([]map[string]any{
+	ops := []map[string]any{
 		{"op": "add", "path": "/metadata/annotations", "value": ann},
 		{"op": "add", "path": "/spec/runtimeClassName", "value": RuntimeClass},
-	})
+	}
+	if r.ID != "" {
+		// An owned restore's pod has a name only once created: the
+		// operator finds it by this.
+		labels := maps.Clone(pod.Labels)
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		labels[LabelRestore] = r.ID
+		ops = append(ops, map[string]any{"op": "add", "path": "/metadata/labels", "value": labels})
+	}
+	return json.Marshal(ops)
 }
 
 // RestoreAfterShutdown restores pod src, which its node's shutdown stopped
@@ -510,7 +552,7 @@ func RestoreAfterShutdown(ctx context.Context, cs kubernetes.Interface, src *cor
 	begin := time.Now()
 	var err error
 
-	if !ownedBy(src, "StatefulSet") {
+	if len(src.OwnerReferences) == 0 {
 		dst := targetPod(src, "", "", "", info{})
 		delete(dst.Annotations, annotationMigrateIn)
 		delete(dst.Annotations, annotationMigrateToken)
@@ -549,9 +591,16 @@ func RestoreAfterShutdown(ctx context.Context, cs kubernetes.Interface, src *cor
 		if rs, err = ShutdownRestore(src, r); err != nil {
 			return res, err
 		}
-		if err := RecordRestore(ctx, cs, o.Namespace, ns, name, *rs); err != nil {
-			return res, fmt.Errorf("record the restore: %w", err)
+		record := RecordRestore(ctx, cs, o.Namespace, ns, name, *rs)
+		if OwnedRestore(src) {
+			record = RecordOwnedRestore(ctx, cs, o.Namespace, ns, *rs)
 		}
+		if record != nil {
+			return res, fmt.Errorf("record the restore: %w", record)
+		}
+	}
+	if OwnedRestore(src) {
+		return restoreOwned(ctx, cs, src, *rs, o, r, begin)
 	}
 	token := rs.Token
 	defer func() {
@@ -584,16 +633,132 @@ func RestoreAfterShutdown(ctx context.Context, cs kubernetes.Interface, src *cor
 	return res, nil
 }
 
-// ShutdownRestore is the pending restore of a StatefulSet's pod src, which
-// its node's shutdown checkpointed, to record before its StatefulSet
-// creates it again.
+// restoreOwned restores a ReplicaSet's or a Job's pod src in the pod its
+// controller replaces it with, which claims owned restore rs as it is
+// created (ClaimRestore), and is labelled with its ID.
+func restoreOwned(ctx context.Context, cs kubernetes.Interface, src *corev1.Pod, rs Restore, o Options, r RegistryOptions, begin time.Time) (res Result, retErr error) {
+	ns, log := src.Namespace, o.Log
+	defer func() {
+		if err := ForgetOwnedRestore(context.WithoutCancel(ctx), cs, o.Namespace, ns, rs); err != nil {
+			log("forgetting the restore: %v", err)
+		}
+	}()
+	log("waiting for its %s to replace it, to restore from %s", src.OwnerReferences[0].Kind, rs.Ref)
+	var dst *corev1.Pod
+	sel := metav1.ListOptions{LabelSelector: LabelRestore + "=" + rs.ID}
+	err := wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, pushWait+o.Timeout, true, func(ctx context.Context) (bool, error) {
+		pods, err := cs.CoreV1().Pods(ns).List(ctx, sel)
+		if err != nil || len(pods.Items) == 0 {
+			return false, nil
+		}
+		dst = &pods.Items[0]
+		return dst.Status.HostIP != "", nil
+	})
+	if err != nil {
+		if dst == nil {
+			return res, fmt.Errorf("no pod of %s %s claimed its restore: its replacement started cold", src.OwnerReferences[0].Kind, src.OwnerReferences[0].Name)
+		}
+		return res, fmt.Errorf("%s, which claimed its restore, was not scheduled: %w", dst.Name, err)
+	}
+	res.Target, res.Node = dst.Name, dst.Spec.NodeName
+	cold := func(err error) error {
+		uid := dst.UID
+		_ = cs.CoreV1().Pods(ns).Delete(context.WithoutCancel(ctx), dst.Name, metav1.DeleteOptions{
+			GracePeriodSeconds: new(int64), Preconditions: &metav1.Preconditions{UID: &uid}})
+		return fmt.Errorf("%w (deleted %s, for its %s to start another, cold)", err, dst.Name, src.OwnerReferences[0].Kind)
+	}
+	if err := pullWhenPushed(ctx, cs, o, r, res.Node, rs.Ref, rs.Dir); err != nil {
+		return res, cold(err)
+	}
+	if err := waitReady(ctx, cs, ns, dst.Name, o.Timeout); err != nil {
+		return res, cold(fmt.Errorf("%s restored from %s, but it is not Ready: %w", dst.Name, rs.Ref, err))
+	}
+	res.Downtime = time.Since(begin).Round(time.Millisecond).String() + " (from the shutdown seen to Ready)"
+	return res, nil
+}
+
+// ShutdownRestore is the pending restore of pod src, which its node's
+// shutdown checkpointed, to record before its controller replaces it: a
+// StatefulSet's, or an owned restore, a ReplicaSet's or a Job's.
 func ShutdownRestore(src *corev1.Pod, r RegistryOptions) (*Restore, error) {
 	token, err := randomToken()
 	if err != nil {
 		return nil, err
 	}
-	return &Restore{Token: token, Dir: path.Join(checkpointDir, string(src.UID)), Ref: r.Repository + ":" + string(src.UID),
-		UID: string(src.UID), Node: src.Spec.NodeName, Since: time.Now().UTC()}, nil
+	rs := &Restore{Token: token, Dir: path.Join(checkpointDir, string(src.UID)), Ref: r.Repository + ":" + string(src.UID),
+		UID: string(src.UID), Node: src.Spec.NodeName, Since: time.Now().UTC()}
+	if OwnedRestore(src) {
+		id := make([]byte, 8)
+		if _, err := rand.Read(id); err != nil {
+			return nil, err
+		}
+		rs.Owner, rs.Index, rs.ID = string(src.OwnerReferences[0].UID), src.Annotations[annotationJobIndex], hex.EncodeToString(id)
+	}
+	return rs, nil
+}
+
+// RecordOwnedRestore records owned restore r of a pod in namespace ns: by
+// its token, "NAMESPACE.TOKEN", which the admission policy finds it by in
+// the pod that claims it.
+func RecordOwnedRestore(ctx context.Context, cs kubernetes.Interface, gcrNS, ns string, r Restore) error {
+	return RecordRestore(ctx, cs, gcrNS, ns, r.Token, r)
+}
+
+// ForgetOwnedRestore removes owned restore r.
+func ForgetOwnedRestore(ctx context.Context, cs kubernetes.Interface, gcrNS, ns string, r Restore) error {
+	return ForgetRestore(ctx, cs, gcrNS, ns, r.Token)
+}
+
+// ClaimRestore claims, for pod, being created in namespace ns by its
+// ReplicaSet or Job, an owned restore of its owner nobody claimed yet: of
+// the same completion index, for an Indexed Job's. nil if there is none.
+// The claim is recorded with the restore, so that a restore goes to one
+// pod only, even across the operator's restarts.
+func ClaimRestore(ctx context.Context, cs kubernetes.Interface, gcrNS, ns string, pod *corev1.Pod) (*Restore, error) {
+	if len(pod.OwnerReferences) != 1 {
+		return nil, nil
+	}
+	owner, index := string(pod.OwnerReferences[0].UID), pod.Annotations[annotationJobIndex]
+	for range 5 {
+		cm, err := cs.CoreV1().ConfigMaps(gcrNS).Get(ctx, RestoresConfigMap, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		} else if err != nil {
+			return nil, err
+		}
+		var key string
+		var best *Restore
+		for k, v := range cm.Data {
+			if !strings.HasPrefix(k, ns+".") {
+				continue
+			}
+			var r Restore
+			if json.Unmarshal([]byte(v), &r) != nil || r.Owner != owner || r.Index != index || !r.Claimed.IsZero() ||
+				time.Since(r.Since) > RestoreTTL || restoreKey(ns, r.Token) != k {
+				continue
+			}
+			if best == nil || r.Since.Before(best.Since) {
+				key, best = k, &r
+			}
+		}
+		if best == nil {
+			return nil, nil
+		}
+		best.Claimed = time.Now().UTC()
+		v, err := json.Marshal(best)
+		if err != nil {
+			return nil, err
+		}
+		cm.Data[key] = string(v)
+		// On its version: a restore claimed meanwhile is not claimed twice.
+		if _, err := cs.CoreV1().ConfigMaps(gcrNS).Update(ctx, cm, metav1.UpdateOptions{}); apierrors.IsConflict(err) {
+			continue
+		} else if err != nil {
+			return nil, err
+		}
+		return best, nil
+	}
+	return nil, fmt.Errorf("claiming a restore for a pod of %s: the pending restores kept changing", pod.OwnerReferences[0].Name)
 }
 
 // StoppedByShutdown says whether the kubelet stopped pod p for a graceful

@@ -101,13 +101,19 @@ func main() {
 	}
 
 	op := &operator{cs: cs, opts: kubemigrate.Options{Namespace: *namespace, Image: *image, GCR: *gcrPath}, moving: map[string]bool{}, replaced: map[string]time.Time{}, restoring: map[types.UID]*kubemigrate.Restore{}, last: map[string]lastPod{},
-		self: metav1.ObjectMeta{Namespace: *namespace, Name: os.Getenv("POD_NAME")}, node: os.Getenv("NODE_NAME")}
+		owned: map[types.UID]map[types.UID]lastPod{},
+		self:  metav1.ObjectMeta{Namespace: *namespace, Name: os.Getenv("POD_NAME")}, node: os.Getenv("NODE_NAME")}
 	if *registry != "" {
-		if err := restoresReady(ctx, cs, *webhook); err != nil {
+		if owned, err := restoresReady(ctx, cs, *webhook); err != nil {
 			log.Printf("StatefulSets' pods are evicted, not moved: %v", err)
 		} else {
 			op.registry = kubemigrate.RegistryOptions{Repository: *registry, PlainHTTP: *plainHTTP}
+			op.ownedRestores = owned
 			log.Printf("StatefulSets' pods move through %s, and pods on nodes shutting down are restored from it", *registry)
+			if !owned {
+				log.Printf("Deployments' and Jobs' pods on nodes shutting down start cold: admission policy %s is older than this operator; apply gcr.yaml (or the chart) again",
+					kubemigrate.RuntimeClass)
+			}
 			go op.watchShutdowns(ctx)
 		}
 	}
@@ -150,10 +156,16 @@ type operator struct {
 	restoring  map[types.UID]*kubemigrate.Restore
 	shutdownMu sync.Mutex
 	// last is the last the informer saw of StatefulSets' opted-in pods,
-	// by namespace/name.
-	last     map[string]lastPod
-	stopping bool // on its way out: it starts no migration
-	moves    sync.WaitGroup
+	// by namespace/name; owned, of ReplicaSets' and Jobs', by their
+	// owner's UID and theirs.
+	last  map[string]lastPod
+	owned map[types.UID]map[types.UID]lastPod
+	// ownedRestores: the admission policy lets ReplicaSets and Jobs
+	// restore their pods. claimMu serializes claiming those restores.
+	ownedRestores bool
+	claimMu       sync.Mutex
+	stopping      bool // on its way out: it starts no migration
+	moves         sync.WaitGroup
 	// start moves a pod in the background: move, but for tests; and
 	// startRestore restores one: restore.
 	start        func(*corev1.Pod)
@@ -389,6 +401,25 @@ func (o *operator) seen(obj any, deleted bool) {
 		}
 		o.mu.Unlock()
 	}
+	if kubemigrate.OwnedRestore(p) {
+		owner := p.OwnerReferences[0].UID
+		o.mu.Lock()
+		if o.owned[owner] == nil {
+			o.owned[owner] = map[types.UID]lastPod{}
+		}
+		o.owned[owner][p.UID] = lastPod{p, deleted, time.Now()}
+		for owner, pods := range o.owned {
+			for uid, l := range pods {
+				if l.gone && time.Since(l.at) > kubemigrate.RestoreTTL {
+					delete(pods, uid)
+				}
+			}
+			if len(pods) == 0 {
+				delete(o.owned, owner)
+			}
+		}
+		o.mu.Unlock()
+	}
 	if !deleted && kubemigrate.StoppedByShutdown(p) {
 		o.shutdownStopped(p)
 	}
@@ -414,23 +445,36 @@ func (o *operator) shutdownStopped(p *corev1.Pod) *kubemigrate.Restore {
 	if started || stopping {
 		return rs
 	}
+	owned := kubemigrate.OwnedRestore(p)
+	refuse := func(why string) *kubemigrate.Restore {
+		log.Printf("%s: its node %s shut down, and %s", key, p.Spec.NodeName, why)
+		o.mu.Lock()
+		o.restoring[p.UID] = nil // said once
+		o.mu.Unlock()
+		return nil
+	}
 	if _, err := kubemigrate.MovableAtShutdown(p); err != nil {
-		log.Printf("%s: its node %s shut down, and it cannot be restored elsewhere: %v", key, p.Spec.NodeName, err)
-	} else if o.throughRegistry(p) {
+		return refuse("it cannot be restored elsewhere: " + err.Error())
+	}
+	if owned && !o.ownedRestores {
+		return refuse("its replacement starts cold: the admission policy is older than this operator")
+	}
+	if o.throughRegistry(p) || owned {
+		var err error
 		if rs, err = kubemigrate.ShutdownRestore(p, o.registry); err == nil {
-			err = kubemigrate.RecordRestore(context.Background(), o.cs, o.opts.Namespace, p.Namespace, p.Name, *rs)
+			if owned {
+				err = kubemigrate.RecordOwnedRestore(context.Background(), o.cs, o.opts.Namespace, p.Namespace, *rs)
+			} else {
+				err = kubemigrate.RecordRestore(context.Background(), o.cs, o.opts.Namespace, p.Namespace, p.Name, *rs)
+			}
 		}
 		if err != nil {
-			log.Printf("%s: its node %s shut down, and its restore could not be recorded: %v", key, p.Spec.NodeName, err)
-			rs = nil
+			return refuse("its restore could not be recorded: " + err.Error())
 		}
 	}
 	o.mu.Lock()
 	o.restoring[p.UID] = rs
 	o.mu.Unlock()
-	if rs == nil && o.throughRegistry(p) {
-		return nil
-	}
 	o.moves.Add(1)
 	if o.startRestore != nil {
 		o.startRestore(p, rs)
@@ -483,6 +527,57 @@ func nodeReady(ctx context.Context, cs kubernetes.Interface, name string) bool {
 		}
 	}
 	return false
+}
+
+// claim claims an owned restore for pod, which its ReplicaSet or Job is
+// creating in namespace ns: one of its owner's pods stopped at its node's
+// shutdown. The controller may replace a stopped pod before the informer
+// has said it stopped: the owner's pods on nodes that are not Ready get
+// 2 s to show up as stopped.
+func (o *operator) claim(ctx context.Context, ns string, pod *corev1.Pod) (*kubemigrate.Restore, error) {
+	o.claimMu.Lock()
+	defer o.claimMu.Unlock()
+	owner := pod.OwnerReferences[0].UID
+	deadline := time.Now().Add(2 * time.Second)
+	ready := map[string]bool{} // nodes found Ready: nothing to wait for there
+	for {
+		// Each time round: the informer may have recorded one meanwhile.
+		if r, err := kubemigrate.ClaimRestore(ctx, o.cs, o.opts.Namespace, ns, pod); r != nil || err != nil {
+			return r, err
+		}
+		var stopped []*corev1.Pod
+		var nodes []string
+		o.mu.Lock()
+		for uid, l := range o.owned[owner] {
+			if _, started := o.restoring[uid]; started || l.gone {
+				continue
+			}
+			if kubemigrate.StoppedByShutdown(l.pod) {
+				stopped = append(stopped, l.pod)
+			} else if n := l.pod.Spec.NodeName; n != "" && !ready[n] {
+				nodes = append(nodes, n)
+			}
+		}
+		o.mu.Unlock()
+		for _, p := range stopped {
+			o.shutdownStopped(p)
+		}
+		if len(stopped) > 0 {
+			continue
+		}
+		down := false
+		for _, n := range nodes {
+			if nodeReady(ctx, o.cs, n) {
+				ready[n] = true
+			} else {
+				down = true
+			}
+		}
+		if !down || time.Now().After(deadline) {
+			return nil, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // restore restores pod, which its node's shutdown checkpointed.
@@ -550,46 +645,64 @@ func (o *operator) recreated(ctx context.Context, pod *corev1.Pod) bool {
 func (o *operator) steer(ctx context.Context, req *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse {
 	allow := &admissionv1.AdmissionResponse{Allowed: true}
 	var pod corev1.Pod
-	if o.registry.Repository == "" || json.Unmarshal(req.Object.Raw, &pod) != nil || !o.throughRegistry(&pod) || pod.Name == "" {
+	if o.registry.Repository == "" || json.Unmarshal(req.Object.Raw, &pod) != nil {
 		return allow
 	}
-	r, err := kubemigrate.PendingRestore(ctx, o.cs, o.opts.Namespace, req.Namespace, pod.Name)
+	// A StatefulSet's pod has its name already; a ReplicaSet's or a Job's
+	// is named after this, from its generateName.
+	name := pod.Name
+	if name == "" {
+		name = pod.GenerateName + "…"
+	}
+	var r *kubemigrate.Restore
+	var err error
+	switch {
+	case o.throughRegistry(&pod) && pod.Name != "":
+		if r, err = kubemigrate.PendingRestore(ctx, o.cs, o.opts.Namespace, req.Namespace, pod.Name); err == nil && r == nil {
+			r = o.lateRestore(ctx, req.Namespace, pod.Name)
+		}
+	case kubemigrate.OwnedRestore(&pod) && o.ownedRestores:
+		r, err = o.claim(ctx, req.Namespace, &pod)
+	}
 	if err != nil {
-		log.Printf("%s/%s: %v: it starts cold", req.Namespace, pod.Name, err)
+		log.Printf("%s/%s: %v: it starts cold", req.Namespace, name, err)
 		return allow
-	}
-	if r == nil {
-		r = o.lateRestore(ctx, req.Namespace, pod.Name)
 	}
 	if r == nil {
 		return allow
 	}
 	patch, err := kubemigrate.Steer(&pod, *r)
 	if err != nil {
-		log.Printf("%s/%s: %v: it starts cold", req.Namespace, pod.Name, err)
+		log.Printf("%s/%s: %v: it starts cold", req.Namespace, name, err)
 		return allow
 	}
-	log.Printf("%s/%s: created again, to restore from %s", req.Namespace, pod.Name, r.Ref)
+	log.Printf("%s/%s: created, to restore from %s", req.Namespace, name, r.Ref)
 	pt := admissionv1.PatchTypeJSONPatch
 	return &admissionv1.AdmissionResponse{Allowed: true, Patch: patch, PatchType: &pt}
 }
 
 // restoresReady checks that the cluster lets StatefulSets' pods restore:
 // the gcr-migrate admission policy reads the pending restores, and the
-// webhook that steers pods is there.
-func restoresReady(ctx context.Context, cs kubernetes.Interface, webhook string) error {
+// webhook that steers pods is there. owned says whether the policy lets
+// ReplicaSets' and Jobs' pods restore too.
+func restoresReady(ctx context.Context, cs kubernetes.Interface, webhook string) (owned bool, err error) {
 	p, err := cs.AdmissionregistrationV1().ValidatingAdmissionPolicies().Get(ctx, kubemigrate.RuntimeClass, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("admission policy %s: %w", kubemigrate.RuntimeClass, err)
+		return false, fmt.Errorf("admission policy %s: %w", kubemigrate.RuntimeClass, err)
 	}
 	if p.Spec.ParamKind == nil || p.Spec.ParamKind.Kind != "ConfigMap" {
-		return fmt.Errorf("admission policy %s reads no pending restores (%s): it is older than this operator; apply gcr.yaml again",
+		return false, fmt.Errorf("admission policy %s reads no pending restores (%s): it is older than this operator; apply gcr.yaml again",
 			kubemigrate.RuntimeClass, kubemigrate.RestoresConfigMap)
 	}
 	if _, err := cs.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(ctx, webhook, metav1.GetOptions{}); err != nil {
-		return fmt.Errorf("mutating webhook %s: %w", webhook, err)
+		return false, fmt.Errorf("mutating webhook %s: %w", webhook, err)
 	}
-	return nil
+	// A policy that lets ReplicaSets and Jobs restore their pods names
+	// their controllers.
+	for _, v := range p.Spec.Validations {
+		owned = owned || strings.Contains(v.Expression, "replicaset-controller")
+	}
+	return owned, nil
 }
 
 // parseMigrating reads a "migrating TIME by OPERATOR-POD" state; the

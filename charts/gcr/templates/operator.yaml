@@ -85,7 +85,7 @@ rules:
   - apiGroups: [""]
     resources: [configmaps]
     resourceNames: [gcr-restores]
-    verbs: [get, patch]
+    verbs: [get, patch, update]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -212,8 +212,8 @@ webhooks:
         operations: [CREATE]
         resources: [pods/eviction]
 ---
-# Steers a pod a StatefulSet creates again, in place of one the operator
-# checkpointed, to restore from the checkpoint. The operator puts its CA
+# Steers a pod a StatefulSet, a ReplicaSet or a Job creates in place of one
+# the operator checkpointed to restore from the checkpoint. The operator puts its CA
 # into clientConfig.caBundle when it starts.
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
@@ -236,13 +236,13 @@ webhooks:
         apiVersions: [v1]
         operations: [CREATE]
         resources: [pods]
-    # Only StatefulSets' pods that opt in.
+    # Only their pods that opt in.
     matchConditions:
-      - name: statefulset-opted-in
+      - name: controlled-opted-in
         expression: >-
           has(object.metadata.annotations) &&
           'gcr.dev/migrate-on-evict' in object.metadata.annotations &&
           object.metadata.annotations['gcr.dev/migrate-on-evict'] == 'true' &&
           has(object.metadata.ownerReferences) &&
-          object.metadata.ownerReferences.exists(r, r.kind == 'StatefulSet')
+          object.metadata.ownerReferences.exists(r, r.kind in ['StatefulSet', 'ReplicaSet', 'Job'])
 {{- end }}

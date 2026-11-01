@@ -105,8 +105,8 @@ What then happens to each kind of pod:
 
 | Pod | When evicted (drain, autoscaler) | When its node shuts down |
 | --- | --- | --- |
-| A Deployment's (ReplicaSet's) | moved live, handed over to the ReplicaSet | starts cold elsewhere (not yet restored) |
-| A Job's | moved live, handed over to the Job; the run carries on | starts cold elsewhere (not yet restored) |
+| A Deployment's (ReplicaSet's) | moved live, handed over to the ReplicaSet | restored in a pod the ReplicaSet creates, with a registry |
+| A Job's | moved live, handed over to the Job; the run carries on | restored in a pod the Job creates (of the same index), with a registry |
 | A bare pod | moved live | restored from its checkpoint, with a registry |
 | A StatefulSet's | moved through the registry, with one; evicted without | restored from its checkpoint, with a registry |
 | Others (DaemonSets) | evicted | stopped |
@@ -215,11 +215,18 @@ admits no new pods meanwhile. So the checkpoints are taken on the node:
 `gcr shutdown-guard` holds the shutdown, the shim checkpoints each
 opted-in container as the kubelet stops it, and the guard pushes the
 checkpoints to the registry. The operator then restores the pods on
-another node: a StatefulSet's in the pod the StatefulSet creates again,
-a bare pod in a replacement it creates.
+another node:
+- **a Deployment's, a Job's or a StatefulSet's:** in the pod its controller
+  creates in its place;
+- **a bare pod:** in a replacement the operator creates.
 
-On two k0s VMs, both kinds of pod carried on counting on the other node
-3.3 to 4.6 s after `systemctl poweroff`, with no restarts.
+On two k0s VMs, `systemctl poweroff` of a node, with every pod there
+carrying on counting on the other node, with no restarts:
+- a StatefulSet's pod and a bare pod: 3.3 to 4.6 s after the shutdown;
+- a Deployment's two pods: 4.8 and 6.5 s;
+- an Indexed Job's two pods, each in the new pod of its index: 24 s, of
+  which 20 s is the Job controller waiting before it replaces a failed
+  pod.
 
 ### Setting it up
 
@@ -278,8 +285,19 @@ The operator needs a [registry](#with-a-registry). Then, on each node:
 shutdown (`journalctl -b -1` after the reboot): each checkpoint pushed,
 or why not.
 
-Deployments' and Jobs' pods aren't restored after a node shutdown yet:
-their replacements start cold, as without gcr.
+**Jobs** count a pod stopped by its node's shutdown as failed, towards
+`backoffLimit`, unless they ignore disruptions, as for
+[drains](#deployments-and-jobs):
+
+```yaml
+spec:
+  podFailurePolicy:
+    rules:
+      - action: Ignore
+        onPodConditions: [{type: DisruptionTarget}]
+```
+
+An Indexed Job's pod is restored in the new pod of the same index.
 
 ## Watching it
 
