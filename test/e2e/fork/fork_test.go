@@ -66,6 +66,7 @@ func withLazyRestore(t *testing.T) {
 // touched must be in its snapshot too, which the second fork checks as it
 // reads its pattern back from pages all over the chunk.
 func TestSnapshotOfLazyFork(t *testing.T) {
+	framework.SkipLazyRestoreOnX86(t)
 	withLazyRestore(t)
 	const mib = "256"
 	ns := framework.NewNamespace(t, "gcr-e2e")
@@ -133,6 +134,7 @@ func residentMiB(t *testing.T, pid int) int {
 // before its memory is loaded. The checks are the parent's, since a fork
 // that cannot read a page is a fork that cannot count.
 func TestForkLazy(t *testing.T) {
+	framework.SkipLazyRestoreOnX86(t)
 	withLazyRestore(t)
 	testFork(t, true)
 }
@@ -166,6 +168,7 @@ func TestForkLatency(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			annotations := map[string]string{container.AnnotationForkFrom: dir}
 			if lazy {
+				framework.SkipLazyRestoreOnX86(t)
 				annotations[container.AnnotationLazyRestore] = "true"
 			}
 			c := ns.Create(framework.UniqueID("fork-"+name), framework.Spec{

@@ -88,6 +88,15 @@ fork (containerd's, not snapshots) hold no reference.
 
 ## Lazy restore
 
+> **Unreliable on x86 for now** ([#83](https://github.com/makhov/gcr/issues/83)).
+> On some x86 hosts a lazy restore occasionally gives the restored process
+> pages that were filled before the lazy-pages daemon could fill them, so it
+> runs on wrong memory and usually crashes soon after. It shows up on
+> GitHub's x86 runners (Linux 7.0) a few times in a hundred lazy restores. It
+> hasn't shown up on arm64, or in hundreds of runs on an x86 host with
+> Linux 7.2, but until the cause is found, use eager forks for anything that
+> matters on x86.
+
 A restore or fork loads the snapshot's memory before the container runs,
 which costs the time to read it. With `gcr.dev/lazy-restore=true` the
 container runs as soon as its processes are in place, and a
