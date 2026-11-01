@@ -34,6 +34,7 @@ import (
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -88,7 +89,7 @@ func main() {
 	}
 
 	op := &operator{cs: cs, opts: kubemigrate.Options{Namespace: *namespace, Image: *image, GCR: *gcrPath}, moving: map[string]bool{},
-		self: metav1.ObjectMeta{Namespace: *namespace, Name: os.Getenv("POD_NAME")}}
+		self: metav1.ObjectMeta{Namespace: *namespace, Name: os.Getenv("POD_NAME")}, node: os.Getenv("NODE_NAME")}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /evict", op.evict)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -96,6 +97,11 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
+		// Draining its own node: the migrations it started finish first,
+		// or the pods are left marked as moving, with nobody moving them.
+		// It starts none meanwhile; the evictions it turns away are tried
+		// again and reach the operator that replaces it.
+		op.stop(shutdownWait)
 		_ = srv.Shutdown(context.Background())
 	}()
 	log.Printf("serving evictions on %s; migrations' Jobs run %s", *listen, *image)
@@ -108,12 +114,37 @@ type operator struct {
 	cs   kubernetes.Interface
 	opts kubemigrate.Options
 
-	mu     sync.Mutex
-	moving map[string]bool // namespace/name of pods being moved
+	mu       sync.Mutex
+	moving   map[string]bool // namespace/name of pods being moved
+	stopping bool            // on its way out: it starts no migration
+	moves    sync.WaitGroup
 	// start moves a pod in the background: move, but for tests.
 	start func(*corev1.Pod)
-	// self is the operator's own pod.
+	// self is the operator's own pod, on node.
 	self metav1.ObjectMeta
+	node string
+}
+
+// shutdownWait bounds how long a stopping operator waits for its
+// migrations (the Deployment's terminationGracePeriodSeconds is longer).
+const shutdownWait = 100 * time.Second
+
+// stop starts no more migrations, and waits up to wait for those running.
+func (o *operator) stop(wait time.Duration) {
+	o.mu.Lock()
+	o.stopping = true
+	n := len(o.moving)
+	o.mu.Unlock()
+	if n > 0 {
+		log.Printf("stopping: waiting for %d migrations", n)
+	}
+	done := make(chan struct{})
+	go func() { o.moves.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(wait):
+		log.Printf("stopping with migrations still running")
+	}
 }
 
 // evict answers an eviction's admission review.
@@ -146,6 +177,12 @@ func (o *operator) decide(ctx context.Context, req *admissionv1.AdmissionRequest
 		if n > 0 {
 			return tooMany(&corev1.Pod{ObjectMeta: o.self}, fmt.Sprintf("is moving %d pods to other nodes", n))
 		}
+		// The drain evicts them all at once: gone first, it would leave
+		// their evictions to a replacement not up yet, and the webhook
+		// lets an eviction through when it cannot be reached.
+		if n := o.waitingOnNode(ctx); n > 0 {
+			return tooMany(&corev1.Pod{ObjectMeta: o.self}, fmt.Sprintf("waits for %d pods on its node to move first", n))
+		}
 		return allow
 	}
 	pod, err := o.cs.CoreV1().Pods(req.Namespace).Get(ctx, req.Name, metav1.GetOptions{})
@@ -161,12 +198,25 @@ func (o *operator) decide(ctx context.Context, req *admissionv1.AdmissionRequest
 		o.mu.Lock()
 		ours := o.moving[key]
 		o.mu.Unlock()
-		since, _ := time.Parse(time.RFC3339, strings.TrimPrefix(state, "migrating "))
-		if !ours && time.Since(since) > staleAfter {
+		since, by := parseMigrating(state)
+		switch {
+		case ours:
+			return tooMany(pod, "is moving to another node")
+		case time.Since(since) > staleAfter:
 			o.mark(ctx, pod, "failed: the operator that was moving it went away")
 			return allow
+		case by == "" || by == o.self.Name || !o.gone(ctx, by):
+			return tooMany(pod, "is moving to another node")
 		}
-		return tooMany(pod, "is moving to another node")
+		// Its operator is gone (evicted with the pods it was moving):
+		// this one moves it.
+		log.Printf("%s: operator %s, which was moving it, is gone: moving it", key, by)
+	}
+	o.mu.Lock()
+	stopping := o.stopping
+	o.mu.Unlock()
+	if stopping {
+		return tooMany(pod, "waits for the operator, which is restarting")
 	}
 	if _, err := kubemigrate.Movable(pod); err != nil {
 		o.mark(ctx, pod, "failed: "+err.Error())
@@ -179,10 +229,12 @@ func (o *operator) decide(ctx context.Context, req *admissionv1.AdmissionRequest
 		return tooMany(pod, "is moving to another node")
 	}
 	o.moving[key] = true
+	o.moves.Add(1)
 	o.mu.Unlock()
-	o.mark(ctx, pod, "migrating "+time.Now().UTC().Format(time.RFC3339))
+	o.mark(ctx, pod, "migrating "+time.Now().UTC().Format(time.RFC3339)+" by "+o.self.Name)
 	if o.start != nil {
 		o.start(pod)
+		o.moves.Done()
 	} else {
 		go o.move(pod)
 	}
@@ -197,6 +249,7 @@ func (o *operator) move(pod *corev1.Pod) {
 		o.mu.Lock()
 		delete(o.moving, key)
 		o.mu.Unlock()
+		o.moves.Done()
 	}()
 	ctx := context.Background()
 	opts := o.opts
@@ -208,6 +261,50 @@ func (o *operator) move(pod *corev1.Pod) {
 		return
 	}
 	log.Printf("%s moved to %s as %s (downtime %s)", key, res.Node, res.Target, res.Downtime)
+}
+
+// waitingOnNode counts the pods on the operator's own node that would
+// move when evicted and have not yet: opted in, running, movable, and not
+// failed to move.
+func (o *operator) waitingOnNode(ctx context.Context) int {
+	if o.node == "" {
+		return 0
+	}
+	pods, err := o.cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{FieldSelector: "spec.nodeName=" + o.node})
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if p.Annotations[annotationOptIn] != "true" || p.DeletionTimestamp != nil ||
+			strings.HasPrefix(p.Annotations[annotationState], "failed") {
+			continue
+		}
+		if _, err := kubemigrate.Movable(p); err == nil {
+			n++
+		}
+	}
+	return n
+}
+
+// parseMigrating reads a "migrating TIME by OPERATOR-POD" state; the
+// operator is "" in states older operators wrote.
+func parseMigrating(state string) (since time.Time, by string) {
+	rest := strings.TrimPrefix(state, "migrating ")
+	ts, by, _ := strings.Cut(rest, " by ")
+	since, _ = time.Parse(time.RFC3339, ts)
+	return since, by
+}
+
+// gone says whether operator pod name is no more: deleted, or finished. One
+// on its way out still finishes what it moves.
+func (o *operator) gone(ctx context.Context, name string) bool {
+	p, err := o.cs.CoreV1().Pods(o.self.Namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return true
+	}
+	return err == nil && (p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed)
 }
 
 func (o *operator) mark(ctx context.Context, pod *corev1.Pod, state string) {

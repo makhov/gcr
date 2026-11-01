@@ -2,6 +2,8 @@ package kubemigrate
 
 import (
 	"context"
+	"fmt"
+	"k8s.io/apimachinery/pkg/types"
 	"reflect"
 	"strings"
 	"testing"
@@ -38,7 +40,10 @@ func TestMovable(t *testing.T) {
 		}), ""},
 		"a Job's": {running(func(p *corev1.Pod) {
 			p.OwnerReferences = []metav1.OwnerReference{{Kind: "Job", Name: "j", Controller: &yes}}
-		}), "owned by Job"},
+		}), ""},
+		"a StatefulSet's": {running(func(p *corev1.Pod) {
+			p.OwnerReferences = []metav1.OwnerReference{{Kind: "StatefulSet", Name: "s", Controller: &yes}}
+		}), "owned by StatefulSet"},
 		"two containers": {running(func(p *corev1.Pod) { p.Spec.Containers = append(p.Spec.Containers, corev1.Container{Name: "d"}) }), "2 containers"},
 		"hostUsers":      {running(func(p *corev1.Pod) { p.Spec.HostUsers = &f }), "hostUsers: false"},
 		"emptyDir": {running(func(p *corev1.Pod) {
@@ -132,11 +137,15 @@ func TestTargetPodChain(t *testing.T) {
 	p := src
 	for i, node := range []string{"n1", "n2", "n3"} {
 		p.Spec.NodeName = node
+		p.UID = types.UID(fmt.Sprint("uid-", i))
 		dst := targetPod(p, "", "a", "t", info{})
 		exprs := dst.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[0].MatchExpressions
 		want := []corev1.NodeSelectorRequirement{own, {Key: "kubernetes.io/hostname", Operator: corev1.NodeSelectorOpNotIn, Values: []string{node}}}
 		if !reflect.DeepEqual(exprs, want) {
 			t.Errorf("move %d, from %s: affinity %+v, want %+v", i+1, node, exprs, want)
+		}
+		if dst.Labels[labelTargetOf] != string(p.UID) || dst.Labels["app"] != "x" {
+			t.Errorf("move %d: labels %v, want %s=%s and the source's", i+1, dst.Labels, labelTargetOf, p.UID)
 		}
 		if dst.Annotations[annotationMigratedFrom] != node {
 			t.Errorf("move %d: %s = %q, want %s", i+1, annotationMigratedFrom, dst.Annotations[annotationMigratedFrom], node)
