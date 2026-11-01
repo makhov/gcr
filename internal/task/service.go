@@ -96,6 +96,7 @@ type extras struct {
 	supervisor *supervisor.Supervisor // if the filter hands calls to user space
 	receiver   *migrate.Receiver      // incoming migration, if requested
 	arrived    string                 // migrate.ArrivedKey of the container a migration comes into
+	key        string                 // migrate.ArrivedKey of this container, "" if not a pod's
 	migrateTLS migrate.TLS            // the handler's MigrationTLS
 	userns     *userns.Range          // the container's user namespace range
 	control    *control.Server
@@ -323,8 +324,14 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		}
 		// gcr's user namespace or one Kubernetes asked for.
 		prep.CgroupOwner = userns.DelegateCgroup(spec)
+		ex.key = migrate.ArrivedKey(spec.Annotations)
+		if migrate.Departed(ex.key) {
+			// Its processes run on another node now; the kubelet
+			// restarts it in the pod that lingers here until deleted.
+			return prep, fmt.Errorf("this pod's container migrated to another node and does not start here again: %w", errdefs.ErrFailedPrecondition)
+		}
 		addr, ok := spec.Annotations[migrate.AnnotationIn]
-		if key := migrate.ArrivedKey(spec.Annotations); ok && migrate.Arrived(key) {
+		if key := ex.key; ok && migrate.Arrived(key) {
 			// A container that restarts in a pod a migration came into
 			// (the pod keeps the annotation): it starts as a new one.
 			log.G(ctx).Info("a migration came into this pod's container before: starting it anew")
@@ -901,6 +908,9 @@ func (s *service) migrateOut(ctx context.Context, c *container.Container, ex *ex
 	if err == nil {
 		// Kept on failure: it holds the CRIU logs.
 		_ = os.RemoveAll(work)
+		if merr := migrate.MarkDeparted(ex.key); merr != nil {
+			log.G(ctx).WithError(merr).Warn("recording the migration out: the kubelet could restart the container here")
+		}
 	}
 	return res, err
 }
