@@ -168,7 +168,7 @@ func (n *Namespace) Create(id string, s Spec) *Container {
 // test, so it can run in another goroutine (an incoming migration's task
 // starts only once the checkpoint arrives).
 func (c *Container) Start() error {
-	task, err := c.C.NewTask(c.ns.Ctx, cio.NullIO)
+	task, err := c.C.NewTask(c.ns.Ctx, c.output())
 	if err != nil {
 		return fmt.Errorf("task %s: %w", c.ID, err)
 	}
@@ -213,9 +213,131 @@ func (n *Namespace) Output(id string, s Spec) (string, int) {
 	return out.String(), int(st.ExitCode())
 }
 
-// Remove kills and deletes the container, if it is still there.
+// Remove kills and deletes the container, if it is still there. After a
+// failed test it first logs what the container's processes are doing.
 func (c *Container) Remove() {
 	ctx := c.ns.Ctx
+	if c.Task != nil && c.ns.t.Failed() {
+		c.diagnose()
+	}
+	if c.ns.t.Failed() {
+		// A lazy restore's daemon log: what it copied and zero-filled.
+		logs, _ := filepath.Glob(filepath.Join("/run/containerd/io.containerd.runtime.v2.task", c.ns.Name, c.ID, "criu-restore-*", "lazy-pages.log"))
+		for _, l := range logs {
+			b, _ := os.ReadFile(l)
+			var notable []string
+			from := map[string]int{}
+			for _, line := range strings.Split(string(b), "\n") {
+				switch {
+				case strings.Contains(line, "Read page from"):
+					// "from self", "from parent": which image of a chain.
+					f := strings.Fields(line[strings.Index(line, "Read page from")+len("Read page from"):])
+					if len(f) > 0 {
+						from[f[0]]++
+					}
+				case strings.Contains(line, "transferred"), strings.Contains(line, "zero page"),
+					strings.Contains(line, "REMOVE"), strings.Contains(line, "UNMAP"), strings.Contains(line, "REMAP"),
+					strings.Contains(line, "FORK"), strings.Contains(line, "Error"), strings.Contains(line, "Warn"),
+					strings.Contains(line, "pages to be handled"), strings.Contains(line, "mcopy_rc"):
+					notable = append(notable, line)
+				}
+			}
+			c.ns.t.Logf("%s: page reads by image %v; notable lines:\n%s", l, from, strings.Join(notable[:min(len(notable), 60)], "\n"))
+			// The diagnostic CRIU's counts (makhov/criu lazy-diag): lazy
+			// pages resident before the restorer, and around each remap.
+			if rl, err := os.ReadFile(filepath.Join(filepath.Dir(l), "restore.log")); err == nil {
+				var diag []string
+				for _, line := range strings.Split(string(rl), "\n") {
+					if strings.Contains(line, "lazy-diag") {
+						diag = append(diag, line)
+					}
+				}
+				c.ns.t.Logf("restore.log, lazy-diag (%d lines):\n%s", len(diag), strings.Join(diag[:min(len(diag), 60)], "\n"))
+				// The guard's catch: a write into a lazy page during the
+				// content restore, with its backtrace, or a read that hit
+				// one (EFAULT).
+				lines := strings.Split(string(rl), "\n")
+				for i, line := range lines {
+					if strings.Contains(line, "lazy-diag: SIGSEGV") || strings.Contains(line, "Bad address") {
+						c.ns.t.Logf("restore.log at line %d:\n%s", i+1, strings.Join(lines[max(0, i-15):min(len(lines), i+35)], "\n"))
+						break
+					}
+				}
+				// Everything criu did between the premap check and the
+				// restorer's first remap: lazy pages turned resident there.
+				var window []string
+				in := false
+				for _, line := range strings.Split(string(rl), "\n") {
+					if strings.Contains(line, "lazy pages resident in the premap") {
+						in = true
+					}
+					if in {
+						window = append(window, line)
+					}
+					if in && strings.Contains(line, "pie:") && strings.Contains(line, "Remap") {
+						break
+					}
+				}
+				if len(window) > 250 {
+					window = append(window[:120], append([]string{"..."}, window[len(window)-120:]...)...)
+				}
+				c.ns.t.Logf("restore.log from the premap check to the first remap (%d lines):\n%s", len(window), strings.Join(window, "\n"))
+			}
+			// khugepaged's collapses so far, against a passing run's.
+			if vm, err := os.ReadFile("/proc/vmstat"); err == nil {
+				var thp []string
+				for _, line := range strings.Split(string(vm), "\n") {
+					if strings.HasPrefix(line, "thp_collapse") || strings.HasPrefix(line, "thp_fault") {
+						thp = append(thp, line)
+					}
+				}
+				c.ns.t.Logf("/proc/vmstat: %s", strings.Join(thp, ", "))
+			}
+			// What the daemon did with the pages a crash names, and with
+			// those it found already there (EEXIST): something other
+			// than the daemon filled them, and the process kept that.
+			out, _ := os.ReadFile(c.logPath())
+			rl, _ := os.ReadFile(filepath.Join(filepath.Dir(l), "restore.log"))
+			for _, pages := range []struct {
+				why   string
+				pages []string
+			}{{"crash", crashPages(string(out))}, {"EEXIST", eexistPages(string(b))}} {
+				for _, page := range pages.pages {
+					var hits, restored []string
+					for _, line := range strings.Split(string(b), "\n") {
+						if strings.Contains(line, page) {
+							hits = append(hits, line)
+						}
+					}
+					for _, line := range strings.Split(string(rl), "\n") {
+						if strings.Contains(line, page) {
+							restored = append(restored, line)
+						}
+					}
+					// The mapping the restore put it in, whether it left
+					// that page to the daemon, and what else it says of it.
+					addr, _ := strconv.ParseUint(page+"000", 16, 64)
+					c.ns.t.Logf("%s page %s000: %d lines in the daemon's log\n%s\nits mapping in restore.log:\n%s\nrestore.log lines naming it (%d):\n%s",
+						pages.why, page, len(hits), strings.Join(hits[:min(len(hits), 12)], "\n"),
+						strings.Join(restoreLines(string(rl), addr), "\n"),
+						len(restored), strings.Join(restored[:min(len(restored), 12)], "\n"))
+				}
+			}
+		}
+	}
+	if c.ns.t.Failed() {
+		if b, err := os.ReadFile(c.logPath()); err == nil && len(b) > 0 {
+			lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+			// A crash's first lines say what killed it; its last, where.
+			for i, line := range lines {
+				if strings.HasPrefix(line, "fatal error") || strings.HasPrefix(line, "panic") || strings.HasPrefix(line, "unexpected fault") || strings.HasPrefix(line, "SIGSEGV") {
+					c.ns.t.Logf("output of %s (%s), from line %d:\n%s", c.ID, c.ns.Name, i+1, strings.Join(lines[i:min(len(lines), i+25)], "\n"))
+					break
+				}
+			}
+			c.ns.t.Logf("output of %s (%s), last lines:\n%s", c.ID, c.ns.Name, strings.Join(lines[max(0, len(lines)-30):], "\n"))
+		}
+	}
 	if c.Task != nil {
 		_ = c.Task.Kill(ctx, syscall.SIGKILL)
 		if exit, err := c.Task.Wait(ctx); err == nil {
@@ -350,7 +472,7 @@ func (c *Container) CheckpointRestore() {
 		t.Fatalf("restore %s: %v", c.ID, err)
 	}
 	c.C = restored
-	task, err := restored.NewTask(ctx, cio.NullIO, containerd.WithTaskCheckpoint(img))
+	task, err := restored.NewTask(ctx, c.output(), containerd.WithTaskCheckpoint(img))
 	if err != nil {
 		t.Fatalf("restore task %s: %v", c.ID, err)
 	}
@@ -456,4 +578,168 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+// output sends the container's stdout and stderr to a file, which a
+// failed test shows: what a process that crashed said.
+func (c *Container) output() cio.Creator {
+	_ = os.MkdirAll(filepath.Dir(c.logPath()), 0o755)
+	f, err := os.OpenFile(c.logPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return cio.NullIO
+	}
+	c.ns.t.Cleanup(func() { f.Close() })
+	return cio.NewCreator(cio.WithStreams(nil, f, f))
+}
+
+func (c *Container) logPath() string {
+	return filepath.Join(os.TempDir(), "gcr-e2e-output", c.ns.Name+"-"+c.ID+".log")
+}
+
+// diagnose logs, for each process in the container's cgroup, each
+// thread's state, what it waits in, and its kernel stack, and whether the
+// cgroup is frozen: what a container that stopped making progress is
+// stuck on.
+func (c *Container) diagnose() {
+	t := c.ns.t
+	// Not Task.Pid: that is the pid when the task was created, and a
+	// container restored at start (a migration's target) has another.
+	if st, err := c.Task.Status(c.ns.Ctx); err == nil {
+		t.Logf("diagnose %s: task %s, exit status %d", c.ID, st.Status, st.ExitStatus)
+	}
+	pids, err := c.Task.Pids(c.ns.Ctx)
+	if err != nil || len(pids) == 0 {
+		t.Logf("diagnose %s: no processes (%v)", c.ID, err)
+		return
+	}
+	cg, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pids[0].Pid))
+	if err != nil {
+		t.Logf("diagnose %s: %v", c.ID, err)
+		return
+	}
+	dir := filepath.Join("/sys/fs/cgroup", strings.TrimPrefix(strings.TrimSpace(string(cg)), "0::"))
+	events, _ := os.ReadFile(filepath.Join(dir, "cgroup.events"))
+	t.Logf("diagnose %s: cgroup %s: %s", c.ID, dir, strings.Join(strings.Fields(string(events)), " "))
+	procs, _ := os.ReadFile(filepath.Join(dir, "cgroup.procs"))
+	for _, p := range strings.Fields(string(procs)) {
+		tids, _ := os.ReadDir(filepath.Join("/proc", p, "task"))
+		for _, tid := range tids {
+			base := filepath.Join("/proc", p, "task", tid.Name())
+			stat, _ := os.ReadFile(filepath.Join(base, "stat"))
+			state := "?"
+			if i := strings.LastIndexByte(string(stat), ')'); i > 0 && i+2 < len(stat) {
+				state = string(stat[i+2])
+			}
+			wchan, _ := os.ReadFile(filepath.Join(base, "wchan"))
+			stack, _ := os.ReadFile(filepath.Join(base, "stack"))
+			lines := strings.Split(strings.TrimSpace(string(stack)), "\n")
+			if len(lines) > 8 {
+				lines = lines[:8]
+			}
+			t.Logf("diagnose %s: pid %s tid %s state %s wchan %s stack: %s", c.ID, p, tid.Name(), state, wchan, strings.Join(lines, " <- "))
+		}
+	}
+}
+
+// crashPages are the pages (as hex without the last three digits, as
+// CRIU logs addresses) of the addresses a Go crash names: its arguments,
+// frame and stack pointers.
+func crashPages(output string) []string {
+	seen := map[string]bool{}
+	var pages []string
+	for _, f := range strings.FieldsFunc(output, func(r rune) bool {
+		return !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r == 'x')
+	}) {
+		hex, ok := strings.CutPrefix(f, "0x")
+		if !ok || len(hex) < 9 || seen[hex[:len(hex)-3]] {
+			continue
+		}
+		seen[hex[:len(hex)-3]] = true
+		pages = append(pages, hex[:len(hex)-3])
+	}
+	if len(pages) > 8 {
+		pages = pages[:8]
+	}
+	return pages
+}
+
+// eexistPages are the pages (as crashPages gives them) a lazy-pages
+// daemon's copies found already filled: the address of the "uffd_copy:"
+// line before each "mcopy_rc:-17".
+func eexistPages(log string) []string {
+	seen := map[string]bool{}
+	var pages []string
+	last := ""
+	for _, line := range strings.Split(log, "\n") {
+		if _, a, ok := strings.Cut(line, "uffd_copy: 0x"); ok {
+			last, _, _ = strings.Cut(a, "/")
+			continue
+		}
+		if strings.Contains(line, "mcopy_rc:-17") && len(last) > 3 && !seen[last[:len(last)-3]] {
+			seen[last[:len(last)-3]] = true
+			pages = append(pages, last[:len(last)-3])
+		}
+	}
+	if len(pages) > 8 {
+		pages = pages[:8]
+	}
+	return pages
+}
+
+// restoreLines are the lines of a CRIU restore log whose range covers
+// addr: the mapping that holds it ("vma S E", "premap S-E -> P"), the
+// reads that filled pages there ("Read A N pages", from any image of a
+// chain) and the pages it left to the lazy-pages daemon ("Lazy restore
+// skips N pages at A"). A read covering a page it left lazy is a page
+// filled twice.
+func restoreLines(log string, addr uint64) []string {
+	hex := func(f string) (uint64, bool) {
+		n, err := strconv.ParseUint(strings.TrimPrefix(f, "0x"), 16, 64)
+		return n, err == nil
+	}
+	covers := func(start, n uint64) bool { return addr >= start && addr < start+n }
+	var out []string
+	for _, line := range strings.Split(log, "\n") {
+		// "(00.036577)      1: ...": drop the timestamp.
+		body := line
+		if i := strings.Index(line, ") "); strings.HasPrefix(line, "(") && i > 0 {
+			body = line[i+2:]
+		}
+		f := strings.Fields(body)
+		for i := range f {
+			switch {
+			case f[i] == "vma" && i+2 < len(f):
+				a, ok1 := hex(f[i+1])
+				b, ok2 := hex(f[i+2])
+				if ok1 && ok2 && covers(a, b-a) {
+					out = append(out, line)
+				}
+			case f[i] == "premap" && i+1 < len(f):
+				r := strings.SplitN(f[i+1], "-", 2)
+				if len(r) == 2 {
+					a, ok1 := hex(r[0])
+					b, ok2 := hex(r[1])
+					if ok1 && ok2 && covers(a, b-a) {
+						out = append(out, line)
+					}
+				}
+			case f[i] == "Read" && i+3 < len(f) && f[i+3] == "pages":
+				a, ok1 := hex(f[i+1])
+				n, err := strconv.ParseUint(f[i+2], 10, 64)
+				if ok1 && err == nil && covers(a, n*4096) {
+					out = append(out, line)
+				}
+			case f[i] == "skips" && i+4 < len(f) && f[i+3] == "at":
+				n, err := strconv.ParseUint(f[i+1], 10, 64)
+				a, ok := hex(f[i+4])
+				if ok && err == nil && covers(a, n*4096) {
+					out = append(out, line)
+				}
+			}
+		}
+	}
+	if len(out) > 16 {
+		out = out[:16]
+	}
+	return out
 }

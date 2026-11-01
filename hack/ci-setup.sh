@@ -4,6 +4,14 @@
 # fork with --seccomp-notify-socket. Run as root.
 set -euxo pipefail
 
+# What CRIU's restores depend on, for reading a failed run.
+uname -a
+grep -H . /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/transparent_hugepage/defrag \
+	/proc/sys/vm/unprivileged_userfaultfd 2>/dev/null || true
+grep -m1 "model name" /proc/cpuinfo || true
+grep -H . /sys/kernel/mm/transparent_hugepage/hugepages-*/enabled /sys/kernel/mm/transparent_hugepage/use_zero_page 2>/dev/null || true
+nproc
+
 CONTAINERD_VERSION=${CONTAINERD_VERSION:-2.4.2}
 CNI_VERSION=${CNI_VERSION:-v1.9.1}
 CRI_TOOLS_VERSION=${CRI_TOOLS_VERSION:-v1.37.0}

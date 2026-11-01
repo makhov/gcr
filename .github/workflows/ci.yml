@@ -49,9 +49,12 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
-      - run: sudo CONTAINERD_VERSION=${{ matrix.containerd }} ./hack/ci-setup.sh
+      # gcr#60: a CRIU that says which lazy pages were resident too early.
+      - run: sudo CONTAINERD_VERSION=${{ matrix.containerd }} CRIU_REF=lazy-diag ./hack/ci-setup.sh
       - run: make build && sudo make install
-      - run: sudo systemctl restart containerd
+      # Every lazy-pages daemon logs each page it handles, for a failed
+      # lazy restore to show.
+      - run: sudo systemctl set-environment GCR_LAZY_PAGES_DEBUG=1 && sudo systemctl restart containerd
       - name: end-to-end tests
         run: make test-e2e
       - name: CRI conformance (critest)
