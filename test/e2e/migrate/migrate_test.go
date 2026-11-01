@@ -292,7 +292,7 @@ func TestMigrateOpenConnectionAndLock(t *testing.T) {
 		sleep 0.5
 		(while :; do echo x; sleep 1; done) | nc 127.0.0.1 9000 &
 		flock /tmp/lock -c "sleep 100000" &
-		i=0; while :; do i=$((i+1)); echo $i > /tmp/count; sleep 0.1; done`}
+		i=0; while :; do i=$((i+1)); echo $i > /tmp/count.new && mv /tmp/count.new /tmp/count; sleep 0.1; done`}
 	id := framework.UniqueID("mig-tcp")
 	token := fmt.Sprintf("secret-%d", time.Now().UnixNano())
 	hostUsers := map[string]string{userns.AnnotationHostUsers: "true"}
