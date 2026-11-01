@@ -359,6 +359,11 @@ func Pull(ctx context.Context, source oras.ReadOnlyTarget, ref, dir, store strin
 	if entries, err := os.ReadDir(dir); err == nil && len(entries) > 0 {
 		return pulled, fmt.Errorf("%s is not empty: %w", dir, errdefs.ErrAlreadyExists)
 	}
+	// Snapshots hold memory, secrets and all: their directories are
+	// root's alone, the one they go in too if it is new.
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		return pulled, err
+	}
 	manifestDesc, err := source.Resolve(ctx, ref)
 	if err != nil {
 		return pulled, err

@@ -41,6 +41,9 @@ import (
 )
 
 func main() {
+	// gcr's CRIU, and the GNU tar setup installs beside it where the
+	// node's is busybox's, which snapshot-push and -pull run too.
+	setup.UseOwnCRIU()
 	ns := flag.String("n", "default", "containerd namespace")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: gcr setup [-docker] [-no-restart] [-bin-dir DIR] [-containerd-config FILE] [-containerd-unit UNIT]\n"+

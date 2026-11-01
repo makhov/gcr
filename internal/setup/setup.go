@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/makhov/gcr/internal/payload"
+	"github.com/makhov/gcr/internal/snapshot/registry"
 )
 
 const (
@@ -32,6 +33,9 @@ var (
 	// any other criu on the node (UseOwnCRIU).
 	CRIUDir   = filepath.Join(DataDir, "bin")
 	PluginDir = filepath.Join(DataDir, "lib", "criu")
+	// CheckpointDir holds the checkpoints pods are moved by through a
+	// registry (kubectl gcr migrate -registry), pulled there to restore.
+	CheckpointDir = filepath.Join(DataDir, "checkpoints")
 )
 
 // UseOwnCRIU makes the criu gcr setup installed the one this process and
@@ -233,17 +237,19 @@ version = %d
   pod_annotations = ['gcr.dev/*']
 
 # The same runtime for the targets of migrations between nodes (kubectl gcr
-# migrate): its pods may make the shim listen for one. gcr.yaml's
-# admission policy lets only cluster admins and gcr's operator use it.
+# migrate): its pods may make the shim listen for one, or restore from a
+# checkpoint pulled to the node. gcr.yaml's admission policy lets only
+# cluster admins and gcr's operator use it.
 %s
   runtime_type = '%s'
   runtime_path = '%s'
   pod_annotations = ['gcr.dev/*']
 %s
-  PodAnnotations = ['gcr.dev/migrate-in', 'gcr.dev/migrate-token', 'gcr.dev/userns-base']
+  PodAnnotations = ['gcr.dev/migrate-in', 'gcr.dev/migrate-token', 'gcr.dev/userns-base', 'gcr.dev/fork-from', 'gcr.dev/fork-wait']
+  SnapshotRoots = ['%s', '%s']
 `, version, table, RuntimeType, shim,
 		strings.Replace(table, ".gcr]", ".gcr-migrate]", 1), RuntimeType, shim,
-		strings.Replace(table, ".gcr]", ".gcr-migrate.options]", 1))
+		strings.Replace(table, ".gcr]", ".gcr-migrate.options]", 1), CheckpointDir, registry.DefaultStore)
 }
 
 // containerdMajor is the major version of the containerd binary (a path,

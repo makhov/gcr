@@ -34,6 +34,8 @@ func main() {
 	gcrPath := fs.String("gcr", "/usr/local/bin/gcr", "gcr's path on the nodes")
 	timeout := fs.Duration("timeout", 5*time.Minute, "how long each step may take")
 	kubeconfig := fs.String("kubeconfig", "", "kubeconfig file (default: $KUBECONFIG, ~/.kube/config)")
+	registryRepo := fs.String("registry", "", "move it through a checkpoint in this registry repository (host[:port]/path), which the nodes reach, rather than node to node: seconds of downtime, but nothing needed from the source once pushed")
+	plainHTTP := fs.Bool("plain-http", false, "talk to -registry without TLS")
 	_ = fs.Parse(os.Args[2:])
 	if fs.NArg() != 1 {
 		fs.Usage()
@@ -65,10 +67,16 @@ func main() {
 			fail(fmt.Errorf("%w (or pass -image)", err))
 		}
 	}
-	res, err := kubemigrate.Migrate(ctx, cs, *ns, name, kubemigrate.Options{
+	o := kubemigrate.Options{
 		Node: *to, Namespace: *system, Image: *image, GCR: *gcrPath, Timeout: *timeout,
 		Log: func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
-	})
+	}
+	var res kubemigrate.Result
+	if *registryRepo != "" {
+		res, err = kubemigrate.MigrateViaRegistry(ctx, cs, *ns, name, o, kubemigrate.RegistryOptions{Repository: *registryRepo, PlainHTTP: *plainHTTP})
+	} else {
+		res, err = kubemigrate.Migrate(ctx, cs, *ns, name, o)
+	}
 	if err != nil {
 		fail(err)
 	}

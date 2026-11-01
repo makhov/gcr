@@ -208,7 +208,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 				delete(spec.Annotations, k)
 			}
 		}
-		forkFrom, forkKey, err := forkSource(spec, cfg.SnapshotRoots)
+		forkFrom, forkKey, err := waitForkSource(ctx, spec, cfg.SnapshotRoots)
 		if err != nil {
 			return prep, err
 		}
@@ -1025,10 +1025,39 @@ func (e *extras) coverCgroup(c *container.Container) error {
 // range its container mapped (empty when the snapshot had none).
 // workloadAnnotations are about a pod's containers, never its sandbox.
 var workloadAnnotations = []string{
-	container.AnnotationForkFrom, container.AnnotationForkSignal,
+	container.AnnotationForkFrom, container.AnnotationForkWait, container.AnnotationForkSignal,
 	container.AnnotationLazyRestore, container.AnnotationMemoryMerge,
 	migrate.AnnotationIn, migrate.AnnotationToken,
 	timetravel.AnnotationTrigger, timetravel.AnnotationInterval, timetravel.AnnotationKeep,
+}
+
+// waitForkSource is forkSource, tried again for as long as
+// gcr.dev/fork-wait says: the snapshot may still be on its way here (a
+// checkpoint being pulled from a registry once the pod was placed).
+func waitForkSource(ctx context.Context, spec *specs.Spec, roots []string) (dir, key string, err error) {
+	v, ok := spec.Annotations[container.AnnotationForkWait]
+	if !ok {
+		return forkSource(spec, roots)
+	}
+	wait, perr := time.ParseDuration(v)
+	if perr != nil || wait < 0 || wait > container.MaxForkWait {
+		return "", "", fmt.Errorf("%s=%q: want a duration up to %s: %w", container.AnnotationForkWait, v, container.MaxForkWait, errdefs.ErrInvalidArgument)
+	}
+	if spec.Annotations[container.AnnotationForkFrom] == "" {
+		return "", "", fmt.Errorf("%s needs %s: %w", container.AnnotationForkWait, container.AnnotationForkFrom, errdefs.ErrInvalidArgument)
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		dir, key, err = forkSource(spec, roots)
+		if err == nil || time.Now().After(deadline) || errors.Is(err, errdefs.ErrInvalidArgument) {
+			return dir, key, err
+		}
+		select {
+		case <-ctx.Done():
+			return "", "", ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }
 
 func forkSource(spec *specs.Spec, roots []string) (dir, key string, err error) {

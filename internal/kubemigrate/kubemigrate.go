@@ -186,24 +186,8 @@ func Migrate(ctx context.Context, cs kubernetes.Interface, ns, name string, o Op
 		}
 	}()
 	log("target %s created; waiting for it to be scheduled", dst.Name)
-	if err := wait.PollUntilContextTimeout(ctx, time.Second, o.Timeout, true, func(ctx context.Context) (bool, error) {
-		p, err := cs.CoreV1().Pods(ns).Get(ctx, dst.Name, metav1.GetOptions{})
-		if err != nil {
-			return false, err
-		}
-		if p.Status.Phase == corev1.PodFailed {
-			return false, fmt.Errorf("the target failed: %s", podFailure(p))
-		}
-		dst = p
-		return p.Status.HostIP != "", nil
-	}); err != nil {
-		// Not scheduled: say why, as the scheduler did.
-		for _, c := range dst.Status.Conditions {
-			if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse && c.Message != "" {
-				err = fmt.Errorf("%w (not scheduled: %s)", err, c.Message)
-			}
-		}
-		return res, fmt.Errorf("target %s: %w", dst.Name, err)
+	if dst, err = waitScheduled(ctx, cs, ns, dst.Name, o.Timeout); err != nil {
+		return res, err
 	}
 	res.Node = dst.Spec.NodeName
 	_, port, _ := net.SplitHostPort(addr)
@@ -397,6 +381,33 @@ func disrupted(ctx context.Context, cs kubernetes.Interface, ns, name string, on
 		return nil
 	}
 	return err
+}
+
+// waitScheduled waits for pod name to be on a node, and says why not if it
+// is not in time, as the scheduler did.
+func waitScheduled(ctx context.Context, cs kubernetes.Interface, ns, name string, timeout time.Duration) (*corev1.Pod, error) {
+	var dst *corev1.Pod
+	if err := wait.PollUntilContextTimeout(ctx, time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+		p, err := cs.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		if p.Status.Phase == corev1.PodFailed {
+			return false, fmt.Errorf("the target failed: %s", podFailure(p))
+		}
+		dst = p
+		return p.Status.HostIP != "", nil
+	}); err != nil {
+		if dst != nil {
+			for _, c := range dst.Status.Conditions {
+				if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse && c.Message != "" {
+					err = fmt.Errorf("%w (not scheduled: %s)", err, c.Message)
+				}
+			}
+		}
+		return nil, fmt.Errorf("target %s: %w", name, err)
+	}
+	return dst, nil
 }
 
 // waitNotReady waits for pod name not to be Ready, or gone.
