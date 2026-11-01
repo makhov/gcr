@@ -243,6 +243,17 @@ func (c *Container) Remove() {
 				}
 			}
 			c.ns.t.Logf("%s: page reads by image %v; notable lines:\n%s", l, from, strings.Join(notable[:min(len(notable), 60)], "\n"))
+			// The diagnostic CRIU's counts (makhov/criu lazy-diag): lazy
+			// pages resident before the restorer, and around each remap.
+			if rl, err := os.ReadFile(filepath.Join(filepath.Dir(l), "restore.log")); err == nil {
+				var diag []string
+				for _, line := range strings.Split(string(rl), "\n") {
+					if strings.Contains(line, "lazy-diag") {
+						diag = append(diag, line)
+					}
+				}
+				c.ns.t.Logf("restore.log, lazy-diag (%d lines):\n%s", len(diag), strings.Join(diag[:min(len(diag), 60)], "\n"))
+			}
 			// khugepaged's collapses so far, against a passing run's.
 			if vm, err := os.ReadFile("/proc/vmstat"); err == nil {
 				var thp []string
