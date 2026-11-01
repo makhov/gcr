@@ -1,0 +1,31 @@
+name: uffdstress
+
+# hack/uffdstress on GitHub's x86 runners, whose kernel gcr's lazy
+# restores fail on (gcr#60): does userfaultfd itself lose missing faults
+# there, without CRIU? Run by hand, or by pushing the uffdstress branch.
+on:
+  workflow_dispatch:
+  push:
+    branches: [uffdstress]
+
+jobs:
+  uffdstress:
+    name: uffdstress (${{ matrix.threads }} threads, run ${{ matrix.run }})
+    strategy:
+      fail-fast: false
+      matrix:
+        threads: [4, 16]
+        run: [1, 2, 3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          uname -a
+          grep -m1 "model name" /proc/cpuinfo; nproc
+          grep -H . /sys/kernel/mm/transparent_hugepage/enabled /proc/sys/vm/unprivileged_userfaultfd
+      - run: cc -O2 -Wall -Wextra -pthread -o uffdstress hack/uffdstress/uffdstress.c
+      - name: the checker catches injected zero pages
+        run: "! sudo ./uffdstress -s 5 -z"
+      - name: uffdstress, 10 minutes
+        run: sudo ./uffdstress -s 600 -t ${{ matrix.threads }}
