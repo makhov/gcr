@@ -81,6 +81,11 @@ migrated between two containerd namespaces on one host (arm64 VM):
 
 What it costs:
 
+- **Unreliable on x86 for now.** Post-copy restores the target lazily,
+  which on some x86 hosts occasionally leaves it running on wrong memory
+  ([lazy restore](fork.md#lazy-restore),
+  [#83](https://github.com/makhov/gcr/issues/83)). Until that's fixed, use
+  pre-copy (the default) on x86.
 - **Two hosts at once.** Until the target has all its memory, the
   container runs on the target with part of its memory on the source. If
   the source, or the connection, goes before then, the target's

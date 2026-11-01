@@ -391,6 +391,18 @@ func RequireBPFLSM(t testing.TB, available bool) {
 	t.Skip("the kernel's LSM list has no bpf")
 }
 
+// SkipLazyRestoreOnX86 skips a test that restores lazily (a lazy fork,
+// post-copy migration) on x86, where such restores sometimes give the
+// process pages that were populated before userfaultfd could fill them,
+// and it crashes (makhov/gcr#83). GCR_E2E_LAZY=1 runs it anyway, as that
+// investigation's branch does.
+func SkipLazyRestoreOnX86(t testing.TB) {
+	t.Helper()
+	if runtime.GOARCH == "amd64" && os.Getenv("GCR_E2E_LAZY") == "" {
+		t.Skip("lazy restores are unreliable on x86 (makhov/gcr#83); GCR_E2E_LAZY=1 runs this")
+	}
+}
+
 // Eventually polls cond every 100ms until it holds or timeout passes.
 func Eventually(t testing.TB, timeout time.Duration, what string, cond func() bool) {
 	t.Helper()

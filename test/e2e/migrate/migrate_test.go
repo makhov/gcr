@@ -58,6 +58,7 @@ func TestMigrateTLS(t *testing.T) {
 // TestMigratePostCopyTLS: post-copy's page stream goes over the TLS
 // connection too.
 func TestMigratePostCopyTLS(t *testing.T) {
+	framework.SkipLazyRestoreOnX86(t)
 	f := testcerts.Write(t, t.TempDir())
 	testMigrate(t, "https", tlsConfig(f.ClientCert, f.ClientKey, f.CA), tlsConfig(f.ServerCert, f.ServerKey, f.CA), migrate.Options{PostCopy: true})
 }
@@ -140,7 +141,10 @@ func TestMigrateTLSRefused(t *testing.T) {
 // connection. The memory checks itself (hog reads its pattern back from
 // pages all over), the target carries on from the source's count, and the
 // source is gone once the target has everything.
-func TestMigratePostCopy(t *testing.T) { testMigrateMemory(t, true) }
+func TestMigratePostCopy(t *testing.T) {
+	framework.SkipLazyRestoreOnX86(t)
+	testMigrateMemory(t, true)
+}
 
 // TestMigrateMemory is TestMigratePostCopy's workload migrated as before,
 // stop-and-copy where the kernel cannot track dirty pages (arm64): what
