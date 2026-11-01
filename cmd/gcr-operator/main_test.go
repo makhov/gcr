@@ -40,7 +40,7 @@ func TestDecide(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			p := pod(tc.annotations)
 			if name == "opted in, not movable" {
-				p.Spec.Volumes = []corev1.Volume{{Name: "scratch", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}
+				p.Spec.Volumes = []corev1.Volume{{Name: "logs", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/var/log"}}}}
 			}
 			cs := fake.NewSimpleClientset(p)
 			started := false

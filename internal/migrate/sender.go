@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +46,9 @@ type Source interface {
 	// Stop ends the frozen source after the target took over.
 	Stop() error
 	UpperDir() (string, error)
+	// EmptyDirs are its emptyDir volumes' host directories, by where the
+	// container sees them; their files go with it.
+	EmptyDirs() map[string]string
 	// IDBase is the user namespace range's first host ID, 0 if none.
 	IDBase() uint32
 	// Layers are the read-only layers beneath the writable layer.
@@ -177,6 +182,9 @@ func Send(ctx context.Context, src Source, target, token string, t TLS, work str
 	if err := c.putDir(ctx, "/upper", upper); err != nil {
 		return res, fmt.Errorf("send writable layer: %w", err)
 	}
+	if err := c.putEmptyDirs(ctx, src); err != nil {
+		return res, err
+	}
 	if err := c.post(ctx, "/restore", nil); err != nil {
 		return res, fmt.Errorf("restore on target: %w", err)
 	}
@@ -225,6 +233,9 @@ func (c *client) postCopy(ctx context.Context, src Source, work string, handedOv
 	}
 	if err := c.putDir(ctx, "/upper", upper); err != nil {
 		return res, fmt.Errorf("send writable layer: %w", err)
+	}
+	if err := c.putEmptyDirs(ctx, src); err != nil {
+		return res, err
 	}
 	// The stream the target's lazy-pages daemon fetches pages over, to
 	// the dump's page server here.
@@ -292,7 +303,10 @@ func (c *client) do(ctx context.Context, method, path string, body io.Reader, ou
 }
 
 func (c *client) doHeader(ctx context.Context, method, path string, body io.Reader, out any, extra http.Header) error {
-	req, err := http.NewRequestWithContext(ctx, method, c.base.JoinPath(path).String(), body)
+	p, query, _ := strings.Cut(path, "?")
+	u := c.base.JoinPath(p)
+	u.RawQuery = query
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {
 		return err
 	}
@@ -336,6 +350,19 @@ func (c *client) startRound(ctx context.Context, restart bool) (round, port int,
 		return 0, 0, nil, err
 	}
 	return r.Round, port, stop, nil
+}
+
+// putEmptyDirs sends src's emptyDir volumes, each by where the container
+// sees it.
+func (c *client) putEmptyDirs(ctx context.Context, src Source) error {
+	dirs := src.EmptyDirs()
+	dests := slices.Sorted(maps.Keys(dirs))
+	for _, dest := range dests {
+		if err := c.putDir(ctx, "/volume?dest="+url.QueryEscape(dest), dirs[dest]); err != nil {
+			return fmt.Errorf("send emptyDir volume %s: %w", dest, err)
+		}
+	}
+	return nil
 }
 
 func (c *client) putDir(ctx context.Context, path, dir string) error {

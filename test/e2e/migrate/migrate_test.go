@@ -7,6 +7,8 @@ package migrate
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -289,5 +291,65 @@ func TestMigrateOpenConnectionAndLock(t *testing.T) {
 	}
 	if out, _ := dst.Exec("netstat", "-tn"); strings.Contains(out, "ESTABLISHED") {
 		t.Errorf("the connection is still established on the target:\n%s", out)
+	}
+}
+
+// TestMigrateEmptyDir: a Kubernetes emptyDir volume's files go with the
+// container, into the target's own volume, and a file the process keeps
+// open there carries on where it was. The volumes are bind mounts from
+// directories laid out as the kubelet's.
+func TestMigrateEmptyDir(t *testing.T) {
+	vol := func(pod string) string {
+		d := filepath.Join(framework.TempDir(t), "pods", pod, "volumes", "kubernetes.io~empty-dir", "data")
+		if err := os.MkdirAll(d, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+	srcVol, dstVol := vol("src"), vol("dst")
+	if err := os.WriteFile(filepath.Join(dstVol, "stale"), []byte("the target's own"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// fd 3 stays open on the log the whole time.
+	writer := []string{"sh", "-c", "exec 3>>/data/log; i=0; while true; do i=$((i+1)); echo $i >&3; echo $i > /tmp/count.new && mv /tmp/count.new /tmp/count; sleep 0.1; done"}
+	mount := func(src string) []specs.Mount {
+		return []specs.Mount{{Type: "bind", Source: src, Destination: "/data", Options: []string{"rbind", "rw"}}}
+	}
+	id := framework.UniqueID("mig-vol")
+	token := fmt.Sprintf("secret-%d", time.Now().UnixNano())
+	hostUsers := map[string]string{userns.AnnotationHostUsers: "true"}
+	src := framework.NewNamespace(t, "gcr-e2e-src").Run(id, framework.Spec{Args: writer, Mounts: mount(srcVol), Annotations: hostUsers})
+	dst := framework.NewNamespace(t, "gcr-e2e-dst").Create(id, framework.Spec{Args: writer, Mounts: mount(dstVol),
+		Annotations: map[string]string{migrate.AnnotationIn: addr, migrate.AnnotationToken: token, userns.AnnotationHostUsers: "true"}})
+	started := make(chan error, 1)
+	go func() { started <- dst.Start() }()
+	framework.Eventually(t, 10*time.Second, "the source to count", func() bool { return src.ReadInt("/tmp/count") > 10 })
+
+	res, err := control.NewClient("gcr-e2e-src", src.ID).Migrate(t.Context(), "http://"+addr, token, migrate.Options{})
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if err := <-started; err != nil {
+		t.Fatalf("target: %v", err)
+	}
+	t.Logf("downtime %s", res.Downtime.Round(time.Millisecond))
+	last := dst.ReadInt("/tmp/count")
+	framework.Eventually(t, 10*time.Second, "the target to count on", func() bool { return dst.ReadInt("/tmp/count") > last+5 })
+
+	if _, err := os.Stat(filepath.Join(dstVol, "stale")); !os.IsNotExist(err) {
+		t.Errorf("the target's volume still has its own file: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(dstVol, "log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Fields(string(b))
+	for i, l := range lines {
+		if l != strconv.Itoa(i+1) {
+			t.Fatalf("the log at the target, line %d: %q, want %d: the file came over incomplete, or reopened elsewhere", i+1, l, i+1)
+		}
+	}
+	if n := len(lines); n <= last {
+		t.Fatalf("the log has %d lines, the count is past %d: the target writes elsewhere", n, last)
 	}
 }

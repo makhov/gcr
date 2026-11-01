@@ -46,6 +46,8 @@ const (
 //	               the restore's lazy-pages daemon (tunnel.go)
 //	PUT  /images   the final dump's images (tar), after its page server is done
 //	PUT  /upper    the writable layer (tar)
+//	PUT  /volume?dest=PATH  an emptyDir volume's files (tar), by where the
+//	               container sees it
 //	POST /restore  restore and start; answers once the container runs
 //	POST /abort    give up; Start fails
 type Receiver struct {
@@ -69,6 +71,7 @@ type Receiver struct {
 	// after the restore was asked for.
 	imagesRound int
 	upperDone   bool
+	volumesDone map[string]bool
 	restoring   bool
 
 	// postCopy: the last round's memory is fetched from the source as
@@ -81,6 +84,10 @@ type Receiver struct {
 	// PostCopyCheck, if set, says whether this node can restore lazily;
 	// a post-copy migration is refused before the source freezes.
 	PostCopyCheck func() error
+	// EmptyDirs, if set, are the target container's emptyDir volumes, by
+	// where it sees them (Container.EmptyDirs): the source's files are
+	// put in each. Without it, any volume sent is refused.
+	EmptyDirs func() map[string]string
 
 	ready   chan Incoming
 	result  chan error
@@ -115,7 +122,7 @@ func NewReceiver(ctx context.Context, addr, token string, t TLS, root string, up
 	}
 	r := &Receiver{
 		ctx:   ctx,
-		token: token, root: root, upper: upper, idBase: idBase, layers: layers,
+		token: token, root: root, upper: upper, idBase: idBase, layers: layers, volumesDone: map[string]bool{},
 		ready: make(chan Incoming, 1), result: make(chan error, 1), aborted: make(chan struct{}),
 		lazy: make(chan io.ReadWriteCloser, 4),
 	}
@@ -125,6 +132,7 @@ func NewReceiver(ctx context.Context, addr, token string, t TLS, root string, up
 	mux.HandleFunc("POST /lazy-pages", r.auth(r.lazyPages))
 	mux.HandleFunc("PUT /images", r.auth(r.putImages))
 	mux.HandleFunc("PUT /upper", r.auth(r.putUpper))
+	mux.HandleFunc("PUT /volume", r.auth(r.putVolume))
 	mux.HandleFunc("POST /restore", r.auth(r.restore))
 	mux.HandleFunc("POST /abort", r.auth(r.abort))
 	// Root listens here: no connection may sit on it for nothing.
@@ -347,13 +355,9 @@ func (r *Receiver) putUpper(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	// The target's layer is fresh from the image; the source's replaces it.
-	entries, err := os.ReadDir(upper)
-	if err == nil {
-		for _, e := range entries {
-			if err = os.RemoveAll(filepath.Join(upper, e.Name())); err != nil {
-				break
-			}
-		}
+	err = clearDir(upper)
+	if os.IsNotExist(err) {
+		err = nil
 	}
 	if err == nil {
 		err = untarDir(req.Body, upper)
@@ -361,6 +365,51 @@ func (r *Receiver) putUpper(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+// putVolume replaces the files of the target's emptyDir volume at the
+// container path dest with the source's, before the restore: what the
+// source's processes have open there must be there for them again.
+func (r *Receiver) putVolume(w http.ResponseWriter, req *http.Request) {
+	dest := req.URL.Query().Get("dest")
+	var dir string
+	if r.EmptyDirs != nil {
+		dir = r.EmptyDirs()[dest]
+	}
+	if dir == "" {
+		http.Error(w, fmt.Sprintf("the target has no emptyDir volume at %q: create it with the source's volumes", dest), http.StatusConflict)
+		return
+	}
+	r.mu.Lock()
+	taken := r.volumesDone[dest] || r.restoring
+	r.volumesDone[dest] = true
+	r.mu.Unlock()
+	if taken {
+		http.Error(w, fmt.Sprintf("volume %q already received", dest), http.StatusConflict)
+		return
+	}
+	err := clearDir(dir)
+	if err == nil {
+		err = untarDir(req.Body, dir)
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+// clearDir removes what is in dir, not dir itself: an emptyDir's directory
+// is the kubelet's (and, for medium: Memory, a tmpfs mount).
+func clearDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := os.RemoveAll(filepath.Join(dir, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *Receiver) restore(w http.ResponseWriter, req *http.Request) {

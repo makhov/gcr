@@ -341,6 +341,12 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			if err != nil {
 				return prep, fmt.Errorf("migration receiver: %w", err)
 			}
+			recv.EmptyDirs = func() map[string]string {
+				if c == nil {
+					return nil
+				}
+				return c.EmptyDirs()
+			}
 			// A post-copy migration restores lazily; refused before the
 			// source freezes where that cannot work.
 			recv.PostCopyCheck = func() error {

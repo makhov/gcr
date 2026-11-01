@@ -1641,6 +1641,24 @@ func (c *Container) delegateCgroup() error {
 	return nil
 }
 
+// emptyDirPath is in the host path of every Kubernetes emptyDir volume
+// (kubelet's, under its pods directory, wherever that is).
+const emptyDirPath = "/volumes/kubernetes.io~empty-dir/"
+
+// EmptyDirs are the container's Kubernetes emptyDir volumes: the host
+// directory of each writable bind mount the kubelet made for one, by where
+// the container sees it. Their files live on this node, and a new pod gets
+// them empty, so a migration carries them.
+func (c *Container) EmptyDirs() map[string]string {
+	dirs := map[string]string{}
+	for _, m := range c.cfg.Mounts {
+		if m.Device == "bind" && m.Flags&unix.MS_RDONLY == 0 && strings.Contains(m.Source, emptyDirPath) {
+			dirs[m.Destination] = m.Source
+		}
+	}
+	return dirs
+}
+
 // UpperDir returns the writable layer of an overlay rootfs.
 func (c *Container) UpperDir() (string, error) {
 	for _, m := range c.rootfs {
