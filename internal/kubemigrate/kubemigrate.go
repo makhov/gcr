@@ -284,13 +284,21 @@ echo "$out"; exit 1`, o.GCR, containerdNamespace, id, target)
 // Movable says whether the pod can be moved, and returns its container's
 // containerd ID.
 func Movable(p *corev1.Pod) (string, error) {
-	switch {
-	case p.Status.Phase != corev1.PodRunning:
-		return "", fmt.Errorf("not running (%s)", p.Status.Phase)
-	case len(p.OwnerReferences) > 1 || len(p.OwnerReferences) == 1 && !ownedBy(p, "ReplicaSet") && !ownedBy(p, "Job"):
+	if len(p.OwnerReferences) > 1 || len(p.OwnerReferences) == 1 && !ownedBy(p, "ReplicaSet") && !ownedBy(p, "Job") {
 		// Its controller would replace it with a cold one once it is
 		// deleted; ReplicaSets' and Jobs' pods are handed over (handOver).
 		return "", fmt.Errorf("owned by %s %s: only pods without an owner, or a ReplicaSet's or a Job's, can be moved yet", p.OwnerReferences[0].Kind, p.OwnerReferences[0].Name)
+	}
+	return movable(p, false)
+}
+
+// movable checks what Movable does but for the pod's owner; with claims,
+// PersistentVolumeClaims are allowed, which follow the pod if it is not
+// running meanwhile (whether they are node-local is checked elsewhere).
+func movable(p *corev1.Pod, claims bool) (string, error) {
+	switch {
+	case p.Status.Phase != corev1.PodRunning:
+		return "", fmt.Errorf("not running (%s)", p.Status.Phase)
 	case len(p.Spec.Containers) != 1 || len(p.Status.ContainerStatuses) != 1:
 		return "", fmt.Errorf("%d containers: only pods with one can be moved yet", len(p.Spec.Containers))
 	case p.Spec.HostUsers != nil && !*p.Spec.HostUsers:
@@ -308,6 +316,9 @@ func Movable(p *corev1.Pod) (string, error) {
 		// A new node mounts these afresh with the same contents, and an
 		// emptyDir's files go with the migration; others hold files on
 		// this node that would not follow.
+		if claims && v.PersistentVolumeClaim != nil {
+			continue
+		}
 		if v.ConfigMap == nil && v.Secret == nil && v.Projected == nil && v.DownwardAPI == nil && v.EmptyDir == nil {
 			return "", fmt.Errorf("volume %s: its files would stay on %s (only emptyDir, ConfigMap, Secret, projected and downward API volumes can move yet)", v.Name, p.Spec.NodeName)
 		}

@@ -125,7 +125,7 @@ How it works:
 The Jobs run gcr's installer image, privileged, in the node's namespaces; the plugin finds the image from the installer's DaemonSet, or takes `-image`. Running the plugin needs a cluster admin: only `system:masters` and gcr's operator may create pods on `gcr-migrate` (`gcr.yaml`'s `ValidatingAdmissionPolicy`), since its pods make a node's shim listen for a migration.
 
 What can move, for now:
-- **Bare pods, a ReplicaSet's (a Deployment's) and a Job's:** the target is handed over to its controller once it is Ready ([below](#draining-nodes-gcr-operator)). Pods of other controllers (StatefulSets, DaemonSets) are refused, since those would replace the pod with a cold one.
+- **Bare pods, a ReplicaSet's (a Deployment's) and a Job's:** the target is handed over to its controller once it is Ready ([below](#draining-nodes-gcr-operator)). Pods of other controllers are refused, since those would replace the pod with a cold one. StatefulSets' pods move [through a registry](#through-a-registry) instead.
 - **One container** (no sidecars).
 - **Volumes the target mounts afresh:** ConfigMaps, Secrets, projected and downward API volumes.
 - **`emptyDir` volumes,** on disk or in memory: their files are copied to the target pod's own while the container is frozen, after the writable layer, so they add to the downtime as it does: on the arm64 dev VM, 256 MiB added 0.35 s on disk and 0.2 s in memory, to about 0.3 s without. Files the container has open there are reopened at the same offset.
@@ -147,11 +147,14 @@ kubectl gcr migrate -registry registry.example:5000/gcr-checkpoints pod/web
 3. On the replacement's node, `gcr snapshot-pull` fetches it into `/var/lib/gcr/checkpoints`, and the container starts from it, carrying on where the source stopped.
 4. The source pod is deleted.
 
+A StatefulSet's pod can't have a replacement made first, since the replacement has the same name. It is checkpointed and stopped, then deleted, and its StatefulSet creates it again. gcr-operator, started with the same `-registry` ([below](#statefulsets)), steers that new pod to restore from the checkpoint. The scheduler places it, and the checkpoint is pulled to its node.
+
 The downtime is seconds rather than a fraction of one: 5.5 to 6.6 s on a three-node k0da cluster (arm64, a small process, a registry on the cluster's network), about half of it the two Jobs starting. But nothing on the source node is needed once the checkpoint is pushed. That's what a node about to go away needs, and a pod that can't run a twin next to itself, such as a StatefulSet's ([gcr-operator](design/gcr-operator.md#milestone-4-checkpoints-through-a-registry)).
 
 - **The nodes must reach the registry,** with the credentials in root's Docker config on each (`gcr snapshot-push`). `-plain-http` talks to it without TLS.
-- **Bare pods only, for now,** and no `emptyDir` volumes: a checkpoint holds the writable layer, not volumes.
-- **No way back once the source has stopped.** If the snapshot fails, the source runs on and the replacement is deleted. After the stop, a failure leaves the replacement waiting for the checkpoint, and `kubectl gcr` says where it is.
+- **Bare pods and StatefulSets' pods,** and no `emptyDir` volumes: a checkpoint holds the writable layer, not volumes.
+- **A StatefulSet's PersistentVolumeClaims follow the pod,** reattached by Kubernetes on the new node, unless their volumes are tied to a node (`local`, `hostPath`, or a node affinity on `kubernetes.io/hostname`, as local-path's have), which is refused. A bare pod's claims are refused: its replacement waits next to it, and couldn't attach a ReadWriteOnce volume the source holds.
+- **No way back once the source has stopped.** If the snapshot fails, the source runs on and the replacement is deleted. After the stop, a bare pod's replacement is left waiting for the checkpoint, and `kubectl gcr` says where it is. A StatefulSet's pod is deleted again, so that its StatefulSet starts it cold, as without gcr.
 - **The checkpoint stays in the registry,** and on the replacement's node, where the container's writable layer sits on it for as long as it runs.
 
 ## Draining nodes: gcr-operator
@@ -202,3 +205,21 @@ That Deployment's pod moved from `ns-worker-1` to another node in 10 s, with 346
 - **A mark left by an operator that went away** mid-migration is taken over by its replacement once that operator's pod is gone, and counts as failed after 15 minutes otherwise.
 
 The operator runs unprivileged. Its migrations' Jobs, and the `gcr-migrate` runtime class its targets run on, are what touch the nodes.
+
+### StatefulSets
+
+Started with `-registry` (and `-plain-http` for a registry without TLS), the operator moves StatefulSets' opted-in pods [through a registry](#through-a-registry); without it, they are evicted, as without gcr. A drain of a three-node k0da cluster moved a StatefulSet's pod in 10 s, with 6.3 to 6.8 s of downtime, and its count carried on.
+
+1. The pod is checkpointed, stopped and pushed, as above.
+2. The operator records a **pending restore** for `NAMESPACE/NAME`: the checkpoint and a random token, in the ConfigMap `gcr-system/gcr-restores`.
+3. It deletes the pod, and the StatefulSet creates it again.
+4. **The operator's mutating webhook** (on pod creation, for StatefulSets' opted-in pods) finds the pending restore. It puts the new pod on `gcr-migrate`, to restore from the checkpoint (`gcr.dev/fork-from`, `gcr.dev/fork-wait`), with the token (`gcr.dev/restore-token`).
+5. The checkpoint is pulled to the node the pod lands on, and the pod carries on, with the same name, DNS name and volumes. The restore is then forgotten.
+
+**Who may restore.** `gcr.yaml`'s `ValidatingAdmissionPolicy` lets the StatefulSet controller create a pod on `gcr-migrate` only with a pending restore's token and checkpoint. It reads `gcr-restores` as its parameter. A pod template that asks for `gcr-migrate` itself, or copies a spent token, is refused. Apply `gcr.yaml` from this release before the operator: an operator that finds an older policy evicts StatefulSets' pods.
+
+**If the move fails,** the StatefulSet starts the pod again cold:
+- if the webhook is down, the new pod isn't steered (`failurePolicy: Ignore`);
+- if the checkpoint or the pull fails after the stop, the operator deletes the pod.
+
+kubectl drain evicts by name and retries, so its retries reach the pod created again. The operator answers those 404 (the pod evicted is gone), unless the new pod's own node is being drained too.

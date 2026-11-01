@@ -8,6 +8,10 @@
 // moves; evictions are retried, and once the pod has moved its source is
 // gone. If the move fails, the next eviction goes through: a drain is
 // never held by a pod that cannot move.
+//
+// With -registry, a StatefulSet's pod moves through a checkpoint there:
+// it is stopped at a checkpoint and deleted, and a mutating webhook on pod
+// creation steers the pod its StatefulSet creates again to restore from it.
 package main
 
 import (
@@ -20,6 +24,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -59,9 +64,11 @@ func main() {
 	listen := flag.String("listen", ":8443", "address the webhook listens on (TLS)")
 	namespace := flag.String("namespace", envOr("POD_NAMESPACE", "gcr-system"), "gcr's namespace: its Service, and the migrations' Jobs")
 	service := flag.String("service", "gcr-operator", "the webhook's Service, which its certificate names")
-	webhook := flag.String("webhook", "gcr-operator", "the ValidatingWebhookConfiguration to give the certificate's CA")
+	webhook := flag.String("webhook", "gcr-operator", "the ValidatingWebhookConfiguration and the MutatingWebhookConfiguration to give the certificate's CA")
 	image := flag.String("image", "", "the image migrations' Jobs run (default: gcr's installer's, or busybox without its DaemonSet)")
 	gcrPath := flag.String("gcr", "/usr/local/bin/gcr", "gcr's path on the nodes")
+	registry := flag.String("registry", "", "move StatefulSets' pods through checkpoints in this registry repository (host[:port]/path), which the nodes reach")
+	plainHTTP := flag.Bool("plain-http", false, "talk to -registry without TLS")
 	flag.Parse()
 
 	cfg, err := rest.InClusterConfig()
@@ -88,10 +95,19 @@ func main() {
 		log.Fatalf("webhook %s: %v", *webhook, err)
 	}
 
-	op := &operator{cs: cs, opts: kubemigrate.Options{Namespace: *namespace, Image: *image, GCR: *gcrPath}, moving: map[string]bool{},
+	op := &operator{cs: cs, opts: kubemigrate.Options{Namespace: *namespace, Image: *image, GCR: *gcrPath}, moving: map[string]bool{}, replaced: map[string]time.Time{},
 		self: metav1.ObjectMeta{Namespace: *namespace, Name: os.Getenv("POD_NAME")}, node: os.Getenv("NODE_NAME")}
+	if *registry != "" {
+		if err := restoresReady(ctx, cs, *webhook); err != nil {
+			log.Printf("StatefulSets' pods are evicted, not moved: %v", err)
+		} else {
+			op.registry = kubemigrate.RegistryOptions{Repository: *registry, PlainHTTP: *plainHTTP}
+			log.Printf("StatefulSets' pods move through %s", *registry)
+		}
+	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /evict", op.evict)
+	mux.HandleFunc("POST /evict", review(op.decide))
+	mux.HandleFunc("POST /restore", review(op.steer))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	srv := &http.Server{Addr: *listen, Handler: mux, TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS13},
 		ReadHeaderTimeout: 10 * time.Second}
@@ -113,10 +129,16 @@ func main() {
 type operator struct {
 	cs   kubernetes.Interface
 	opts kubemigrate.Options
+	// registry is where StatefulSets' pods move through; with none, they
+	// are evicted.
+	registry kubemigrate.RegistryOptions
 
-	mu       sync.Mutex
-	moving   map[string]bool // namespace/name of pods being moved
-	stopping bool            // on its way out: it starts no migration
+	mu     sync.Mutex
+	moving map[string]bool // namespace/name of pods being moved
+	// replaced is when StatefulSets' pods moved (or were deleted trying),
+	// by namespace/name: those pods' StatefulSets created them again.
+	replaced map[string]time.Time
+	stopping bool // on its way out: it starts no migration
 	moves    sync.WaitGroup
 	// start moves a pod in the background: move, but for tests.
 	start func(*corev1.Pod)
@@ -147,20 +169,22 @@ func (o *operator) stop(wait time.Duration) {
 	}
 }
 
-// evict answers an eviction's admission review.
-func (o *operator) evict(w http.ResponseWriter, r *http.Request) {
-	var review admissionv1.AdmissionReview
-	if err := json.NewDecoder(r.Body).Decode(&review); err != nil || review.Request == nil {
-		http.Error(w, "not an AdmissionReview", http.StatusBadRequest)
-		return
+// review serves admission reviews, answered by decide.
+func review(decide func(context.Context, *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var review admissionv1.AdmissionReview
+		if err := json.NewDecoder(r.Body).Decode(&review); err != nil || review.Request == nil {
+			http.Error(w, "not an AdmissionReview", http.StatusBadRequest)
+			return
+		}
+		req := review.Request
+		resp := decide(r.Context(), req)
+		resp.UID = req.UID
+		review.Response = resp
+		review.Request = nil
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(review)
 	}
-	req := review.Request
-	resp := o.decide(r.Context(), req)
-	resp.UID = req.UID
-	review.Response = resp
-	review.Request = nil
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(review)
 }
 
 func (o *operator) decide(ctx context.Context, req *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse {
@@ -213,12 +237,24 @@ func (o *operator) decide(ctx context.Context, req *admissionv1.AdmissionRequest
 		log.Printf("%s: operator %s, which was moving it, is gone: moving it", key, by)
 	}
 	o.mu.Lock()
-	stopping := o.stopping
+	stopping, busy := o.stopping, o.moving[key]
 	o.mu.Unlock()
+	if !busy && o.recreated(ctx, pod) {
+		// kubectl drain evicts a pod by name, and goes on trying: it is
+		// the pod it was evicting, the one it waits to be gone, that is.
+		return &admissionv1.AdmissionResponse{Allowed: false, Result: &metav1.Status{
+			Code: http.StatusNotFound, Reason: metav1.StatusReasonNotFound,
+			Message: fmt.Sprintf("pod %s/%s moved to %s already: the pod evicted is gone", pod.Namespace, pod.Name, pod.Spec.NodeName),
+		}}
+	}
+	if busy {
+		// A StatefulSet's pod being created again, by the same name.
+		return tooMany(pod, "is moving to another node")
+	}
 	if stopping {
 		return tooMany(pod, "waits for the operator, which is restarting")
 	}
-	if _, err := kubemigrate.Movable(pod); err != nil {
+	if _, err := o.movable(pod); err != nil {
 		o.mark(ctx, pod, "failed: "+err.Error())
 		log.Printf("%s cannot move, evicting it: %v", key, err)
 		return allow
@@ -254,7 +290,17 @@ func (o *operator) move(pod *corev1.Pod) {
 	ctx := context.Background()
 	opts := o.opts
 	opts.Log = func(format string, args ...any) { log.Printf(key+": "+format, args...) }
-	res, err := kubemigrate.Migrate(ctx, o.cs, pod.Namespace, pod.Name, opts)
+	var res kubemigrate.Result
+	var err error
+	if o.throughRegistry(pod) {
+		begin := time.Now()
+		res, err = kubemigrate.MigrateViaRegistry(ctx, o.cs, pod.Namespace, pod.Name, opts, o.registry)
+		o.mu.Lock()
+		o.replaced[key] = begin
+		o.mu.Unlock()
+	} else {
+		res, err = kubemigrate.Migrate(ctx, o.cs, pod.Namespace, pod.Name, opts)
+	}
 	if err != nil {
 		log.Printf("%s: migration failed, letting its eviction through: %v", key, err)
 		o.mark(ctx, pod, "failed: "+firstLine(err.Error()))
@@ -281,11 +327,100 @@ func (o *operator) waitingOnNode(ctx context.Context) int {
 			strings.HasPrefix(p.Annotations[annotationState], "failed") {
 			continue
 		}
-		if _, err := kubemigrate.Movable(p); err == nil {
+		if _, err := o.movable(p); err == nil {
 			n++
 		}
 	}
 	return n
+}
+
+// throughRegistry says whether pod moves through a checkpoint in the
+// registry, rather than node to node: a StatefulSet's pod can't have a
+// twin running.
+func (o *operator) throughRegistry(pod *corev1.Pod) bool {
+	return len(pod.OwnerReferences) == 1 && pod.OwnerReferences[0].Kind == "StatefulSet"
+}
+
+// movable says whether the pod can be moved, the way move would.
+func (o *operator) movable(pod *corev1.Pod) (string, error) {
+	if !o.throughRegistry(pod) {
+		return kubemigrate.Movable(pod)
+	}
+	if o.registry.Repository == "" {
+		return "", errors.New("a StatefulSet's pod moves through a registry, and gcr-operator has none (-registry)")
+	}
+	return kubemigrate.MovableThroughRegistry(pod)
+}
+
+// recreated says whether pod is one its StatefulSet created again in
+// place of the one evicted, restored from its checkpoint or, if the move
+// failed, cold: kubectl drain evicts by name, and its retries reach the
+// new pod. One evicted in its own right is on a node being drained.
+func (o *operator) recreated(ctx context.Context, pod *corev1.Pod) bool {
+	o.mu.Lock()
+	since, moved := o.replaced[pod.Namespace+"/"+pod.Name]
+	o.mu.Unlock()
+	moved = moved && pod.CreationTimestamp.After(since)
+	if !moved && pod.Annotations[kubemigrate.AnnotationRestoreToken] == "" || time.Since(pod.CreationTimestamp.Time) > staleAfter {
+		return false
+	}
+	if pod.Spec.NodeName == "" {
+		return true // not scheduled yet
+	}
+	node, err := o.cs.CoreV1().Nodes().Get(ctx, pod.Spec.NodeName, metav1.GetOptions{})
+	if err != nil || node.Spec.Unschedulable {
+		return false
+	}
+	for _, t := range node.Spec.Taints {
+		if t.Key == "ToBeDeletedByClusterAutoscaler" {
+			return false
+		}
+	}
+	return true
+}
+
+// steer answers the admission review of a pod's creation: one its
+// StatefulSet creates again, with a pending restore, restores from it.
+func (o *operator) steer(ctx context.Context, req *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse {
+	allow := &admissionv1.AdmissionResponse{Allowed: true}
+	var pod corev1.Pod
+	if o.registry.Repository == "" || json.Unmarshal(req.Object.Raw, &pod) != nil || !o.throughRegistry(&pod) || pod.Name == "" {
+		return allow
+	}
+	r, err := kubemigrate.PendingRestore(ctx, o.cs, o.opts.Namespace, req.Namespace, pod.Name)
+	if err != nil {
+		log.Printf("%s/%s: %v: it starts cold", req.Namespace, pod.Name, err)
+		return allow
+	}
+	if r == nil {
+		return allow
+	}
+	patch, err := kubemigrate.Steer(&pod, *r)
+	if err != nil {
+		log.Printf("%s/%s: %v: it starts cold", req.Namespace, pod.Name, err)
+		return allow
+	}
+	log.Printf("%s/%s: created again, to restore from %s", req.Namespace, pod.Name, r.Ref)
+	pt := admissionv1.PatchTypeJSONPatch
+	return &admissionv1.AdmissionResponse{Allowed: true, Patch: patch, PatchType: &pt}
+}
+
+// restoresReady checks that the cluster lets StatefulSets' pods restore:
+// the gcr-migrate admission policy reads the pending restores, and the
+// webhook that steers pods is there.
+func restoresReady(ctx context.Context, cs kubernetes.Interface, webhook string) error {
+	p, err := cs.AdmissionregistrationV1().ValidatingAdmissionPolicies().Get(ctx, kubemigrate.RuntimeClass, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("admission policy %s: %w", kubemigrate.RuntimeClass, err)
+	}
+	if p.Spec.ParamKind == nil || p.Spec.ParamKind.Kind != "ConfigMap" {
+		return fmt.Errorf("admission policy %s reads no pending restores (%s): it is older than this operator; apply gcr.yaml again",
+			kubemigrate.RuntimeClass, kubemigrate.RestoresConfigMap)
+	}
+	if _, err := cs.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(ctx, webhook, metav1.GetOptions{}); err != nil {
+		return fmt.Errorf("mutating webhook %s: %w", webhook, err)
+	}
+	return nil
 }
 
 // parseMigrating reads a "migrating TIME by OPERATOR-POD" state; the
@@ -357,7 +492,9 @@ func selfSigned(host string) (tls.Certificate, []byte, error) {
 		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), nil
 }
 
-// giveCA sets every webhook of the configuration to trust ca.
+// giveCA sets every webhook of the configurations to trust ca: the
+// validating one, and the mutating one if there is one (older manifests
+// have none).
 func giveCA(ctx context.Context, cs kubernetes.Interface, name string, ca []byte) error {
 	cfg, err := cs.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
@@ -366,7 +503,19 @@ func giveCA(ctx context.Context, cs kubernetes.Interface, name string, ca []byte
 	for i := range cfg.Webhooks {
 		cfg.Webhooks[i].ClientConfig.CABundle = ca
 	}
-	_, err = cs.AdmissionregistrationV1().ValidatingWebhookConfigurations().Update(ctx, cfg, metav1.UpdateOptions{})
+	if _, err = cs.AdmissionregistrationV1().ValidatingWebhookConfigurations().Update(ctx, cfg, metav1.UpdateOptions{}); err != nil {
+		return err
+	}
+	m, err := cs.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	for i := range m.Webhooks {
+		m.Webhooks[i].ClientConfig.CABundle = ca
+	}
+	_, err = cs.AdmissionregistrationV1().MutatingWebhookConfigurations().Update(ctx, m, metav1.UpdateOptions{})
 	return err
 }
 
