@@ -1,6 +1,6 @@
 # gcr-operator: evictions that migrate
 
-Status: milestones 1 (`kubectl gcr migrate`) and 2 (evictions, and Deployments' pods handed over) are built; see [migration](../migration.md#draining-nodes-gcr-operator). The rest is a proposal.
+Status: milestones 1 (`kubectl gcr migrate`) and 2 (evictions, and Deployments' pods handed over) are built, and `emptyDir` volumes of 3; see [migration](../migration.md#draining-nodes-gcr-operator). The rest is a proposal.
 
 ## The goal
 
@@ -53,7 +53,7 @@ Other owners:
 | the container's writable layer | moved |
 | image layers | pulled by the target (same image, pinned by digest) |
 | ConfigMaps, Secrets, projected volumes | mounted afresh by the target's kubelet, same contents |
-| `emptyDir` | **not moved yet**: its files are on the source node. The operator refuses pods with one, until gcr copies it as it does the writable layer |
+| `emptyDir` | copied to the target pod's own, while the container is frozen, as the writable layer is (milestone 3) |
 | PersistentVolumes | ReadWriteMany: mounted on both. ReadWriteOnce: refused at first (the volume must detach from the source first, which lengthens the pause) |
 | IP address, open TCP connections | a new IP; connections reset. Services follow labels, so traffic goes to the target once it is Ready |
 | GPUs | stop-and-copy only (CRIU's CUDA plugin cannot pre-dump), and the target needs the same GPU model and driver ([GPUs](../gpus.md)) |
@@ -75,5 +75,5 @@ Other owners:
 
 1. **`gcr-operator migrate pod/NAME [--to NODE]`:** the operator, the node agent, the target RuntimeClass, and bare pods. No webhook yet.
 2. **Evictions:** the webhook, Deployments and ReplicaSets through the ownership handover, and fallback on failure. The demo: drain a node while a stateful process keeps running on another.
-3. **`emptyDir`, and Jobs.**
+3. **`emptyDir`, and Jobs.** `emptyDir` is built.
 4. **StatefulSets, and spot and node shutdown through registry checkpoints.**

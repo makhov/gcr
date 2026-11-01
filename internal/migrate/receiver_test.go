@@ -157,3 +157,59 @@ func TestReceiverRestart(t *testing.T) {
 		t.Fatalf("the restarted round is incremental on %q, want a full dump", parent)
 	}
 }
+
+func putTar(t *testing.T, url, dir string) *http.Response {
+	t.Helper()
+	body, wait, err := tarDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, _ := http.NewRequest(http.MethodPut, url, body)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	resp, err := http.DefaultClient.Do(req)
+	body.Close()
+	_ = wait()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+// TestReceiverEmptyDir: an emptyDir's files replace what the target's
+// volume held; a volume the target lacks, or one sent twice, is refused.
+func TestReceiverEmptyDir(t *testing.T) {
+	r, base := newTestReceiver(t, 0)
+	target := t.TempDir()
+	r.EmptyDirs = func() map[string]string { return map[string]string{"/data": target} }
+	if err := os.WriteFile(target+"/stale", []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := t.TempDir()
+	if err := os.MkdirAll(src+"/sub", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src+"/sub/log", []byte("kept"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if resp := putTar(t, base+"/volume?dest=%2Fdata", src); resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("PUT /volume: %s: %s", resp.Status, b)
+	}
+	if b, err := os.ReadFile(target + "/sub/log"); err != nil || string(b) != "kept" {
+		t.Fatalf("the source's file at the target: %q, %v", b, err)
+	}
+	if fi, err := os.Stat(target + "/sub/log"); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("its mode: %v, %v", fi, err)
+	}
+	if _, err := os.Stat(target + "/stale"); !os.IsNotExist(err) {
+		t.Fatalf("the target's own file is still there: %v", err)
+	}
+	if resp := putTar(t, base+"/volume?dest=%2Fdata", src); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("a second PUT of the same volume: %s", resp.Status)
+	}
+	if resp := putTar(t, base+"/volume?dest=%2Fother", src); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("a volume the target lacks: %s", resp.Status)
+	}
+}

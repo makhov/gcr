@@ -29,7 +29,7 @@ What happens to the processes' open files and sockets:
 | | on the target |
 | --- | --- |
 | files in the container's filesystem | reopened at the same offset: the writable layer moves, and the image is the same |
-| files on volumes | reopened by path. ConfigMaps, Secrets and projected volumes have the same contents there; a node's own files (`emptyDir`, `hostPath`) do not, and `kubectl gcr migrate` refuses such pods |
+| files on volumes | reopened by path. ConfigMaps, Secrets and projected volumes have the same contents there; an `emptyDir`'s files go with the migration, on disk or in memory; other volumes holding a node's own files (`hostPath`) would not, and `kubectl gcr migrate` refuses such pods |
 | files deleted while open or mapped | kept: CRIU stores small ones and links back mapped ones |
 | pipes, sockets between the container's processes, eventfd, epoll, signalfd, timerfd, memfd, shared memory | restored with their contents |
 | stdin, stdout, stderr | the target's: its log carries on |
@@ -125,9 +125,11 @@ How it works:
 The Jobs run gcr's installer image, privileged, in the node's namespaces; the plugin finds the image from the installer's DaemonSet, or takes `-image`. Running the plugin needs a cluster admin: only `system:masters` and gcr's operator may create pods on `gcr-migrate` (`gcr.yaml`'s `ValidatingAdmissionPolicy`), since its pods make a node's shim listen for a migration.
 
 What can move, for now:
-- **Bare pods:** a pod with an owner is refused, since its controller would replace it with a cold one. Handing pods over to their controllers is the operator's job ([gcr-operator](design/gcr-operator.md)).
+- **Bare pods, and a ReplicaSet's (a Deployment's):** the target is handed over to the ReplicaSet once it is Ready ([gcr-operator](design/gcr-operator.md)). Pods of other controllers are refused, since those would replace the pod with a cold one.
 - **One container** (no sidecars).
-- **Volumes the target mounts afresh:** ConfigMaps, Secrets, projected and downward API volumes. An `emptyDir`, or a volume holding files on the node, is refused.
+- **Volumes the target mounts afresh:** ConfigMaps, Secrets, projected and downward API volumes.
+- **`emptyDir` volumes,** on disk or in memory: their files are copied to the target pod's own while the container is frozen, after the writable layer, so they add to the downtime as it does: on the arm64 dev VM, 256 MiB added 0.35 s on disk and 0.2 s in memory, to about 0.3 s without. Files the container has open there are reopened at the same offset.
+- **Not other volumes holding files on the node** (`hostPath`, local PersistentVolumes): refused.
 - **No user namespace.** A pod with `hostUsers: false` is refused: the kubelet picks its range, and would give the target another one. Pods in gcr's own user namespace (`gcr.dev/host-users: "false"`) can't be checkpointed in Kubernetes yet either. CRIU checks every namespace belongs to the container's user namespace, and the pod's network namespace, made by CRI, belongs to the host's ([#70](https://github.com/makhov/gcr/issues/70)).
 
 The pod gets a new name and IP, and its TCP connections reset. Services select it by its labels, which it keeps.

@@ -14,6 +14,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"slices"
 	"strings"
 	"time"
 
@@ -41,6 +42,10 @@ const (
 	annotationMigrateToken = "gcr.dev/migrate-token"
 	annotationUsernsBase   = "gcr.dev/userns-base"
 	annotationHostUsers    = "gcr.dev/host-users"
+	// annotationMigratedFrom is on a target pod the scheduler placed: the
+	// node it must not go back to, which targetPod added to its node
+	// affinity (and takes out again when it moves on).
+	annotationMigratedFrom = "gcr.dev/migrated-from"
 )
 
 // info is what gcr info prints (control.Info).
@@ -171,6 +176,12 @@ func Migrate(ctx context.Context, cs kubernetes.Interface, ns, name string, o Op
 		dst = p
 		return p.Status.HostIP != "", nil
 	}); err != nil {
+		// Not scheduled: say why, as the scheduler did.
+		for _, c := range dst.Status.Conditions {
+			if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse && c.Message != "" {
+				err = fmt.Errorf("%w (not scheduled: %s)", err, c.Message)
+			}
+		}
 		return res, fmt.Errorf("target %s: %w", dst.Name, err)
 	}
 	res.Node = dst.Spec.NodeName
@@ -259,10 +270,11 @@ func Movable(p *corev1.Pod) (string, error) {
 		}
 	}
 	for _, v := range p.Spec.Volumes {
-		// A new node mounts these afresh with the same contents; others
-		// hold files on this node that would not follow.
-		if v.ConfigMap == nil && v.Secret == nil && v.Projected == nil && v.DownwardAPI == nil {
-			return "", fmt.Errorf("volume %s: its files would stay on %s (only ConfigMap, Secret, projected and downward API volumes can move yet)", v.Name, p.Spec.NodeName)
+		// A new node mounts these afresh with the same contents, and an
+		// emptyDir's files go with the migration; others hold files on
+		// this node that would not follow.
+		if v.ConfigMap == nil && v.Secret == nil && v.Projected == nil && v.DownwardAPI == nil && v.EmptyDir == nil {
+			return "", fmt.Errorf("volume %s: its files would stay on %s (only emptyDir, ConfigMap, Secret, projected and downward API volumes can move yet)", v.Name, p.Spec.NodeName)
 		}
 	}
 	id, ok := strings.CutPrefix(p.Status.ContainerStatuses[0].ContainerID, "containerd://")
@@ -286,6 +298,36 @@ func waitReady(ctx context.Context, cs kubernetes.Interface, ns, name string, ti
 		}
 		return false, nil
 	})
+}
+
+// dropNotOn takes out of p's required node affinity the term targetPod
+// adds to keep it off node, and whatever becomes empty with it: an empty
+// node selector term matches no node at all.
+func dropNotOn(p *corev1.Pod, node string) {
+	a := p.Spec.Affinity
+	if a == nil || a.NodeAffinity == nil || a.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		return
+	}
+	req := a.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	var terms []corev1.NodeSelectorTerm
+	for _, t := range req.NodeSelectorTerms {
+		t.MatchExpressions = slices.DeleteFunc(slices.Clone(t.MatchExpressions), func(e corev1.NodeSelectorRequirement) bool {
+			return e.Key == "kubernetes.io/hostname" && e.Operator == corev1.NodeSelectorOpNotIn && slices.Equal(e.Values, []string{node})
+		})
+		if len(t.MatchExpressions) > 0 || len(t.MatchFields) > 0 {
+			terms = append(terms, t)
+		}
+	}
+	req.NodeSelectorTerms = terms
+	if len(terms) == 0 {
+		a.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution = nil
+	}
+	if a.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil && a.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution == nil {
+		a.NodeAffinity = nil
+	}
+	if a.NodeAffinity == nil && a.PodAffinity == nil && a.PodAntiAffinity == nil {
+		p.Spec.Affinity = nil
+	}
 }
 
 func ownedByReplicaSet(p *corev1.Pod) bool {
@@ -341,9 +383,16 @@ func handOver(ctx context.Context, cs kubernetes.Interface, src *corev1.Pod, tar
 func targetPod(src *corev1.Pod, node, addr, token string, inf info) *corev1.Pod {
 	suffix := make([]byte, 3)
 	_, _ = rand.Read(suffix)
+	base := src.Name
+	if _, moved := src.Annotations[annotationMigratedFrom]; moved || src.Annotations[annotationMigrateIn] != "" {
+		// A pod a migration made: its name has a suffix of ours already.
+		if i := strings.LastIndexByte(base, '-'); i > 0 && len(base)-i == 7 {
+			base = base[:i]
+		}
+	}
 	dst := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        fmt.Sprintf("%s-%x", src.Name, suffix),
+			Name:        fmt.Sprintf("%s-%x", base, suffix),
 			Namespace:   src.Namespace,
 			Labels:      src.Labels,
 			Annotations: map[string]string{},
@@ -363,7 +412,14 @@ func targetPod(src *corev1.Pod, node, addr, token string, inf info) *corev1.Pod 
 	dst.Spec.RuntimeClassName = new(string)
 	*dst.Spec.RuntimeClassName = RuntimeClass
 	dst.Spec.NodeName = node
+	// The term an earlier migration added, so that the scheduler did not
+	// put that pod back where it came from: not this one's to keep.
+	if from, ok := src.Annotations[annotationMigratedFrom]; ok {
+		dropNotOn(dst, from)
+		delete(dst.Annotations, annotationMigratedFrom)
+	}
 	if node == "" {
+		dst.Annotations[annotationMigratedFrom] = src.Spec.NodeName
 		notSource := corev1.NodeSelectorRequirement{Key: "kubernetes.io/hostname", Operator: corev1.NodeSelectorOpNotIn, Values: []string{src.Spec.NodeName}}
 		if dst.Spec.Affinity == nil {
 			dst.Spec.Affinity = &corev1.Affinity{}
@@ -447,25 +503,49 @@ func runJob(ctx context.Context, cs kubernetes.Interface, o Options, node, what 
 	}); err != nil {
 		return "", fmt.Errorf("job %s: %w", name, err)
 	}
-	out := jobLogs(ctx, cs, o.Namespace, name)
+	out, err := jobLogs(ctx, cs, o.Namespace, name)
 	if failed {
 		return out, fmt.Errorf("job %s failed", name)
+	}
+	if err != nil {
+		return "", fmt.Errorf("job %s succeeded, but its output: %w", name, err)
 	}
 	return out, nil
 }
 
-func jobLogs(ctx context.Context, cs kubernetes.Interface, ns, job string) string {
-	pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: "job-name=" + job})
-	if err != nil || len(pods.Items) == 0 {
-		return ""
+func jobLogs(ctx context.Context, cs kubernetes.Interface, ns, job string) (string, error) {
+	// Right after the Job is done, its pod may not be listed yet, or its
+	// node not yet able to serve the log: try again for a while. Every
+	// Job here prints something, so an empty log is one not read yet.
+	var out string
+	var last error
+	_ = wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, 15*time.Second, true, func(ctx context.Context) (bool, error) {
+		pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: "job-name=" + job})
+		switch {
+		case err != nil:
+			last = err
+			return false, nil
+		case len(pods.Items) == 0:
+			last = fmt.Errorf("no pod of job %s", job)
+			return false, nil
+		}
+		r, err := cs.CoreV1().Pods(ns).GetLogs(pods.Items[0].Name, &corev1.PodLogOptions{}).Stream(ctx)
+		if err != nil {
+			last = err
+			return false, nil
+		}
+		defer r.Close()
+		b, err := io.ReadAll(r)
+		if out = strings.TrimSpace(string(b)); out == "" {
+			last = fmt.Errorf("job %s: empty log (%v)", job, err)
+			return false, nil
+		}
+		return true, nil
+	})
+	if out == "" {
+		return "", last
 	}
-	r, err := cs.CoreV1().Pods(ns).GetLogs(pods.Items[0].Name, &corev1.PodLogOptions{}).Stream(ctx)
-	if err != nil {
-		return ""
-	}
-	defer r.Close()
-	b, _ := io.ReadAll(r)
-	return strings.TrimSpace(string(b))
+	return out, nil
 }
 
 func podFailure(p *corev1.Pod) string {

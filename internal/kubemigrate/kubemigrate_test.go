@@ -2,6 +2,7 @@ package kubemigrate
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -42,7 +43,13 @@ func TestMovable(t *testing.T) {
 		"hostUsers":      {running(func(p *corev1.Pod) { p.Spec.HostUsers = &f }), "hostUsers: false"},
 		"emptyDir": {running(func(p *corev1.Pod) {
 			p.Spec.Volumes = []corev1.Volume{{Name: "scratch", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}
-		}), "volume scratch"},
+		}), ""},
+		"in memory": {running(func(p *corev1.Pod) {
+			p.Spec.Volumes = []corev1.Volume{{Name: "shm", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}}}
+		}), ""},
+		"hostPath": {running(func(p *corev1.Pod) {
+			p.Spec.Volumes = []corev1.Volume{{Name: "logs", VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{Path: "/var/log"}}}}
+		}), "volume logs"},
 		"projected": {running(func(p *corev1.Pod) {
 			p.Spec.Volumes = []corev1.Volume{{Name: "kube-api-access", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{}}}}
 		}), ""},
@@ -109,5 +116,52 @@ func TestJobImage(t *testing.T) {
 			Containers: []corev1.Container{{Name: "install", Image: "ghcr.io/makhov/gcr:v0.1.2"}}}}}}
 	if img, err := JobImage(ctx, fake.NewClientset(ds), "gcr-system"); err != nil || img != "ghcr.io/makhov/gcr:v0.1.2" {
 		t.Errorf("with the DaemonSet: %q, %v", img, err)
+	}
+}
+
+// TestTargetPodChain: each migration keeps the pod off the node it left,
+// and only that one; a user's own node affinity stays, and the name keeps
+// one suffix of ours.
+func TestTargetPodChain(t *testing.T) {
+	own := corev1.NodeSelectorRequirement{Key: "kubernetes.io/hostname", Operator: corev1.NodeSelectorOpNotIn, Values: []string{"bad"}}
+	src := running(func(p *corev1.Pod) {
+		p.Name = "web-6d4cf56db6-x7k2p"
+		p.Spec.Affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+			NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{own}}}}}}
+	})
+	p := src
+	for i, node := range []string{"n1", "n2", "n3"} {
+		p.Spec.NodeName = node
+		dst := targetPod(p, "", "a", "t", info{})
+		exprs := dst.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[0].MatchExpressions
+		want := []corev1.NodeSelectorRequirement{own, {Key: "kubernetes.io/hostname", Operator: corev1.NodeSelectorOpNotIn, Values: []string{node}}}
+		if !reflect.DeepEqual(exprs, want) {
+			t.Errorf("move %d, from %s: affinity %+v, want %+v", i+1, node, exprs, want)
+		}
+		if dst.Annotations[annotationMigratedFrom] != node {
+			t.Errorf("move %d: %s = %q, want %s", i+1, annotationMigratedFrom, dst.Annotations[annotationMigratedFrom], node)
+		}
+		if !strings.HasPrefix(dst.Name, "web-6d4cf56db6-x7k2p-") || len(dst.Name) != len("web-6d4cf56db6-x7k2p-")+6 {
+			t.Errorf("move %d: name %s", i+1, dst.Name)
+		}
+		p = dst
+	}
+	// Pinned to a node, the last move adds no term of its own, and takes
+	// out the one before it, leaving the user's.
+	p.Spec.NodeName = "n4"
+	dst := targetPod(p, "n5", "a", "t", info{})
+	if exprs := dst.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms[0].MatchExpressions; !reflect.DeepEqual(exprs, []corev1.NodeSelectorRequirement{own}) {
+		t.Errorf("pinned: affinity %+v, want only the user's", exprs)
+	}
+	if _, ok := dst.Annotations[annotationMigratedFrom]; ok {
+		t.Error("pinned: still marked as placed by the scheduler")
+	}
+	// Without a user's term, nothing is left behind: an empty term would
+	// match no node.
+	bare := running(func(p *corev1.Pod) { p.Spec.NodeName = "n1" })
+	moved := targetPod(bare, "", "a", "t", info{})
+	moved.Spec.NodeName = "n2"
+	if again := targetPod(moved, "n3", "a", "t", info{}); again.Spec.Affinity != nil {
+		t.Errorf("pinned move of a pod with no affinity of its own: %+v", again.Spec.Affinity)
 	}
 }
