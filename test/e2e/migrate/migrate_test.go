@@ -7,6 +7,7 @@ package migrate
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -44,8 +45,34 @@ func pair(t *testing.T, annotations map[string]string, srcConfig, dstConfig stri
 	dst = framework.NewNamespace(t, "gcr-e2e-dst").Create(id, framework.Spec{Args: counter, Annotations: in, RuntimeConfig: dstConfig})
 	errc := make(chan error, 1)
 	go func() { errc <- dst.Start() }()
-	time.Sleep(2 * time.Second)
+	listening(t)
 	return src, dst, token, errc
+}
+
+// listening waits for the migration target to listen: its Start does once
+// its shim has set the container up, which a slow host takes a while to.
+func listening(t *testing.T) {
+	t.Helper()
+	framework.Eventually(t, time.Minute, "the target to listen on "+addr, func() bool {
+		c, err := net.DialTimeout("tcp", addr, time.Second)
+		if err == nil {
+			c.Close()
+		}
+		return err == nil
+	})
+}
+
+// startResult is the target's Start's result, once the migration into it
+// has ended: a target nothing came into would wait for good.
+func startResult(t *testing.T, started <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-started:
+		return err
+	case <-time.After(2 * time.Minute):
+		t.Fatal("the target is still waiting for a migration")
+		return nil
+	}
 }
 
 func TestMigrate(t *testing.T) { testMigrate(t, "http", "", "", migrate.Options{}) }
@@ -77,7 +104,7 @@ func testMigrate(t *testing.T, scheme, srcConfig, dstConfig string, opts migrate
 	if _, err := control.NewClient("gcr-e2e-src", src.ID).Migrate(t.Context(), scheme+"://"+addr, token, opts); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if err := <-started; err != nil {
+	if err := startResult(t, started); err != nil {
 		t.Fatalf("target: %v", err)
 	}
 	last := src.ReadInt("/tmp/count")
@@ -174,13 +201,13 @@ func testMigrateMemory(t *testing.T, postCopy bool) {
 	dst := framework.NewNamespace(t, "gcr-e2e-dst").Create(id, in)
 	started := make(chan error, 1)
 	go func() { started <- dst.Start() }()
-	time.Sleep(2 * time.Second)
+	listening(t)
 
 	res, err := control.NewClient("gcr-e2e-src", src.ID).Migrate(t.Context(), "http://"+addr, token, migrate.Options{PostCopy: postCopy})
 	if err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if err := <-started; err != nil {
+	if err := startResult(t, started); err != nil {
 		t.Fatalf("target: %v", err)
 	}
 	if postCopy {
@@ -230,14 +257,14 @@ func TestMigratePostCopyFails(t *testing.T) {
 	})
 	started := make(chan error, 1)
 	go func() { started <- dst.Start() }()
-	time.Sleep(2 * time.Second)
+	listening(t)
 
 	_, err := control.NewClient("gcr-e2e-src", src.ID).Migrate(t.Context(), "http://"+addr, token, migrate.Options{PostCopy: true})
 	if err == nil {
 		t.Fatal("migrated to a target that cannot restore it")
 	}
 	t.Logf("failed as it should: %v", err)
-	if err := <-started; err == nil {
+	if err := startResult(t, started); err == nil {
 		t.Fatal("the target started")
 	}
 	if st := src.Status(); st != containerd.Running {
@@ -265,7 +292,7 @@ func TestMigrateOpenConnectionAndLock(t *testing.T) {
 		sleep 0.5
 		(while :; do echo x; sleep 1; done) | nc 127.0.0.1 9000 &
 		flock /tmp/lock -c "sleep 100000" &
-		i=0; while :; do i=$((i+1)); echo $i > /tmp/count; sleep 0.1; done`}
+		i=0; while :; do i=$((i+1)); echo $i > /tmp/count.new && mv /tmp/count.new /tmp/count; sleep 0.1; done`}
 	id := framework.UniqueID("mig-tcp")
 	token := fmt.Sprintf("secret-%d", time.Now().UnixNano())
 	hostUsers := map[string]string{userns.AnnotationHostUsers: "true"}
@@ -274,6 +301,7 @@ func TestMigrateOpenConnectionAndLock(t *testing.T) {
 	dst := framework.NewNamespace(t, "gcr-e2e-dst").Create(id, framework.Spec{Args: script, Annotations: in})
 	started := make(chan error, 1)
 	go func() { started <- dst.Start() }()
+	listening(t)
 	framework.Eventually(t, 30*time.Second, "the source's connection to be established", func() bool {
 		out, _ := src.Exec("netstat", "-tn")
 		return strings.Contains(out, "ESTABLISHED")
@@ -281,7 +309,7 @@ func TestMigrateOpenConnectionAndLock(t *testing.T) {
 	if _, err := control.NewClient("gcr-e2e-src", src.ID).Migrate(t.Context(), "http://"+addr, token, migrate.Options{}); err != nil {
 		t.Fatalf("migrate with an open connection and a lock: %v", err)
 	}
-	if err := <-started; err != nil {
+	if err := startResult(t, started); err != nil {
 		t.Fatalf("target: %v", err)
 	}
 	last := src.ReadInt("/tmp/count")
@@ -323,13 +351,14 @@ func TestMigrateEmptyDir(t *testing.T) {
 		Annotations: map[string]string{migrate.AnnotationIn: addr, migrate.AnnotationToken: token, userns.AnnotationHostUsers: "true"}})
 	started := make(chan error, 1)
 	go func() { started <- dst.Start() }()
+	listening(t)
 	framework.Eventually(t, 10*time.Second, "the source to count", func() bool { return src.ReadInt("/tmp/count") > 10 })
 
 	res, err := control.NewClient("gcr-e2e-src", src.ID).Migrate(t.Context(), "http://"+addr, token, migrate.Options{})
 	if err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if err := <-started; err != nil {
+	if err := startResult(t, started); err != nil {
 		t.Fatalf("target: %v", err)
 	}
 	t.Logf("downtime %s", res.Downtime.Round(time.Millisecond))
