@@ -468,3 +468,38 @@ func TestForkSymlinkedBind(t *testing.T) {
 		t.Fatalf("fork's /etc/resolv.conf: %q (exit %d)", out, code)
 	}
 }
+
+// TestSnapshotAndStop: a checkpoint to move a container by. The container
+// stops once the snapshot is written, so it can't run past it, and a fork
+// of the snapshot carries on from where it stopped, not from the start.
+func TestSnapshotAndStop(t *testing.T) {
+	ns := framework.NewNamespace(t, "gcr-e2e")
+	src := ns.Run(framework.UniqueID("stop"), framework.Spec{Args: []string{"sh", "-c", counter}})
+	framework.Eventually(t, time.Minute, "the container to count", func() bool {
+		n, err := strconv.Atoi(func() string { s, _ := src.ReadFile("/tmp/count"); return s }())
+		return err == nil && n > 10
+	})
+	dir := filepath.Join(framework.TempDir(t), "checkpoint")
+	if err := control.NewClient(ns.Name, src.ID).SnapshotAndStop(t.Context(), dir); err != nil {
+		t.Fatalf("snapshot and stop: %v", err)
+	}
+	framework.Eventually(t, 10*time.Second, "the container to stop", func() bool { return src.Status() == containerd.Stopped })
+
+	fork := ns.Run(framework.UniqueID("restored"), framework.Spec{
+		Args:        []string{"sh", "-c", counter},
+		Annotations: map[string]string{container.AnnotationForkFrom: dir},
+	})
+	// The count the container had when it was frozen is in the
+	// snapshot's writable layer: the restore carries on from exactly it.
+	b, err := os.ReadFile(filepath.Join(dir, "upper", "tmp", "count"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	at, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	first := fork.ReadInt("/tmp/count")
+	if at <= 10 || first < at || first > at+2 {
+		t.Fatalf("stopped at %d, restored counting at %d: it should carry on from there", at, first)
+	}
+	framework.Eventually(t, 10*time.Second, "the restored container to count on", func() bool { return fork.ReadInt("/tmp/count") > first+5 })
+	t.Logf("stopped at %d, restored at %d", at, first)
+}

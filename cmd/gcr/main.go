@@ -8,7 +8,7 @@
 //	gcr [-n namespace] timeline ID
 //	gcr [-n namespace] rewind ID POINT
 //	gcr [-n namespace] point ID [LABEL]
-//	gcr [-n namespace] snapshot ID DIR
+//	gcr [-n namespace] snapshot [-stop] ID DIR
 //	gcr [-n namespace] info ID
 //	gcr snapshot-users DIR
 //	gcr snapshot-rm DIR...
@@ -49,7 +49,7 @@ func main() {
 			"       gcr [-n namespace] timeline ID\n"+
 			"       gcr [-n namespace] rewind ID POINT\n"+
 			"       gcr [-n namespace] point ID [LABEL]\n"+
-			"       gcr [-n namespace] snapshot ID DIR\n"+
+			"       gcr [-n namespace] snapshot [-stop] ID DIR\n"+
 			"       gcr [-n namespace] info ID\n"+
 			"       gcr snapshot-users DIR\n"+
 			"       gcr snapshot-rm DIR...\n"+
@@ -135,10 +135,21 @@ func run(ctx context.Context, ns string, args []string) error {
 		}
 		fmt.Printf("#%d\n", p.ID)
 		return nil
-	case len(args) == 3 && args[0] == "snapshot":
-		// The container keeps running; containers created with the
-		// annotation gcr.dev/fork-from=DIR start from the snapshot.
-		return control.NewClient(ns, args[1]).Snapshot(ctx, args[2])
+	case len(args) >= 3 && args[0] == "snapshot":
+		// The container keeps running, unless -stop; containers created
+		// with the annotation gcr.dev/fork-from=DIR start from the
+		// snapshot.
+		fs := flag.NewFlagSet("snapshot", flag.ExitOnError)
+		stop := fs.Bool("stop", false, "stop the container once the snapshot is written: a checkpoint to restore it elsewhere from")
+		_ = fs.Parse(args[1:])
+		if fs.NArg() != 2 {
+			flag.Usage()
+			os.Exit(2)
+		}
+		if *stop {
+			return control.NewClient(ns, fs.Arg(0)).SnapshotAndStop(ctx, fs.Arg(1))
+		}
+		return control.NewClient(ns, fs.Arg(0)).Snapshot(ctx, fs.Arg(1))
 	case len(args) == 2 && args[0] == "snapshot-users":
 		// The containers that mount it and the snapshots taken of them.
 		users, err := snapshot.Users(args[1])

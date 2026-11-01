@@ -14,7 +14,7 @@ gcr version
 gcr [-n namespace] timeline ID
 gcr [-n namespace] rewind ID POINT
 gcr [-n namespace] point ID [LABEL]
-gcr [-n namespace] snapshot ID DIR
+gcr [-n namespace] snapshot [-stop] ID DIR
 gcr snapshot-users DIR
 gcr snapshot-rm DIR...
 gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF
@@ -96,11 +96,19 @@ them.
 
 ## Snapshots and forks
 
-### `gcr snapshot ID DIR`
+### `gcr snapshot [-stop] ID DIR`
 
 Writes the running container's processes and writable layer to `DIR`,
 and leaves it running. `DIR` must be empty or absent. Containers created
 with `gcr.dev/fork-from=DIR` start from it ([fork](fork.md)).
+
+With `-stop`, the container stops once the snapshot is written: its
+processes are killed while still frozen, so nothing they do comes after
+what the snapshot holds, and a container started from it carries on from
+there. It's a checkpoint to move a container by, on this node or, pushed
+with `gcr snapshot-push`, on another. If the snapshot fails, the container
+runs on. A Kubernetes pod's container stopped this way isn't restarted on
+this node by its kubelet: it goes on elsewhere.
 
 ### `gcr snapshot-users DIR`
 

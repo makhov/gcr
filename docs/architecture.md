@@ -80,7 +80,7 @@ What each feature adds on top:
 | Feature | What it is in CRIU terms |
 | --- | --- |
 | Checkpoint / restore | containerd's own: a dump to a checkpoint image, a restore into a new task |
-| Snapshot (`gcr snapshot`) | a dump that leaves the container running (`leave-running`), plus a copy of the writable layer |
+| Snapshot (`gcr snapshot`) | a dump that leaves the container running (`leave-running`), plus a copy of the writable layer; with `-stop`, the container is killed once it is written |
 | Fork (`gcr.dev/fork-from`) | a restore of a snapshot into a new container, whose rootfs is the image, then the snapshot's layers read-only, then its own empty writable layer |
 | Time travel | a dump at each `execve`, held by the supervisor; incremental where the kernel tracks dirty pages (parent images); a rewind is a restore in place |
 | Live migration | pre-dumps streamed to page servers on the target, then a final dump and the writable layer; the target restores |
