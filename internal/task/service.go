@@ -106,9 +106,9 @@ type extras struct {
 	id         string
 	// shutdownUID is the pod's UID if the container is to be checkpointed
 	// when the node shuts down (nodeshutdown.PodUID).
-	shutdownUID  string
+	shutdownUID string
 	// crio: CRI-O created the container (Kill answers it as it expects).
-	crio bool
+	crio         bool
 	shutdownOnce sync.Once
 	checkpointed bool // by checkpointForShutdown, set within shutdownOnce
 	// netPolicy covers cgroupID, if not 0.
