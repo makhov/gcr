@@ -289,16 +289,17 @@ func Movable(p *corev1.Pod) (string, error) {
 		// deleted; ReplicaSets' and Jobs' pods are handed over (handOver).
 		return "", fmt.Errorf("owned by %s %s: only pods without an owner, or a ReplicaSet's or a Job's, can be moved yet", p.OwnerReferences[0].Kind, p.OwnerReferences[0].Name)
 	}
+	if p.Status.Phase != corev1.PodRunning {
+		return "", fmt.Errorf("not running (%s)", p.Status.Phase)
+	}
 	return movable(p, false)
 }
 
-// movable checks what Movable does but for the pod's owner; with claims,
+// movable checks what Movable does but for the pod's owner and phase; with claims,
 // PersistentVolumeClaims are allowed, which follow the pod if it is not
 // running meanwhile (whether they are node-local is checked elsewhere).
 func movable(p *corev1.Pod, claims bool) (string, error) {
 	switch {
-	case p.Status.Phase != corev1.PodRunning:
-		return "", fmt.Errorf("not running (%s)", p.Status.Phase)
 	case len(p.Spec.Containers) != 1 || len(p.Status.ContainerStatuses) != 1:
 		return "", fmt.Errorf("%d containers: only pods with one can be moved yet", len(p.Spec.Containers))
 	case p.Spec.HostUsers != nil && !*p.Spec.HostUsers:

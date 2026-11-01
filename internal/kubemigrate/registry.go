@@ -38,6 +38,10 @@ const (
 	// forkWait is how long the replacement's shim waits for the
 	// checkpoint to be pulled to its node (container.MaxForkWait at most).
 	forkWait = "100s"
+	// pushWait is how long a checkpoint taken as its node shut down may
+	// take to reach the registry: the node's gcr shutdown-guard holds the
+	// shutdown for 80 s by default.
+	pushWait = 3 * time.Minute
 )
 
 // RegistryOptions say where checkpoints go.
@@ -71,6 +75,16 @@ type Restore struct {
 // StatefulSet's, whose PersistentVolumeClaims follow it (unless they are
 // node-local, which MigrateViaRegistry checks; a bare pod has none).
 func MovableThroughRegistry(p *corev1.Pod) (string, error) {
+	if p.Status.Phase != corev1.PodRunning {
+		return "", fmt.Errorf("not running (%s)", p.Status.Phase)
+	}
+	return MovableAtShutdown(p)
+}
+
+// MovableAtShutdown says whether RestoreAfterShutdown can restore the pod,
+// checkpointed as its node shut down: as MovableThroughRegistry, whether
+// or not it is still running.
+func MovableAtShutdown(p *corev1.Pod) (string, error) {
 	if len(p.OwnerReferences) > 0 && !ownedBy(p, "StatefulSet") {
 		return "", fmt.Errorf("owned by %s %s: through a registry, only pods without an owner, or a StatefulSet's, can be moved yet",
 			p.OwnerReferences[0].Kind, p.OwnerReferences[0].Name)
@@ -467,4 +481,156 @@ func Steer(pod *corev1.Pod, r Restore) ([]byte, error) {
 		{"op": "add", "path": "/metadata/annotations", "value": ann},
 		{"op": "add", "path": "/spec/runtimeClassName", "value": RuntimeClass},
 	})
+}
+
+// RestoreAfterShutdown restores pod src, which its node's shutdown stopped
+// at a checkpoint (internal/nodeshutdown): the node's shim checkpoints it
+// as the kubelet stops it, and gcr shutdown-guard pushes the checkpoint to
+// r, tagged with the pod's UID. A StatefulSet's pod is restored in the pod
+// its StatefulSet creates again, steered by a pending restore recorded
+// here (which must be before the StatefulSet sees src fail); a bare pod
+// in a replacement made here. If the checkpoint never arrives, the
+// StatefulSet's pod starts cold, and the bare pod is left failed.
+func RestoreAfterShutdown(ctx context.Context, cs kubernetes.Interface, src *corev1.Pod, rs *Restore, o Options, r RegistryOptions) (res Result, retErr error) {
+	if o.Timeout == 0 {
+		o.Timeout = 5 * time.Minute
+	}
+	if o.GCR == "" {
+		o.GCR = "/usr/local/bin/gcr"
+	}
+	if o.Log == nil {
+		o.Log = func(string, ...any) {}
+	}
+	ns, name, log := src.Namespace, src.Name, o.Log
+	if _, err := MovableAtShutdown(src); err != nil {
+		return res, fmt.Errorf("%s/%s: %w", ns, name, err)
+	}
+	dir := path.Join(checkpointDir, string(src.UID))
+	ref := r.Repository + ":" + string(src.UID)
+	begin := time.Now()
+	var err error
+
+	if !ownedBy(src, "StatefulSet") {
+		dst := targetPod(src, "", "", "", info{})
+		delete(dst.Annotations, annotationMigrateIn)
+		delete(dst.Annotations, annotationMigrateToken)
+		dst.Annotations[annotationForkFrom] = dir
+		dst.Annotations[annotationForkWait] = forkWait
+		if dst, err = cs.CoreV1().Pods(ns).Create(ctx, dst, metav1.CreateOptions{}); err != nil {
+			return res, fmt.Errorf("create the replacement: %w", err)
+		}
+		res.Target = dst.Name
+		done := false
+		defer func() {
+			if !done {
+				_ = cs.CoreV1().Pods(ns).Delete(context.WithoutCancel(ctx), dst.Name, metav1.DeleteOptions{GracePeriodSeconds: new(int64)})
+			}
+		}()
+		log("replacement %s created, to restore from %s", dst.Name, ref)
+		if dst, err = waitScheduled(ctx, cs, ns, dst.Name, o.Timeout); err != nil {
+			return res, err
+		}
+		res.Node = dst.Spec.NodeName
+		if err := pullWhenPushed(ctx, cs, o, r, res.Node, ref, dir); err != nil {
+			return res, err
+		}
+		if err := waitReady(ctx, cs, ns, dst.Name, o.Timeout); err != nil {
+			return res, fmt.Errorf("%s restored from %s, but it is not Ready: %w", dst.Name, ref, err)
+		}
+		done = true
+		res.Downtime = time.Since(begin).Round(time.Millisecond).String() + " (from the shutdown seen to Ready)"
+		if err := cs.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: new(int64)}); err != nil && !apierrors.IsNotFound(err) {
+			log("deleting %s: %v", name, err)
+		}
+		return res, nil
+	}
+
+	if rs == nil {
+		if rs, err = ShutdownRestore(src, r); err != nil {
+			return res, err
+		}
+		if err := RecordRestore(ctx, cs, o.Namespace, ns, name, *rs); err != nil {
+			return res, fmt.Errorf("record the restore: %w", err)
+		}
+	}
+	token := rs.Token
+	defer func() {
+		if err := ForgetRestore(context.WithoutCancel(ctx), cs, o.Namespace, ns, name); err != nil {
+			log("forgetting the restore: %v", err)
+		}
+	}()
+	log("waiting for its StatefulSet to create %s again, to restore from %s", name, ref)
+	dst, err := waitRecreated(ctx, cs, ns, name, src.UID, pushWait+o.Timeout)
+	if err != nil {
+		return res, err
+	}
+	res.Target, res.Node = dst.Name, dst.Spec.NodeName
+	if dst.Annotations[AnnotationRestoreToken] != token {
+		return res, fmt.Errorf("%s was created again without restoring, so it started cold: gcr-operator's webhook did not steer it", name)
+	}
+	cold := func(err error) error {
+		uid := dst.UID
+		_ = cs.CoreV1().Pods(ns).Delete(context.WithoutCancel(ctx), name, metav1.DeleteOptions{
+			GracePeriodSeconds: new(int64), Preconditions: &metav1.Preconditions{UID: &uid}})
+		return fmt.Errorf("%w (deleted %s again, for its StatefulSet to start it cold)", err, name)
+	}
+	if err := pullWhenPushed(ctx, cs, o, r, res.Node, ref, dir); err != nil {
+		return res, cold(err)
+	}
+	if err := waitReady(ctx, cs, ns, name, o.Timeout); err != nil {
+		return res, cold(fmt.Errorf("%s restored from %s, but it is not Ready: %w", name, ref, err))
+	}
+	res.Downtime = time.Since(begin).Round(time.Millisecond).String() + " (from the shutdown seen to Ready)"
+	return res, nil
+}
+
+// ShutdownRestore is the pending restore of a StatefulSet's pod src, which
+// its node's shutdown checkpointed, to record before its StatefulSet
+// creates it again.
+func ShutdownRestore(src *corev1.Pod, r RegistryOptions) (*Restore, error) {
+	token, err := randomToken()
+	if err != nil {
+		return nil, err
+	}
+	return &Restore{Token: token, Dir: path.Join(checkpointDir, string(src.UID)), Ref: r.Repository + ":" + string(src.UID),
+		UID: string(src.UID), Node: src.Spec.NodeName, Since: time.Now().UTC()}, nil
+}
+
+// StoppedByShutdown says whether the kubelet stopped pod p for a graceful
+// node shutdown, which the node's shim checkpointed it in, if it opted in.
+func StoppedByShutdown(p *corev1.Pod) bool {
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.DisruptionTarget && c.Status == corev1.ConditionTrue &&
+			c.Reason == corev1.PodReasonTerminationByKubelet && strings.Contains(c.Message, "node shutdown") {
+			return true
+		}
+	}
+	return p.Status.Reason == "Terminated" && strings.Contains(p.Status.Message, "node shutdown")
+}
+
+// pullWhenPushed pulls the checkpoint at ref into dir on node, once it is
+// there: the shut-down node's guard pushes it as soon as it can.
+func pullWhenPushed(ctx context.Context, cs kubernetes.Interface, o Options, r RegistryOptions, node, ref, dir string) error {
+	o.Log("pulling %s on %s once it is pushed", ref, node)
+	script := fmt.Sprintf(`i=0
+until %[1]s snapshot-pull%[2]s %[3]s %[4]s; do
+  i=$((i+1)); [ $i -lt %[5]d ] || exit 1
+  rm -rf %[4]s; sleep 2
+done
+echo pulled`, o.GCR, plainHTTP(r), ref, dir, int(pushWait/(2*time.Second)))
+	if out, err := runJob(ctx, cs, o, node, "pull", nil, "sh", "-c", script); errors.Is(err, errNoOutput) {
+		o.Log("%v", err) // it succeeded
+	} else if err != nil {
+		return fmt.Errorf("pull on %s: %w\n%s", node, err, lastLines(out, 5))
+	}
+	return nil
+}
+
+// lastLines returns s's last n lines.
+func lastLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }

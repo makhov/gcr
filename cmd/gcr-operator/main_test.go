@@ -11,6 +11,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/makhov/gcr/internal/kubemigrate"
@@ -243,5 +244,50 @@ func TestSteer(t *testing.T) {
 	o.registry = kubemigrate.RegistryOptions{}
 	if resp := o.steer(ctx, review("web-0", "StatefulSet")); resp.Patch != nil {
 		t.Error("steered with no registry")
+	}
+}
+
+// A StatefulSet's pod the kubelet stopped as its node shut down: the pod
+// its StatefulSet creates again is steered to its checkpoint, whether the
+// informer told the operator first or the webhook asks first.
+func TestShutdownRestore(t *testing.T) {
+	yes := true
+	ctx := context.Background()
+	stopped := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-0", Namespace: "default", UID: "u1", Annotations: map[string]string{annotationOptIn: "true"},
+			OwnerReferences: []metav1.OwnerReference{{Kind: "StatefulSet", Name: "web", Controller: &yes}}},
+		Spec: corev1.PodSpec{NodeName: "n1", Containers: []corev1.Container{{Name: "c"}}},
+		Status: corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Terminated", Message: "Pod was terminated in response to imminent node shutdown.",
+			ContainerStatuses: []corev1.ContainerStatus{{Name: "c", ContainerID: "containerd://abc"}}},
+	}
+	created := func() *admissionv1.AdmissionRequest {
+		p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "web-0", Annotations: map[string]string{annotationOptIn: "true"},
+			OwnerReferences: stopped.OwnerReferences}}
+		raw, _ := json.Marshal(p)
+		return &admissionv1.AdmissionRequest{Namespace: "default", Object: runtime.RawExtension{Raw: raw}}
+	}
+	for _, informerFirst := range []bool{true, false} {
+		cs := fake.NewSimpleClientset()
+		var restored []*kubemigrate.Restore
+		o := &operator{cs: cs, opts: kubemigrate.Options{Namespace: "gcr-system"}, registry: kubemigrate.RegistryOptions{Repository: "reg/x"},
+			moving: map[string]bool{}, restoring: map[types.UID]*kubemigrate.Restore{}, last: map[string]lastPod{},
+			startRestore: func(_ *corev1.Pod, rs *kubemigrate.Restore) { restored = append(restored, rs) }}
+		if informerFirst {
+			o.seen(stopped, false)
+		} else {
+			// The informer saw it running; the StatefulSet saw it fail.
+			running := stopped.DeepCopy()
+			running.Status = corev1.PodStatus{Phase: corev1.PodRunning}
+			o.seen(running, false)
+			go func() { time.Sleep(300 * time.Millisecond); o.seen(stopped, false) }()
+		}
+		resp := o.steer(ctx, created())
+		if resp.Patch == nil {
+			t.Fatalf("informer first %v: not steered", informerFirst)
+		}
+		o.seen(stopped, true) // and again: restored once
+		if len(restored) != 1 || restored[0] == nil || !strings.Contains(string(resp.Patch), restored[0].Token) {
+			t.Fatalf("informer first %v: restores started %v; patch %s", informerFirst, restored, resp.Patch)
+		}
 	}
 }

@@ -173,3 +173,22 @@ $ GCR_MIGRATE_TOKEN=... gcr migrate demo https://node-b:7781
 pre-copy rounds: 3 (pages [65536 812 40])
 downtime: 212ms
 ```
+
+### `gcr shutdown-guard [-plain-http] [-wait DURATION] REPOSITORY`
+
+Runs on a Kubernetes node, as the systemd unit
+`deploy/gcr-shutdown-guard.service`. When the node shuts down, the pods
+that opted in to moving (`gcr.dev/migrate-on-evict: "true"`) are
+checkpointed as the kubelet stops them. Each checkpoint is pushed to
+`REPOSITORY`, tagged with its pod's UID, for gcr-operator to restore
+elsewhere ([node shutdown](migration.md#node-shutdown)).
+
+It holds a systemd-logind delay lock on shutdowns. When a shutdown starts,
+it marks the node as shutting down (`/run/gcr/shutdown`), and pushes each
+checkpoint as the shim writes it. It releases the lock once the kubelet has
+released its own (it has stopped every pod) and every checkpoint is pushed
+or has failed.
+
+- `-wait DURATION`: the longest it holds a shutdown (80 s). logind's
+  `InhibitDelayMaxSec` bounds it too, and must be at least as long.
+- `-plain-http`: speak HTTP to the registry.

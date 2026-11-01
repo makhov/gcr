@@ -223,3 +223,29 @@ Started with `-registry` (and `-plain-http` for a registry without TLS), the ope
 - if the checkpoint or the pull fails after the stop, the operator deletes the pod.
 
 kubectl drain evicts by name and retries, so its retries reach the pod created again. The operator answers those 404 (the pod evicted is gone), unless the new pod's own node is being drained too.
+
+### Node shutdown
+
+When a node shuts down gracefully (`systemctl poweroff`, or a cloud's spot reclaim through the kubelet's graceful node shutdown), its opted-in pods are checkpointed as the kubelet stops them, and restored on another node: a StatefulSet's pod in the pod the StatefulSet creates again, a bare pod in a replacement the operator creates. On two k0s VMs, both carried on counting 3.3 to 4.6 s after `systemctl poweroff`, with 0 restarts. Deployments' and Jobs' pods aren't restored yet; they start cold, as without gcr.
+
+Each node needs:
+- **The kubelet's graceful node shutdown:** `shutdownGracePeriod` in its configuration (`workerProfiles` on k0s).
+- **logind holding shutdowns long enough** for the kubelet and the pushes: `InhibitDelayMaxSec` at least as long as `shutdownGracePeriod`, in a drop-in that sorts last. Ubuntu's `unattended-upgrades-logind-maxdelay.conf` sets 30 s and sorts after `99-kubelet.conf`, which the kubelet writes:
+  ```ini
+  # /etc/systemd/logind.conf.d/zz-gcr.conf
+  [Login]
+  InhibitDelayMaxSec=90
+  ```
+- **`gcr shutdown-guard`,** from `deploy/gcr-shutdown-guard.service`, with the operator's registry in `/etc/gcr/shutdown-guard.env`, and credentials for it in root's Docker config:
+  ```sh
+  GCR_SHUTDOWN_REGISTRY=registry.example.com/gcr/checkpoints
+  GCR_SHUTDOWN_ARGS=-wait 80s
+  ```
+
+What happens:
+1. The guard holds a logind delay lock, beside the kubelet's. When logind signals the shutdown, it marks the node as shutting down.
+2. The kubelet stops the pods. For a pod that opted in, the shim checkpoints and stops the container before the kubelet's signal reaches it, into `/var/lib/gcr/checkpoints/<pod UID>`.
+3. The guard pushes each checkpoint, tagged with the pod's UID, and lets the shutdown go on once the kubelet has stopped its pods and the checkpoints are pushed.
+4. gcr-operator (with `-registry`) sees the pod stopped for the shutdown, and restores it on another node. The checkpoint is pulled there once it has arrived.
+
+Run the operator on nodes that aren't shut down this way (on-demand nodes, or the control plane): its own pod stops with the node. If it misses a StatefulSet's pod, the pod starts cold.

@@ -12,6 +12,9 @@
 // With -registry, a StatefulSet's pod moves through a checkpoint there:
 // it is stopped at a checkpoint and deleted, and a mutating webhook on pod
 // creation steers the pod its StatefulSet creates again to restore from it.
+// And pods on a node shutting down, which the node's gcr shutdown-guard
+// checkpoints to the registry, are restored elsewhere: a StatefulSet's in
+// the pod it creates again, a bare pod in a replacement.
 package main
 
 import (
@@ -42,8 +45,10 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/cache"
 
 	"github.com/makhov/gcr/internal/kubemigrate"
 )
@@ -95,14 +100,15 @@ func main() {
 		log.Fatalf("webhook %s: %v", *webhook, err)
 	}
 
-	op := &operator{cs: cs, opts: kubemigrate.Options{Namespace: *namespace, Image: *image, GCR: *gcrPath}, moving: map[string]bool{}, replaced: map[string]time.Time{},
+	op := &operator{cs: cs, opts: kubemigrate.Options{Namespace: *namespace, Image: *image, GCR: *gcrPath}, moving: map[string]bool{}, replaced: map[string]time.Time{}, restoring: map[types.UID]*kubemigrate.Restore{}, last: map[string]lastPod{},
 		self: metav1.ObjectMeta{Namespace: *namespace, Name: os.Getenv("POD_NAME")}, node: os.Getenv("NODE_NAME")}
 	if *registry != "" {
 		if err := restoresReady(ctx, cs, *webhook); err != nil {
 			log.Printf("StatefulSets' pods are evicted, not moved: %v", err)
 		} else {
 			op.registry = kubemigrate.RegistryOptions{Repository: *registry, PlainHTTP: *plainHTTP}
-			log.Printf("StatefulSets' pods move through %s", *registry)
+			log.Printf("StatefulSets' pods move through %s, and pods on nodes shutting down are restored from it", *registry)
+			go op.watchShutdowns(ctx)
 		}
 	}
 	mux := http.NewServeMux()
@@ -138,10 +144,20 @@ type operator struct {
 	// replaced is when StatefulSets' pods moved (or were deleted trying),
 	// by namespace/name: those pods' StatefulSets created them again.
 	replaced map[string]time.Time
+	// restoring is the pods stopped at their nodes' shutdowns being
+	// restored, or tried, by UID: with a StatefulSet's pod's pending
+	// restore. shutdownMu serializes starting them.
+	restoring  map[types.UID]*kubemigrate.Restore
+	shutdownMu sync.Mutex
+	// last is the last the informer saw of StatefulSets' opted-in pods,
+	// by namespace/name.
+	last     map[string]lastPod
 	stopping bool // on its way out: it starts no migration
 	moves    sync.WaitGroup
-	// start moves a pod in the background: move, but for tests.
-	start func(*corev1.Pod)
+	// start moves a pod in the background: move, but for tests; and
+	// startRestore restores one: restore.
+	start        func(*corev1.Pod)
+	startRestore func(*corev1.Pod, *kubemigrate.Restore)
 	// self is the operator's own pod, on node.
 	self metav1.ObjectMeta
 	node string
@@ -334,6 +350,156 @@ func (o *operator) waitingOnNode(ctx context.Context) int {
 	return n
 }
 
+// watchShutdowns restores the opted-in pods the kubelet stops for a
+// graceful node shutdown: their shims checkpoint them as it stops them,
+// and the nodes' gcr shutdown-guard pushes the checkpoints. An informer
+// sees the kubelet's status on the pod as it is posted; and it keeps the
+// last of each StatefulSet's pod, for the webhook to steer the pod its
+// StatefulSet creates again even before then (lateRestore).
+func (o *operator) watchShutdowns(ctx context.Context) {
+	f := informers.NewSharedInformerFactory(o.cs, 0)
+	pods := f.Core().V1().Pods().Informer()
+	_, _ = pods.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj any) { o.seen(obj, false) },
+		UpdateFunc: func(_, obj any) { o.seen(obj, false) },
+		DeleteFunc: func(obj any) {
+			if t, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+				obj = t.Obj
+			}
+			o.seen(obj, true)
+		},
+	})
+	f.Start(ctx.Done())
+}
+
+// seen follows a pod from the informer.
+func (o *operator) seen(obj any, deleted bool) {
+	p, ok := obj.(*corev1.Pod)
+	if !ok || p.Annotations[annotationOptIn] != "true" {
+		return
+	}
+	if o.throughRegistry(p) {
+		key := p.Namespace + "/" + p.Name
+		o.mu.Lock()
+		o.last[key] = lastPod{p, deleted, time.Now()}
+		for k, l := range o.last {
+			if l.gone && time.Since(l.at) > kubemigrate.RestoreTTL {
+				delete(o.last, k)
+			}
+		}
+		o.mu.Unlock()
+	}
+	if !deleted && kubemigrate.StoppedByShutdown(p) {
+		o.shutdownStopped(p)
+	}
+}
+
+// lastPod is the last the informer saw of a StatefulSet's pod.
+type lastPod struct {
+	pod  *corev1.Pod
+	gone bool
+	at   time.Time
+}
+
+// shutdownStopped starts restoring p, stopped as its node shut down, once,
+// and returns a StatefulSet's pod's pending restore.
+func (o *operator) shutdownStopped(p *corev1.Pod) *kubemigrate.Restore {
+	o.shutdownMu.Lock()
+	defer o.shutdownMu.Unlock()
+	key := p.Namespace + "/" + p.Name
+	o.mu.Lock()
+	rs, started := o.restoring[p.UID]
+	stopping := o.stopping
+	o.mu.Unlock()
+	if started || stopping {
+		return rs
+	}
+	if _, err := kubemigrate.MovableAtShutdown(p); err != nil {
+		log.Printf("%s: its node %s shut down, and it cannot be restored elsewhere: %v", key, p.Spec.NodeName, err)
+	} else if o.throughRegistry(p) {
+		if rs, err = kubemigrate.ShutdownRestore(p, o.registry); err == nil {
+			err = kubemigrate.RecordRestore(context.Background(), o.cs, o.opts.Namespace, p.Namespace, p.Name, *rs)
+		}
+		if err != nil {
+			log.Printf("%s: its node %s shut down, and its restore could not be recorded: %v", key, p.Spec.NodeName, err)
+			rs = nil
+		}
+	}
+	o.mu.Lock()
+	o.restoring[p.UID] = rs
+	o.mu.Unlock()
+	if rs == nil && o.throughRegistry(p) {
+		return nil
+	}
+	o.moves.Add(1)
+	if o.startRestore != nil {
+		o.startRestore(p, rs)
+		o.moves.Done()
+	} else {
+		go o.restore(p, rs)
+	}
+	return rs
+}
+
+// lateRestore is the pending restore for a StatefulSet's pod ns/name being
+// created again, when there is none yet: its StatefulSet may replace the
+// pod the kubelet stopped at its node's shutdown before the informer has
+// told the operator. It waits for the informer a little, if the pod it
+// replaces was on a node that is not Ready.
+func (o *operator) lateRestore(ctx context.Context, ns, name string) *kubemigrate.Restore {
+	key := ns + "/" + name
+	o.mu.Lock()
+	l, ok := o.last[key]
+	o.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	if !kubemigrate.StoppedByShutdown(l.pod) {
+		if nodeReady(ctx, o.cs, l.pod.Spec.NodeName) {
+			return nil // replaced on a working node: a rollout, say
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for !kubemigrate.StoppedByShutdown(l.pod) {
+			if time.Now().After(deadline) {
+				return nil
+			}
+			time.Sleep(100 * time.Millisecond)
+			o.mu.Lock()
+			l = o.last[key]
+			o.mu.Unlock()
+		}
+	}
+	return o.shutdownStopped(l.pod)
+}
+
+func nodeReady(ctx context.Context, cs kubernetes.Interface, name string) bool {
+	n, err := cs.CoreV1().Nodes().Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	for _, c := range n.Status.Conditions {
+		if c.Type == corev1.NodeReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
+}
+
+// restore restores pod, which its node's shutdown checkpointed.
+func (o *operator) restore(pod *corev1.Pod, rs *kubemigrate.Restore) {
+	defer o.moves.Done()
+	key := pod.Namespace + "/" + pod.Name
+	opts := o.opts
+	opts.Log = func(format string, args ...any) { log.Printf(key+": "+format, args...) }
+	log.Printf("%s: stopped as its node %s shuts down: restoring it elsewhere from its checkpoint", key, pod.Spec.NodeName)
+	res, err := kubemigrate.RestoreAfterShutdown(context.Background(), o.cs, pod, rs, opts, o.registry)
+	if err != nil {
+		log.Printf("%s: not restored: %v", key, err)
+		return
+	}
+	log.Printf("%s restored on %s as %s (downtime %s)", key, res.Node, res.Target, res.Downtime)
+}
+
 // throughRegistry says whether pod moves through a checkpoint in the
 // registry, rather than node to node: a StatefulSet's pod can't have a
 // twin running.
@@ -391,6 +557,9 @@ func (o *operator) steer(ctx context.Context, req *admissionv1.AdmissionRequest)
 	if err != nil {
 		log.Printf("%s/%s: %v: it starts cold", req.Namespace, pod.Name, err)
 		return allow
+	}
+	if r == nil {
+		r = o.lateRestore(ctx, req.Namespace, pod.Name)
 	}
 	if r == nil {
 		return allow

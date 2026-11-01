@@ -46,6 +46,7 @@ import (
 	"github.com/makhov/gcr/internal/landlock"
 	"github.com/makhov/gcr/internal/migrate"
 	"github.com/makhov/gcr/internal/netpolicy"
+	"github.com/makhov/gcr/internal/nodeshutdown"
 	"github.com/makhov/gcr/internal/ocispec"
 	"github.com/makhov/gcr/internal/snapshot"
 	"github.com/makhov/gcr/internal/supervisor"
@@ -103,6 +104,11 @@ type extras struct {
 	stateDir   string
 	exposed    []string // bind mount sources gcr bound for the container's root
 	id         string
+	// shutdownUID is the pod's UID if the container is to be checkpointed
+	// when the node shuts down (nodeshutdown.PodUID).
+	shutdownUID  string
+	shutdownOnce sync.Once
+	checkpointed bool // by checkpointForShutdown, set within shutdownOnce
 	// netPolicy covers cgroupID, if not 0.
 	netPolicy *netpolicy.Policy
 	cgroupID  uint64
@@ -325,6 +331,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		// gcr's user namespace or one Kubernetes asked for.
 		prep.CgroupOwner = userns.DelegateCgroup(spec)
 		ex.key = migrate.ArrivedKey(spec.Annotations)
+		ex.shutdownUID = nodeshutdown.PodUID(spec.Annotations)
 		if migrate.Departed(ex.key) {
 			// Its processes run on another node now; the kubelet
 			// restarts it in the pod that lingers here until deleted.
@@ -495,30 +502,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			return s.migrateOut(ctx, c, ex, target, token, opts)
 		},
 		Snapshot: func(ctx context.Context, dir string, stop bool) error {
-			// Writing over a snapshot would change forks' files under them.
-			if entries, err := os.ReadDir(dir); err == nil && len(entries) > 0 {
-				return fmt.Errorf("%s is not empty: %w", dir, errdefs.ErrAlreadyExists)
-			}
-			take := c.Snapshot
-			if stop {
-				take = c.SnapshotAndStop
-			}
-			if err := take(ctx, dir); err != nil {
-				// What a failed snapshot wrote is not one, and a fork
-				// must not start from it.
-				_ = os.RemoveAll(dir)
-				return err
-			}
-			if stop {
-				// It goes on elsewhere, from the snapshot: the kubelet
-				// must not restart it here meanwhile, cold.
-				if err := migrate.MarkDeparted(ex.key); err != nil {
-					log.G(ctx).WithError(err).Warn("recording the stop: the kubelet could restart the container here")
-				}
-			}
-			// Its layers are mounted by every fork of it, and its
-			// range is mapped by every one.
-			return snapshot.Record(dir, c.Layers())
+			return s.snapshot(ctx, c, ex, dir, stop)
 		},
 	}
 	if ex.recorder != nil {
@@ -666,6 +650,34 @@ func (s *service) State(ctx context.Context, r *taskAPI.StateRequest) (*taskAPI.
 	return resp, nil
 }
 
+// snapshot snapshots container c into dir, and with stop kills it there.
+func (s *service) snapshot(ctx context.Context, c *container.Container, ex *extras, dir string, stop bool) error {
+	// Writing over a snapshot would change forks' files under them.
+	if entries, err := os.ReadDir(dir); err == nil && len(entries) > 0 {
+		return fmt.Errorf("%s is not empty: %w", dir, errdefs.ErrAlreadyExists)
+	}
+	take := c.Snapshot
+	if stop {
+		take = c.SnapshotAndStop
+	}
+	if err := take(ctx, dir); err != nil {
+		// What a failed snapshot wrote is not one, and a fork
+		// must not start from it.
+		_ = os.RemoveAll(dir)
+		return err
+	}
+	if stop {
+		// It goes on elsewhere, from the snapshot: the kubelet
+		// must not restart it here meanwhile, cold.
+		if err := migrate.MarkDeparted(ex.key); err != nil {
+			log.G(ctx).WithError(err).Warn("recording the stop: the kubelet could restart the container here")
+		}
+	}
+	// Its layers are mounted by every fork of it, and its
+	// range is mapped by every one.
+	return snapshot.Record(dir, c.Layers())
+}
+
 func (s *service) Kill(ctx context.Context, r *taskAPI.KillRequest) (*ptypes.Empty, error) {
 	if r.ExecID != "" {
 		e, err := s.getExec(r.ID, r.ExecID)
@@ -681,10 +693,49 @@ func (s *service) Kill(ctx context.Context, r *taskAPI.KillRequest) (*ptypes.Emp
 	if err != nil {
 		return nil, err
 	}
+	if s.checkpointForShutdown(ctx, c, r.ID) {
+		return empty, nil // stopped at its checkpoint
+	}
 	if err := c.Kill(syscall.Signal(r.Signal), r.All); err != nil {
 		return nil, errgrpc.ToGRPC(err)
 	}
 	return empty, nil
+}
+
+// checkpointForShutdown checkpoints and stops container c, the kubelet
+// stopping it as its node shuts down, if its pod opted in to moving
+// (nodeshutdown): before the signal, which a checkpoint would carry
+// along. It says whether it did. Asked again (SIGTERM, then SIGKILL),
+// it does nothing more: the first ask waits for the checkpoint.
+func (s *service) checkpointForShutdown(ctx context.Context, c *container.Container, id string) bool {
+	s.mu.Lock()
+	ex := s.extras[id]
+	s.mu.Unlock()
+	if ex == nil || ex.shutdownUID == "" || !nodeshutdown.ShuttingDown() {
+		return false
+	}
+	ex.shutdownOnce.Do(func() {
+		uid := ex.shutdownUID
+		log := log.G(ctx).WithField("pod", uid)
+		// The kubelet's context ends with its stop timeout: the
+		// checkpoint is bounded by the shutdown's own delay instead.
+		ctx := context.WithoutCancel(ctx)
+		if err := nodeshutdown.Set(uid, nodeshutdown.Pending, ""); err != nil {
+			log.WithError(err).Warn("node shutdown: not checkpointing")
+			return
+		}
+		dir := nodeshutdown.CheckpointPath(uid)
+		begin := time.Now()
+		if err := s.snapshot(ctx, c, ex, dir, true); err != nil {
+			log.WithError(err).Warn("node shutdown: checkpoint failed; stopping it")
+			_ = nodeshutdown.Set(uid, nodeshutdown.Failed, err.Error())
+			return
+		}
+		ex.checkpointed = true
+		_ = nodeshutdown.Set(uid, nodeshutdown.Ready, "")
+		log.WithField("took", time.Since(begin)).Info("node shutdown: checkpointed and stopped")
+	})
+	return ex.checkpointed
 }
 
 func (s *service) Pids(ctx context.Context, r *taskAPI.PidsRequest) (*taskAPI.PidsResponse, error) {
