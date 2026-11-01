@@ -19,8 +19,10 @@ never held up by the operator.
 
 ## Install
 
-It needs gcr on the cluster ([`gcr.yaml`](install.md#on-kubernetes)), and
-two or more nodes with gcr.
+It needs gcr on the cluster ([installed](install.md#on-kubernetes)), and
+two or more nodes with gcr. With the Helm chart, it's
+`--set operator.enabled=true` (and `--set operator.registry=REPO`,
+[below](#with-a-registry)). Without Helm:
 
 ```sh
 kubectl apply -f https://github.com/makhov/gcr/releases/latest/download/gcr-operator.yaml
@@ -45,7 +47,9 @@ pods start as they would without gcr.
 ### With a registry
 
 StatefulSets and node shutdowns move pods through checkpoints in an OCI
-registry. Give the operator a repository there:
+registry. Give the operator a repository there: with the chart,
+`--set operator.registry=registry.example.com/gcr/checkpoints` (and
+`--set operator.plainHTTP=true` for a registry without TLS); without it:
 
 ```sh
 kubectl -n gcr-system patch deployment gcr-operator --type=json -p '[
@@ -379,6 +383,9 @@ Set in the Deployment's `args`:
   registry as private as the workloads.
 
 ## Uninstalling
+
+With the chart, `helm upgrade gcr … --reuse-values --set operator.enabled=false`;
+without it:
 
 ```sh
 kubectl delete -f https://github.com/makhov/gcr/releases/latest/download/gcr-operator.yaml

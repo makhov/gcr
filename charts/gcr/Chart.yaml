@@ -1,0 +1,14 @@
+apiVersion: v2
+name: gcr
+description: >-
+  gcr, a containerd runtime that snapshots, forks, rewinds and moves running
+  containers, on every node; and, optionally, gcr-operator, which moves pods
+  instead of restarting them when nodes are drained or shut down.
+type: application
+# A release packages the chart as its own version (hack/release.sh).
+version: 0.1.6
+appVersion: v0.1.6
+home: https://makhov.github.io/gcr/
+sources:
+  - https://github.com/makhov/gcr
+keywords: [containerd, runtime, checkpoint, criu, migration, fork]

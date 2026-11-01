@@ -2,21 +2,38 @@
 #
 #   kubectl apply -f gcr.yaml
 #
-# A DaemonSet runs `gcr setup` on each node (install.sh): it installs the
-# shim and gcr's CRIU, registers the runtime with containerd and restarts
-# it (running pods carry on), and labels the node gcr.dev/runtime=ready.
-# Pods with runtimeClassName: gcr run there. A node that lacks something
-# gcr needs keeps its pod crash-looping, with gcr doctor's report in its
-# logs. Deleting this leaves gcr installed on the nodes, but unlabels them.
+# A DaemonSet runs `gcr setup` on each node: it installs the shim and gcr's
+# CRIU, registers the runtime with containerd, and labels the node
+# gcr.dev/runtime=ready. Pods with runtimeClassName: gcr run there. The
+# chart (helm install gcr charts/gcr) does the same, with options.
+#
+# Generated from charts/gcr by `make manifests`: change the chart.
+---
 apiVersion: v1
 kind: Namespace
 metadata:
   name: gcr-system
 ---
+# A DaemonSet runs `gcr setup` on each node (deploy/install.sh): it installs
+# the shim and gcr's CRIU, registers the runtime with containerd and
+# restarts it (running pods carry on), and labels the node
+# gcr.dev/runtime=ready. Pods with runtimeClassName: gcr run there. A node
+# that lacks something gcr needs keeps its pod crash-looping, with gcr
+# doctor's report in its logs. Deleting it leaves gcr installed on the
+# nodes, but unlabels them.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: gcr-installer
+  namespace: gcr-system
+---
+# The pending restores of StatefulSets' pods gcr's operator moves:
+# NAMESPACE.NAME to the restore, which it writes, and the gcr-migrate
+# policy reads.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gcr-restores
   namespace: gcr-system
 ---
 # To label its own node.
@@ -66,7 +83,8 @@ spec:
         - operator: Exists
       containers:
         - name: install
-          image: ghcr.io/makhov/gcr:v0.1.0
+          image: ghcr.io/makhov/gcr:v0.1.6
+          imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
           env:
@@ -81,7 +99,9 @@ spec:
           volumeMounts:
             - {name: host, mountPath: /host}
           resources:
-            requests: {cpu: 10m, memory: 16Mi}
+            requests:
+              cpu: 10m
+              memory: 16Mi
       volumes:
         - name: host
           hostPath: {path: /}
@@ -162,16 +182,7 @@ spec:
   paramRef:
     name: gcr-restores
     namespace: gcr-system
-    # This file makes it: were it missing, no pod could run on
+    # This chart makes it: were it missing, no pod could run on
     # gcr-migrate, rather than any.
     parameterNotFoundAction: Deny
   validationActions: [Deny]
----
-# The pending restores of StatefulSets' pods gcr's operator moves:
-# NAMESPACE.NAME to the restore, which it writes, and the gcr-migrate
-# policy reads.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: gcr-restores
-  namespace: gcr-system

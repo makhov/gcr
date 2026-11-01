@@ -1,10 +1,18 @@
 # gcr-operator: evictions of pods that opt in (gcr.dev/migrate-on-evict:
-# "true") become migrations to another node (docs/design/gcr-operator.md).
-# StatefulSets' pods move through checkpoints in a registry, with
-# -registry (below).
-# Needs gcr.yaml applied first: its DaemonSet, and the gcr-migrate runtime
-# class, which only this operator's service account (and cluster admins)
-# may run pods on.
+# "true") become migrations to another node (docs/operator.md). Needs
+# gcr.yaml applied first.
+#
+#   kubectl apply -f gcr-operator.yaml
+#
+# Generated from charts/gcr by `make manifests`: change the chart.
+---
+# gcr-operator: evictions of pods that opt in (gcr.dev/migrate-on-evict:
+# "true") become migrations to another node; with a registry, StatefulSets'
+# pods move through checkpoints there, and pods on nodes that shut down are
+# restored from it (docs/operator.md). Needs the runtime (runtime.enabled,
+# here or in another release in the same namespace): the gcr-migrate
+# runtime class, which only this operator's service account (and cluster
+# admins) may run pods on.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -100,6 +108,17 @@ subjects:
     name: gcr-operator
     namespace: gcr-system
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gcr-operator
+  namespace: gcr-system
+spec:
+  selector: {app.kubernetes.io/name: gcr-operator}
+  ports:
+    - port: 443
+      targetPort: 8443
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -118,10 +137,11 @@ spec:
       terminationGracePeriodSeconds: 120
       containers:
         - name: operator
-          image: ghcr.io/makhov/gcr:v0.1.0
+          image: ghcr.io/makhov/gcr:v0.1.6
+          imagePullPolicy: IfNotPresent
           command: [/gcr-operator]
           # StatefulSets' pods move through checkpoints in a registry the
-          # nodes reach (without, they are evicted):
+          # nodes reach (without, they are evicted), operator.registry:
           # args: [-registry, registry.example.com/gcr/checkpoints]
           env:
             - name: POD_NAMESPACE
@@ -142,41 +162,6 @@ spec:
             runAsNonRoot: true
             runAsUser: 65532
             capabilities: {drop: [ALL]}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: gcr-operator
-  namespace: gcr-system
-spec:
-  selector: {app.kubernetes.io/name: gcr-operator}
-  ports:
-    - port: 443
-      targetPort: 8443
----
-# The operator puts its CA into clientConfig.caBundle when it starts.
-apiVersion: admissionregistration.k8s.io/v1
-kind: ValidatingWebhookConfiguration
-metadata:
-  name: gcr-operator
-webhooks:
-  - name: evictions.gcr.dev
-    admissionReviewVersions: [v1]
-    sideEffects: NoneOnDryRun
-    # If the operator is down, evictions go through as they would
-    # without gcr.
-    failurePolicy: Ignore
-    timeoutSeconds: 10
-    clientConfig:
-      service:
-        name: gcr-operator
-        namespace: gcr-system
-        path: /evict
-    rules:
-      - apiGroups: [""]
-        apiVersions: [v1]
-        operations: [CREATE]
-        resources: [pods/eviction]
 ---
 # Steers a pod a StatefulSet creates again, in place of one the operator
 # checkpointed, to restore from the checkpoint. The operator puts its CA
@@ -211,3 +196,27 @@ webhooks:
           object.metadata.annotations['gcr.dev/migrate-on-evict'] == 'true' &&
           has(object.metadata.ownerReferences) &&
           object.metadata.ownerReferences.exists(r, r.kind == 'StatefulSet')
+---
+# The operator puts its CA into clientConfig.caBundle when it starts.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: gcr-operator
+webhooks:
+  - name: evictions.gcr.dev
+    admissionReviewVersions: [v1]
+    sideEffects: NoneOnDryRun
+    # If the operator is down, evictions go through as they would
+    # without gcr.
+    failurePolicy: Ignore
+    timeoutSeconds: 10
+    clientConfig:
+      service:
+        name: gcr-operator
+        namespace: gcr-system
+        path: /evict
+    rules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE]
+        resources: [pods/eviction]

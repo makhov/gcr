@@ -27,6 +27,20 @@ jobs:
       - run: go test -tags seccomp -race ./...
       - run: make build
 
+  chart:
+    # The Helm chart lints and renders each way it is meant to, and the
+    # manifests generated from it (deploy/) are up to date.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.22.1
+      - run: helm lint --strict charts/gcr
+      - run: helm lint --strict charts/gcr --set operator.enabled=true --set operator.registry=registry.example.com/gcr --set operator.plainHTTP=true
+      - run: helm template gcr charts/gcr -n gcr-system --set runtime.installer.enabled=false >/dev/null
+      - run: make manifests && git diff --exit-code deploy/ || { echo "deploy/ is out of date with charts/gcr: run make manifests"; exit 1; }
+
   e2e:
     # Root, our CRIU fork; on x86 runners the kernel tracks dirty memory,
     # so migrations use pre-copy rounds. Each containerd release gcr

@@ -77,7 +77,9 @@ are willing to give everyone with write access.
 
 `make release` (`hack/release.sh`) builds, for linux/amd64 and
 linux/arm64, one file each, `dist/gcr-VERSION-linux-ARCH`, and
-`dist/SHA256SUMS`. Each is the `gcr` command, static, carrying what
+`dist/SHA256SUMS`; and the operator, the kubectl plugin, the Kubernetes
+manifests, the Helm chart at the release's version
+(`dist/gcr-VERSION.tgz`) and the node shutdown guard's systemd unit. Each is the `gcr` command, static, carrying what
 `gcr setup` installs (`internal/payload`, compressed): the shim, static,
 and gcr's CRIU with its CUDA plugin. All are stamped with the version;
 `gcr version` says which CRIU commit a release carries.
@@ -115,4 +117,11 @@ the release's `gcr`) from `dist/` with buildx; it copies files only, so it
 builds both architectures anywhere. `make test-install` builds a release
 and image for the host's architecture and has the DaemonSet install them
 on a one-node k0da cluster (`hack/e2e-install.sh`).
+
+`make chart-push VERSION=...` pushes the release's chart to
+`oci://ghcr.io/makhov/charts`, for `helm install oci://...`.
+
+The Kubernetes manifests in `deploy/` (`gcr.yaml`, `gcr-operator.yaml`)
+are generated from the chart in `charts/gcr`: change the chart, then run
+`make manifests`. CI fails when they are out of date.
 
