@@ -4,10 +4,12 @@ kind: RuntimeClass
 metadata:
   name: gcr
 handler: gcr
+{{- if .Values.runtime.readyNodesOnly }}
 scheduling:
   # Only on nodes where gcr is installed and ready.
   nodeSelector:
     gcr.dev/runtime: ready
+{{- end }}
 ---
 # The targets of migrations between nodes (kubectl gcr migrate): the same
 # runtime, on a handler whose pods may make the node's shim listen for a
@@ -17,7 +19,9 @@ kind: RuntimeClass
 metadata:
   name: gcr-migrate
 handler: gcr-migrate
+{{- if .Values.runtime.readyNodesOnly }}
 scheduling:
   nodeSelector:
     gcr.dev/runtime: ready
+{{- end }}
 {{- end }}

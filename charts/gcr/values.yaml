@@ -14,6 +14,10 @@ createNamespace: false
 # policy that guards gcr-migrate, and the installer.
 runtime:
   enabled: true
+  # The RuntimeClasses schedule pods only onto nodes gcr is ready on, which
+  # the installer labels gcr.dev/runtime=ready. false where gcr is on every
+  # node, put there otherwise (k0da).
+  readyNodesOnly: true
   installer:
     # A DaemonSet that runs `gcr setup` on every node and labels it
     # gcr.dev/runtime=ready. Off where something else puts gcr on the nodes
