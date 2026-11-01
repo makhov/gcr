@@ -1,0 +1,94 @@
+# The documentation site, https://makhov.github.io/gcr/, from docs/ as it
+# is (the same files read on GitHub). Built and published by
+# .github/workflows/docs.yml; locally:
+#   pip install -r docs/requirements.txt && mkdocs serve
+site_name: gcr
+site_description: A containerd runtime that snapshots, forks, rewinds and moves running containers
+site_url: https://makhov.github.io/gcr/
+repo_url: https://github.com/makhov/gcr
+repo_name: makhov/gcr
+edit_uri: edit/main/docs/
+copyright: gcr is open source on <a href="https://github.com/makhov/gcr">GitHub</a>
+
+docs_dir: docs
+# docs/README.md is the index GitHub shows for the folder; the site has
+# index.md. requirements.txt only builds the site.
+exclude_docs: |
+  README.md
+  requirements.txt
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+validation:
+  links:
+    anchors: warn
+
+nav:
+  - Home: index.md
+  - Start here:
+      - Getting started: getting-started.md
+      - Docker: docker.md
+      - What gcr is good for: tradeoffs.md
+      - Differences from runc: runc-differences.md
+  - Features:
+      - Fork: fork.md
+      - Moving snapshots between hosts: snapshot-registry.md
+      - Time travel: time-travel.md
+      - Live migration: migration.md
+      - GPUs: gpus.md
+  - Isolation:
+      - User namespaces: user-namespaces.md
+      - Hardening: hardening.md
+      - What the hardening breaks: compatibility.md
+      - Security model: security.md
+  - Reference:
+      - Configuration: configuration.md
+      - The gcr command: cli.md
+      - Troubleshooting: troubleshooting.md
+  - Inside gcr:
+      - Architecture: architecture.md
+      - Development: development.md
+      - "Design: gcr-operator": design/gcr-operator.md

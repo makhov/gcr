@@ -5,7 +5,7 @@ host's kernel, as runc's do; what it adds is process state as something a
 platform can work with (checkpoint, restore, fork, rewind, migrate) and a
 container that is harder to break out of than runc's by default. This page
 says what that buys, what it costs, and what has not been shown yet. The
-[feature pages](README.md) have the details; numbers here come from them and from
+[feature pages](index.md#what-it-does) have the details; numbers here come from them and from
 the end-to-end tests (arm64 VM, Linux 7.0, unless said otherwise).
 
 ## In one table

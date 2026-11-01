@@ -7,6 +7,8 @@ point, move it to another host. It runs containers in-process through
 libcontainer, with no runc binary, and hardens them by default beyond
 what runc does. `gcr` is a placeholder name.
 
+Documentation: **[makhov.github.io/gcr](https://makhov.github.io/gcr/)**
+
 ```sh
 gcr snapshot warm /var/lib/gcr/snapshots/warm          # the parent keeps running
 ctr run -d --runtime io.containerd.gcr.v2 \
@@ -55,9 +57,13 @@ through Docker, with a small Python helper and nothing else.
   whole task API, CRI conformance. CRI-O runs it too, with snapshots and
   forks but without time travel or migration, and so does Docker
   (`docker run --runtime gcr`). [Docker](docs/docker.md)
+- **Kubernetes migrations.** gcr-operator turns evictions (`kubectl
+  drain`, the autoscaler) into live migrations, and moves StatefulSets'
+  pods, and pods on nodes that shut down, through checkpoints in a
+  registry. [Live migration](docs/migration.md#draining-nodes-gcr-operator)
 
 Not yet: the NVIDIA ioctl proxy, restoring onto another GPU index,
-SELinux labels for supervised mounts, a Kubernetes operator.
+SELinux labels for supervised mounts.
 
 ## Compared with runc
 

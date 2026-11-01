@@ -6,3 +6,5 @@ dist/
 /gcr
 /gcr-operator
 /kubectl-gcr
+# mkdocs build
+/site/
