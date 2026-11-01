@@ -1,9 +1,11 @@
 {{- if .Values.runtime.enabled }}
 # Only cluster admins and gcr's operator may run pods on gcr-migrate; and
-# the StatefulSet controller, a pod it creates again to restore from the
-# checkpoint of the one it replaces: with the token of its pending restore,
-# which gcr's operator records in the ConfigMap gcr-restores, and steers
-# the pod to restore from (docs/design/gcr-operator.md).
+# the StatefulSet, ReplicaSet and Job controllers, a pod they create to
+# restore from the checkpoint of the one it replaces: with the token of its
+# pending restore, which gcr's operator records in the ConfigMap
+# gcr-restores (NAMESPACE.NAME for a StatefulSet's pod, NAMESPACE.TOKEN for
+# the others, whose names are new), and steers the pod to restore from
+# (docs/design/gcr-operator.md).
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -25,22 +27,27 @@ spec:
   variables:
     - name: annotations
       expression: 'has(object.metadata.annotations) ? object.metadata.annotations : {}'
-    - name: restore
-      expression: request.namespace + '.' + object.metadata.name
+    - name: token
+      expression: "'gcr.dev/restore-token' in variables.annotations ? variables.annotations['gcr.dev/restore-token'] : ''"
+    # The pending restore's keys: by the pod's name, and by its token.
+    - name: restores
+      expression: "[request.namespace + '.' + object.metadata.name, request.namespace + '.' + variables.token]"
   validations:
     - expression: >-
         'system:masters' in request.userInfo.groups ||
         request.userInfo.username == '{{ include "gcr.operatorUser" . }}' ||
-        (request.userInfo.username in ['system:serviceaccount:kube-system:statefulset-controller', 'system:kube-controller-manager'] &&
+        (request.userInfo.username in ['system:serviceaccount:kube-system:statefulset-controller',
+        'system:serviceaccount:kube-system:replicaset-controller', 'system:serviceaccount:kube-system:job-controller',
+        'system:kube-controller-manager'] &&
         !('gcr.dev/migrate-in' in variables.annotations) &&
-        'gcr.dev/restore-token' in variables.annotations && variables.annotations['gcr.dev/restore-token'] != '' &&
-        'gcr.dev/fork-from' in variables.annotations &&
-        params != null && has(params.data) && variables.restore in params.data &&
-        params.data[variables.restore].startsWith('{"token":"' + variables.annotations['gcr.dev/restore-token'] +
-        '","dir":"' + variables.annotations['gcr.dev/fork-from'] + '",'))
+        variables.token != '' && 'gcr.dev/fork-from' in variables.annotations &&
+        params != null && has(params.data) &&
+        variables.restores.exists(k, k in params.data && params.data[k].startsWith('{"token":"' + variables.token +
+        '","dir":"' + variables.annotations['gcr.dev/fork-from'] + '",')))
       message: >-
         only cluster admins and gcr's operator may run pods on runtime class
-        gcr-migrate (and StatefulSets, to restore a pod gcr's operator moves):
+        gcr-migrate (and StatefulSets, ReplicaSets and Jobs, to restore a pod
+        gcr's operator moves):
         its pods make a node's shim listen for a migration, or restore from
         a checkpoint on the node
 ---

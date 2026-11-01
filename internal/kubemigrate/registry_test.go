@@ -10,6 +10,7 @@ import (
 	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -190,6 +191,131 @@ func TestStoppedByShutdown(t *testing.T) {
 	} {
 		if got := StoppedByShutdown(&corev1.Pod{Status: tc.status}); got != tc.want {
 			t.Errorf("%s: %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
+// Owned restores: a ReplicaSet's or a Job's new pods each claim one of
+// their owner's, once; an Indexed Job's, one of the same index.
+func TestClaimRestore(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewSimpleClientset()
+	yes := true
+	stopped := func(uid, owner, index string) *corev1.Pod {
+		p := running(func(p *corev1.Pod) {
+			p.UID = types.UID(uid)
+			p.OwnerReferences = []metav1.OwnerReference{{Kind: "Job", Name: "j", UID: types.UID(owner), Controller: &yes}}
+			if index != "" {
+				p.Annotations = map[string]string{annotationJobIndex: index}
+			}
+		})
+		return p
+	}
+	reg := RegistryOptions{Repository: "reg/x"}
+	var recorded []*Restore
+	for _, p := range []*corev1.Pod{stopped("a", "job1", "0"), stopped("b", "job1", "1"), stopped("c", "job2", "")} {
+		r, err := ShutdownRestore(p, reg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Owner == "" || r.ID == "" {
+			t.Fatalf("not an owned restore: %+v", r)
+		}
+		if err := RecordOwnedRestore(ctx, cs, "gcr-system", "default", *r); err != nil {
+			t.Fatal(err)
+		}
+		recorded = append(recorded, r)
+	}
+	newPod := func(owner, index string) *corev1.Pod {
+		p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{GenerateName: "j-",
+			OwnerReferences: []metav1.OwnerReference{{Kind: "Job", Name: "j", UID: types.UID(owner), Controller: &yes}}}}
+		if index != "" {
+			p.Annotations = map[string]string{annotationJobIndex: index}
+		}
+		return p
+	}
+	claim := func(p *corev1.Pod) *Restore {
+		r, err := ClaimRestore(ctx, cs, "gcr-system", "default", p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	if r := claim(newPod("job1", "1")); r == nil || r.UID != "b" {
+		t.Fatalf("index 1 claimed %+v, want b's", r)
+	}
+	if r := claim(newPod("job1", "1")); r != nil {
+		t.Fatalf("b's claimed twice: %+v", r)
+	}
+	if r := claim(newPod("job1", "0")); r == nil || r.UID != "a" {
+		t.Fatalf("index 0 claimed %+v, want a's", r)
+	}
+	if r := claim(newPod("job2", "")); r == nil || r.UID != "c" {
+		t.Fatalf("job2 claimed %+v, want c's", r)
+	}
+	if r := claim(newPod("job3", "")); r != nil {
+		t.Fatalf("another owner's pod claimed %+v", r)
+	}
+	if r, _ := ClaimRestore(ctx, cs, "gcr-system", "elsewhere", newPod("job2", "")); r != nil {
+		t.Fatalf("a pod in another namespace claimed %+v", r)
+	}
+	// What the admission policy matches: NAMESPACE.TOKEN, starting with
+	// the token and the directory.
+	cm, _ := cs.CoreV1().ConfigMaps("gcr-system").Get(ctx, RestoresConfigMap, metav1.GetOptions{})
+	want := `{"token":"` + recorded[0].Token + `","dir":"` + recorded[0].Dir + `",`
+	if v := cm.Data["default."+recorded[0].Token]; !strings.HasPrefix(v, want) {
+		t.Errorf("recorded %s, want it to start %s", v, want)
+	}
+	// A stale one is not claimed.
+	old := stopped("d", "job4", "")
+	r, _ := ShutdownRestore(old, reg)
+	r.Since = time.Now().Add(-RestoreTTL - time.Minute)
+	_ = RecordOwnedRestore(ctx, cs, "gcr-system", "default", *r)
+	if r := claim(newPod("job4", "")); r != nil {
+		t.Fatalf("a stale restore claimed: %+v", r)
+	}
+	if err := ForgetOwnedRestore(ctx, cs, "gcr-system", "default", *recorded[0]); err != nil {
+		t.Fatal(err)
+	}
+	cm, _ = cs.CoreV1().ConfigMaps("gcr-system").Get(ctx, RestoresConfigMap, metav1.GetOptions{})
+	if _, ok := cm.Data["default."+recorded[0].Token]; ok {
+		t.Error("forgotten, but recorded")
+	}
+}
+
+// A pod that claimed an owned restore is labelled with its ID, to be found
+// once it has a name.
+func TestSteerOwned(t *testing.T) {
+	p := running(func(p *corev1.Pod) { p.Labels = map[string]string{"app": "x"} })
+	patch, err := Steer(p, Restore{Token: "t0k", Dir: "/d", ID: "abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jp, _ := jsonpatch.DecodePatch(patch)
+	raw, _ := json.Marshal(p)
+	if raw, err = jp.Apply(raw); err != nil {
+		t.Fatal(err)
+	}
+	var got corev1.Pod
+	_ = json.Unmarshal(raw, &got)
+	if got.Labels[LabelRestore] != "abc123" || got.Labels["app"] != "x" {
+		t.Errorf("labels %v", got.Labels)
+	}
+}
+
+// Evictions move ReplicaSets' and Jobs' pods node to node, not through a
+// registry; their node's shutdown, through one.
+func TestOwnedAtShutdown(t *testing.T) {
+	yes := true
+	for _, kind := range []string{"ReplicaSet", "Job"} {
+		p := running(func(p *corev1.Pod) {
+			p.OwnerReferences = []metav1.OwnerReference{{Kind: kind, Name: "o", Controller: &yes}}
+		})
+		if _, err := MovableThroughRegistry(p); err == nil {
+			t.Errorf("%s's pod: movable through a registry when evicted", kind)
+		}
+		if _, err := MovableAtShutdown(p); err != nil || !OwnedRestore(p) {
+			t.Errorf("%s's pod at shutdown: %v, owned %v", kind, err, OwnedRestore(p))
 		}
 	}
 }

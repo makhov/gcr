@@ -1,6 +1,6 @@
 # gcr-operator: evictions that migrate
 
-Status: built, all four milestones below, but for Deployments' and Jobs' pods at a node shutdown. The user-facing guide is [gcr-operator](../operator.md); this page is how it came to work the way it does.
+Status: built, all four milestones below. The user-facing guide is [gcr-operator](../operator.md); this page is how it came to work the way it does.
 
 ## The goal
 
@@ -76,7 +76,7 @@ Other owners:
 1. **`gcr-operator migrate pod/NAME [--to NODE]`:** the operator, the node agent, the target RuntimeClass, and bare pods. No webhook yet.
 2. **Evictions:** the webhook, Deployments and ReplicaSets through the ownership handover, and fallback on failure. The demo: drain a node while a stateful process keeps running on another.
 3. **`emptyDir`, and Jobs.** Built.
-4. **StatefulSets, and spot and node shutdown through registry checkpoints** ([below](#milestone-4-checkpoints-through-a-registry)). Built, but for Deployments' and Jobs' pods at a node shutdown.
+4. **StatefulSets, and spot and node shutdown through registry checkpoints** ([below](#milestone-4-checkpoints-through-a-registry)). Built.
 
 ## Milestone 4: checkpoints through a registry
 
@@ -125,16 +125,22 @@ Spot handlers that drain the node first, such as AWS Node Termination Handler an
 4. **The operator restores.** Its pod informer sees the kubelet's status on the pod: `Failed`, "Pod was terminated in response to imminent node shutdown.", with the condition `DisruptionTarget` (`TerminationByKubelet`).
    - **A StatefulSet's pod:** the operator records a pending restore for it, and the webhook steers the pod the StatefulSet creates again, as for an eviction. The checkpoint is pulled onto the pod's node; the pull Job retries until the guard's push has arrived.
    - **A bare pod:** the operator creates the replacement, as `kubectl gcr migrate -registry` does, and deletes the failed pod once it runs.
+   - **A ReplicaSet's or a Job's pod:** its controller replaces it with a pod of another name, so the restore can't be keyed by name. The operator records an *owned* restore, keyed `NAMESPACE.TOKEN`, with the owner's UID (and, for an Indexed Job's pod, its completion index). When the controller creates a pod, the webhook claims one of its owner's unclaimed restores of the same index, recording the claim with the restore, so that one restore goes to one pod. It steers the pod as for a StatefulSet's, and labels it `gcr.dev/restore=ID`, since the pod has no name yet at admission; the operator finds it by the label, and pulls the checkpoint onto its node.
+   - **Who may restore:** the admission policy lets the StatefulSet, ReplicaSet and Job controllers create a pod on `gcr-migrate` with a pending restore's token and directory, recorded under the pod's name or under its token. An operator that finds an older policy (one naming no ReplicaSet controller) restores StatefulSets' and bare pods only.
 
-**The race with the StatefulSet.** The StatefulSet replaces the pod as soon as the kubelet marks it failed, which can be within a second of the shutdown, since the dump is quick. The informer usually tells the operator first. If it hasn't yet when the new pod is created, the webhook looks up the last the informer saw of the pod being replaced. If that pod was on a node that isn't Ready, the webhook waits up to 2 s for the informer to say it was stopped by a shutdown, then records the restore and steers the new pod.
+**The race with the controller.** A controller replaces the pod as soon as the kubelet marks it failed, which can be within a second of the shutdown, since the dump is quick. The informer usually tells the operator first. If it hasn't yet when the new pod is created, the webhook looks up the last the informer saw of the pod being replaced (a StatefulSet's by its name, a ReplicaSet's or a Job's among its owner's pods). If that pod was on a node that isn't Ready, the webhook waits up to 2 s for the informer to say it was stopped by a shutdown, then records the restore and steers the new pod.
 
 **Measured** on two k0s VMs (arm64, Ubuntu 26.04, k0s v1.33, `shutdownGracePeriod: 60s`), `systemctl poweroff` of the node with a StatefulSet's pod and a bare pod, twice. Each time:
 - both containers were checkpointed and pushed within the first second;
 - both pods were restored on the other node 3.3 to 4.6 s after the shutdown started;
 - both carried on counting from where they were stopped, with 0 restarts.
 
+And with a Deployment's two pods and an Indexed Job's two (`podFailurePolicy` ignoring `DisruptionTarget`), on `sd1` with 4 CPUs (with 2, its API server could not take the kubelet's status updates during the shutdown, and nothing was restored):
+- every pod was restored in the pod its controller created, the Job's each in the pod of its index, and carried on counting, with 0 restarts;
+- the Deployment's in 4.8 and 6.5 s, the Job's in 24 s, 20 s of it the Job controller waiting before it replaces a failed pod;
+- the Job finished with `succeeded: 2` and no failures counted.
+
 **Not yet:**
-- **Deployments' and Jobs' pods.** Their replacements get new names, so a pending restore can't be keyed by the pod's name, and the admission policy matches by name. A restore keyed by the replacement's owner would cover them.
 - **How much fits before the node goes:** a spot notice is two minutes on most clouds, and GKE's graceful shutdown 30 s. A few GiB of memory push in that time over a fast link.
 
 ### Order of work

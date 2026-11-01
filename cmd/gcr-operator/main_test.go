@@ -291,3 +291,56 @@ func TestShutdownRestore(t *testing.T) {
 		}
 	}
 }
+
+// A ReplicaSet's pod the kubelet stopped as its node shut down: a new pod
+// of the ReplicaSet claims its restore, whether the informer told the
+// operator first or the webhook asks first; a second new pod finds none.
+func TestShutdownRestoreOwned(t *testing.T) {
+	yes := true
+	ctx := context.Background()
+	owner := []metav1.OwnerReference{{Kind: "ReplicaSet", Name: "web-5d8f", UID: "rs1", Controller: &yes}}
+	stopped := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "web-5d8f-abcde", Namespace: "default", UID: "u1",
+			Annotations: map[string]string{annotationOptIn: "true"}, OwnerReferences: owner},
+		Spec: corev1.PodSpec{NodeName: "n1", Containers: []corev1.Container{{Name: "c"}}},
+		Status: corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Terminated", Message: "Pod was terminated in response to imminent node shutdown.",
+			ContainerStatuses: []corev1.ContainerStatus{{Name: "c", ContainerID: "containerd://abc"}}},
+	}
+	created := func() *admissionv1.AdmissionRequest {
+		p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{GenerateName: "web-5d8f-", Annotations: map[string]string{annotationOptIn: "true"},
+			OwnerReferences: owner}}
+		raw, _ := json.Marshal(p)
+		return &admissionv1.AdmissionRequest{Namespace: "default", Object: runtime.RawExtension{Raw: raw}}
+	}
+	for _, informerFirst := range []bool{true, false} {
+		cs := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}})
+		var restored []*kubemigrate.Restore
+		o := &operator{cs: cs, opts: kubemigrate.Options{Namespace: "gcr-system"}, registry: kubemigrate.RegistryOptions{Repository: "reg/x"},
+			ownedRestores: true, moving: map[string]bool{}, restoring: map[types.UID]*kubemigrate.Restore{}, last: map[string]lastPod{},
+			owned: map[types.UID]map[types.UID]lastPod{}, startRestore: func(_ *corev1.Pod, rs *kubemigrate.Restore) { restored = append(restored, rs) }}
+		if informerFirst {
+			o.seen(stopped, false)
+		} else {
+			running := stopped.DeepCopy()
+			running.Status = corev1.PodStatus{Phase: corev1.PodRunning}
+			o.seen(running, false)
+			go func() { time.Sleep(300 * time.Millisecond); o.seen(stopped, false) }()
+		}
+		resp := o.steer(ctx, created())
+		if resp.Patch == nil || len(restored) != 1 || !strings.Contains(string(resp.Patch), restored[0].Token) ||
+			!strings.Contains(string(resp.Patch), restored[0].ID) {
+			t.Fatalf("informer first %v: patch %s, restores %v", informerFirst, resp.Patch, restored)
+		}
+		if resp := o.steer(ctx, created()); resp.Patch != nil {
+			t.Fatalf("informer first %v: a second new pod claimed the restore too: %s", informerFirst, resp.Patch)
+		}
+	}
+	// With an older policy, the replacement starts cold.
+	o := &operator{cs: fake.NewSimpleClientset(), opts: kubemigrate.Options{Namespace: "gcr-system"}, registry: kubemigrate.RegistryOptions{Repository: "reg/x"},
+		moving: map[string]bool{}, restoring: map[types.UID]*kubemigrate.Restore{}, last: map[string]lastPod{},
+		owned: map[types.UID]map[types.UID]lastPod{}, startRestore: func(*corev1.Pod, *kubemigrate.Restore) { t.Fatal("restored with an older policy") }}
+	o.seen(stopped, false)
+	if resp := o.steer(ctx, created()); resp.Patch != nil {
+		t.Fatalf("steered with an older policy: %s", resp.Patch)
+	}
+}
