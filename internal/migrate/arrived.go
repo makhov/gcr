@@ -29,32 +29,48 @@ func ArrivedKey(annotations map[string]string) string {
 	return uid + "_" + name
 }
 
+// DepartedDir records the pods' containers that migrated away from this
+// node. Their processes run elsewhere now, while the pod here lingers
+// until it is deleted: a container the kubelet restarts in it would run
+// the workload a second time, cold, so it is refused.
+var DepartedDir = "/var/lib/gcr/departed"
+
 // Arrived says whether a migration came into key's container before.
-func Arrived(key string) bool {
-	if key == "" {
-		return false
-	}
-	_, err := os.Stat(filepath.Join(ArrivedDir, key))
-	return err == nil
-}
+func Arrived(key string) bool { return marked(ArrivedDir, key) }
 
 // MarkArrived records that a migration came into key's container, and
 // forgets records older than keepArrived.
-func MarkArrived(key string) error {
+func MarkArrived(key string) error { return mark(ArrivedDir, key) }
+
+// Departed says whether key's container migrated away from this node.
+func Departed(key string) bool { return marked(DepartedDir, key) }
+
+// MarkDeparted records that key's container migrated away.
+func MarkDeparted(key string) error { return mark(DepartedDir, key) }
+
+func marked(dir, key string) bool {
+	if key == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, key))
+	return err == nil
+}
+
+func mark(dir, key string) error {
 	if key == "" {
 		return nil
 	}
-	if err := os.MkdirAll(ArrivedDir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	if entries, err := os.ReadDir(ArrivedDir); err == nil {
+	if entries, err := os.ReadDir(dir); err == nil {
 		for _, e := range entries {
 			if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > keepArrived {
-				_ = os.Remove(filepath.Join(ArrivedDir, e.Name()))
+				_ = os.Remove(filepath.Join(dir, e.Name()))
 			}
 		}
 	}
-	err := os.WriteFile(filepath.Join(ArrivedDir, key), nil, 0o600)
+	err := os.WriteFile(filepath.Join(dir, key), nil, 0o600)
 	if errors.Is(err, os.ErrExist) {
 		return nil
 	}

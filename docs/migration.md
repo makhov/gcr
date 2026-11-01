@@ -125,7 +125,7 @@ How it works:
 The Jobs run gcr's installer image, privileged, in the node's namespaces; the plugin finds the image from the installer's DaemonSet, or takes `-image`. Running the plugin needs a cluster admin: only `system:masters` and gcr's operator may create pods on `gcr-migrate` (`gcr.yaml`'s `ValidatingAdmissionPolicy`), since its pods make a node's shim listen for a migration.
 
 What can move, for now:
-- **Bare pods, and a ReplicaSet's (a Deployment's):** the target is handed over to the ReplicaSet once it is Ready ([gcr-operator](design/gcr-operator.md)). Pods of other controllers are refused, since those would replace the pod with a cold one.
+- **Bare pods, a ReplicaSet's (a Deployment's) and a Job's:** the target is handed over to its controller once it is Ready ([below](#draining-nodes-gcr-operator)). Pods of other controllers (StatefulSets, DaemonSets) are refused, since those would replace the pod with a cold one.
 - **One container** (no sidecars).
 - **Volumes the target mounts afresh:** ConfigMaps, Secrets, projected and downward API volumes.
 - **`emptyDir` volumes,** on disk or in memory: their files are copied to the target pod's own while the container is frozen, after the writable layer, so they add to the downtime as it does: on the arm64 dev VM, 256 MiB added 0.35 s on disk and 0.2 s in memory, to about 0.3 s without. Files the container has open there are reopened at the same offset.
@@ -162,7 +162,23 @@ That Deployment's pod moved from `ns-worker-1` to another node in 10 s, with 346
   - the target is created without the labels its ReplicaSet selects by, so the ReplicaSet doesn't see it while it waits for the migration;
   - once the target is Ready, the source is marked cheapest to delete (`controller.kubernetes.io/pod-deletion-cost`), and the target gets the labels and the ReplicaSet as its owner;
   - the ReplicaSet then has one pod too many, deletes the source, and never starts a cold one.
-- **Draining the operator's own node** waits for the migrations it runs: its eviction is answered 429 until they're done.
-- **A mark left by an operator that went away** mid-migration counts as failed after 15 minutes.
+- **A Job's pods** are handed over too, and the run carries on rather than starting over:
+  - the target is hidden from the Job the same way while it waits;
+  - the source is marked `DisruptionTarget` (reason `Migration`) before its processes go, as an eviction would mark it;
+  - once the target is Ready and the source no longer is, the target gets the Job's labels, its owner reference and its tracking finalizer, and the source is deleted. The Job never sees two running pods, so it never deletes the wrong one or starts a cold replacement.
+  - **Each migration counts as a failed pod** towards the Job's `backoffLimit`, unless the Job ignores disruptions:
+    ```yaml
+    spec:
+      podFailurePolicy:
+        rules:
+          - action: Ignore
+            onPodConditions: [{type: DisruptionTarget}]
+    ```
+    With that rule, a Job migrated in a drain finishes with `succeeded: 1` and no failures (k0da, `restartPolicy: Never`, 285 ms downtime).
+- **The source pod doesn't run again.** After a migration, the source's shim refuses to start that pod's container again, so a kubelet restarting it (`restartPolicy: Always` or `OnFailure`) can't run the workload a second time, cold, before the pod is deleted.
+- **Draining the operator's own node** works:
+  - its own eviction is answered 429 until the migrations it runs are done, and until the opted-in pods on its node have moved;
+  - stopping, it starts no new migration (those evictions are retried and reach its replacement) and finishes those running, for up to 100 s (`terminationGracePeriodSeconds: 120`).
+- **A mark left by an operator that went away** mid-migration is taken over by its replacement once that operator's pod is gone, and counts as failed after 15 minutes otherwise.
 
 The operator runs unprivileged. Its migrations' Jobs, and the `gcr-migrate` runtime class its targets run on, are what touch the nodes.
