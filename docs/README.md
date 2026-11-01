@@ -1,5 +1,7 @@
 # gcr documentation
 
+Also as a site: [makhov.github.io/gcr](https://makhov.github.io/gcr/).
+
 **Start here**
 
 - [Getting started](getting-started.md): requirements, install, running
