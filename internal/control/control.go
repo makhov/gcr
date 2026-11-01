@@ -46,9 +46,9 @@ type Handlers struct {
 	Timeline Timeline
 	Migrate  func(ctx context.Context, target, token string, opts migrate.Options) (migrate.Result, error)
 	// Snapshot writes the running container's processes and writable
-	// layer to dir, and leaves it running; containers can then be forked
-	// from it.
-	Snapshot func(ctx context.Context, dir string) error
+	// layer to dir, and leaves it running, or with stop kills it once
+	// written; containers can then be forked from it.
+	Snapshot func(ctx context.Context, dir string, stop bool) error
 	// Info describes the container to a migration's caller.
 	Info func() Info
 }
@@ -68,7 +68,8 @@ type pointRequest struct {
 }
 
 type snapshotRequest struct {
-	Dir string `json:"dir"`
+	Dir  string `json:"dir"`
+	Stop bool   `json:"stop,omitempty"`
 }
 
 type migrateRequest struct {
@@ -148,7 +149,7 @@ func Serve(ctx context.Context, namespace, id string, h Handlers) (*Server, erro
 			http.Error(w, "dir must be absolute", http.StatusBadRequest)
 			return
 		}
-		if err := h.Snapshot(context.WithoutCancel(ctx), req.Dir); err != nil {
+		if err := h.Snapshot(context.WithoutCancel(ctx), req.Dir, req.Stop); err != nil {
 			httpError(w, err)
 		}
 	})
@@ -234,6 +235,13 @@ func (c *Client) TakePoint(ctx context.Context, label string) (timetravel.Point,
 // Snapshot asks the container to write a snapshot to dir and keep running.
 func (c *Client) Snapshot(ctx context.Context, dir string) error {
 	return c.do(ctx, http.MethodPost, "/snapshot", snapshotRequest{Dir: dir}, nil)
+}
+
+// SnapshotAndStop asks the container to write a snapshot to dir and then
+// stop, so that a restore of it carries on from where it stopped: a
+// checkpoint to move it by. It runs on if the snapshot fails.
+func (c *Client) SnapshotAndStop(ctx context.Context, dir string) error {
+	return c.do(ctx, http.MethodPost, "/snapshot", snapshotRequest{Dir: dir, Stop: true}, nil)
 }
 
 func (c *Client) Migrate(ctx context.Context, target, token string, opts migrate.Options) (migrate.Result, error) {

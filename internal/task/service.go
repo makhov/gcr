@@ -494,16 +494,27 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		Migrate: func(ctx context.Context, target, token string, opts migrate.Options) (migrate.Result, error) {
 			return s.migrateOut(ctx, c, ex, target, token, opts)
 		},
-		Snapshot: func(ctx context.Context, dir string) error {
+		Snapshot: func(ctx context.Context, dir string, stop bool) error {
 			// Writing over a snapshot would change forks' files under them.
 			if entries, err := os.ReadDir(dir); err == nil && len(entries) > 0 {
 				return fmt.Errorf("%s is not empty: %w", dir, errdefs.ErrAlreadyExists)
 			}
-			if err := c.Snapshot(ctx, dir); err != nil {
+			take := c.Snapshot
+			if stop {
+				take = c.SnapshotAndStop
+			}
+			if err := take(ctx, dir); err != nil {
 				// What a failed snapshot wrote is not one, and a fork
 				// must not start from it.
 				_ = os.RemoveAll(dir)
 				return err
+			}
+			if stop {
+				// It goes on elsewhere, from the snapshot: the kubelet
+				// must not restart it here meanwhile, cold.
+				if err := migrate.MarkDeparted(ex.key); err != nil {
+					log.G(ctx).WithError(err).Warn("recording the stop: the kubelet could restart the container here")
+				}
 			}
 			// Its layers are mounted by every fork of it, and its
 			// range is mapped by every one.

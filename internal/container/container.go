@@ -753,7 +753,15 @@ func (c *Container) Running() bool {
 // dumps its processes to dir/images, then lets it continue. Freezing first
 // keeps the files and the memory image consistent with each other.
 func (c *Container) Snapshot(ctx context.Context, dir string) error {
-	return c.snapshot(ctx, dir, "")
+	return c.snapshot(ctx, dir, "", false)
+}
+
+// SnapshotAndStop is Snapshot, but the container does not run on: once
+// the dump is written its processes are killed, not thawed, so nothing
+// they do can come after what the snapshot holds (a checkpoint its
+// restore elsewhere carries on from). If the dump fails it runs on.
+func (c *Container) SnapshotAndStop(ctx context.Context, dir string) error {
+	return c.snapshot(ctx, dir, "", true)
 }
 
 // Point is Snapshot for a point on the timeline: with parent, the
@@ -761,7 +769,7 @@ func (c *Container) Snapshot(ctx context.Context, dir string) error {
 // is dumped, the rest read from it on a restore. Without memory tracking
 // (MemoryTracking), points are full.
 func (c *Container) Point(ctx context.Context, dir, parent string) error {
-	return c.snapshot(ctx, dir, parent)
+	return c.snapshot(ctx, dir, parent, false)
 }
 
 // MemoryTracking says whether the kernel tracks which pages a process
@@ -770,7 +778,7 @@ var MemoryTracking = sync.OnceValue(func() bool {
 	return exec.Command("criu", "check", "--feature", "mem_dirty_track").Run() == nil
 })
 
-func (c *Container) snapshot(ctx context.Context, dir, parent string) (retErr error) {
+func (c *Container) snapshot(ctx context.Context, dir, parent string, stop bool) (retErr error) {
 	c.op.Lock()
 	defer c.op.Unlock()
 	if err := c.fillMemory(); err != nil {
@@ -799,7 +807,13 @@ func (c *Container) snapshot(ctx context.Context, dir, parent string) (retErr er
 		return fmt.Errorf("freeze: %w", err)
 	}
 	defer func() {
-		if err := c.lc.Resume(); err != nil && retErr == nil {
+		// Stopping: killed while still frozen, then thawed to exit.
+		if stop && retErr == nil {
+			if err := c.lc.Signal(unix.SIGKILL); err != nil && !errors.Is(err, libcontainer.ErrNotRunning) {
+				retErr = fmt.Errorf("stop after the snapshot: %w", err)
+			}
+		}
+		if err := c.lc.Resume(); err != nil && retErr == nil && !(stop && errors.Is(err, libcontainer.ErrNotPaused)) {
 			retErr = fmt.Errorf("thaw: %w", err)
 		}
 	}()
