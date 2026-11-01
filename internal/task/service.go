@@ -106,7 +106,9 @@ type extras struct {
 	id         string
 	// shutdownUID is the pod's UID if the container is to be checkpointed
 	// when the node shuts down (nodeshutdown.PodUID).
-	shutdownUID  string
+	shutdownUID string
+	// crio: CRI-O created the container (Kill answers it as it expects).
+	crio         bool
 	shutdownOnce sync.Once
 	checkpointed bool // by checkpointForShutdown, set within shutdownOnce
 	// netPolicy covers cgroupID, if not 0.
@@ -332,6 +334,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		prep.CgroupOwner = userns.DelegateCgroup(spec)
 		ex.key = migrate.ArrivedKey(spec.Annotations)
 		ex.shutdownUID = nodeshutdown.PodUID(spec.Annotations)
+		ex.crio = ocispec.CRIO(spec)
 		if migrate.Departed(ex.key) {
 			// Its processes run on another node now; the kubelet
 			// restarts it in the pod that lingers here until deleted.
@@ -697,9 +700,23 @@ func (s *service) Kill(ctx context.Context, r *taskAPI.KillRequest) (*ptypes.Emp
 		return empty, nil // stopped at its checkpoint
 	}
 	if err := c.Kill(syscall.Signal(r.Signal), r.All); err != nil {
+		// containerd takes NotFound for a container that has exited, as
+		// its runc shim says; CRI-O fails the stop with it. So it hears
+		// that a finished container's kill is done.
+		if errdefs.IsNotFound(err) && s.fromCRIO(r.ID) {
+			return empty, nil
+		}
 		return nil, errgrpc.ToGRPC(err)
 	}
 	return empty, nil
+}
+
+// fromCRIO says whether CRI-O created container id.
+func (s *service) fromCRIO(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ex := s.extras[id]
+	return ex != nil && ex.crio
 }
 
 // checkpointForShutdown checkpoints and stops container c, the kubelet
