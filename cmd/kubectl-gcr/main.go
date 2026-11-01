@@ -34,7 +34,7 @@ func main() {
 	gcrPath := fs.String("gcr", "/usr/local/bin/gcr", "gcr's path on the nodes")
 	timeout := fs.Duration("timeout", 5*time.Minute, "how long each step may take")
 	kubeconfig := fs.String("kubeconfig", "", "kubeconfig file (default: $KUBECONFIG, ~/.kube/config)")
-	registryRepo := fs.String("registry", "", "move it through a checkpoint in this registry repository (host[:port]/path), which the nodes reach, rather than node to node: seconds of downtime, but nothing needed from the source once pushed")
+	registryRepo := fs.String("registry", "", "move it through a checkpoint in this registry repository (host[:port]/path), which the nodes reach, rather than node to node: seconds of downtime, but nothing needed from the source once pushed; a StatefulSet's pod moves this way only, with gcr-operator started with the same -registry")
 	plainHTTP := fs.Bool("plain-http", false, "talk to -registry without TLS")
 	_ = fs.Parse(os.Args[2:])
 	if fs.NArg() != 1 {

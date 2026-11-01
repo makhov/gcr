@@ -76,7 +76,7 @@ Other owners:
 1. **`gcr-operator migrate pod/NAME [--to NODE]`:** the operator, the node agent, the target RuntimeClass, and bare pods. No webhook yet.
 2. **Evictions:** the webhook, Deployments and ReplicaSets through the ownership handover, and fallback on failure. The demo: drain a node while a stateful process keeps running on another.
 3. **`emptyDir`, and Jobs.** Built.
-4. **StatefulSets, and spot and node shutdown through registry checkpoints** ([plan below](#milestone-4-checkpoints-through-a-registry)).
+4. **StatefulSets, and spot and node shutdown through registry checkpoints** ([plan below](#milestone-4-checkpoints-through-a-registry)). StatefulSets built; shutdown notices next.
 
 ## Milestone 4: checkpoints through a registry
 
@@ -84,27 +84,34 @@ So far a migration runs the target next to the source until the switch, which is
 
 ### The flow, for a StatefulSet's pod
 
-1. **Checkpoint and stop.** A Job on the source node runs `gcr snapshot -stop ID DIR`: the container is frozen, dumped as a snapshot (the format `gcr.dev/fork-from` starts from) and killed, not thawed, so its processes can't run on, or write to its volumes, after the checkpoint. The downtime starts here.
-2. **Push.** The same Job pushes the snapshot to the operator's registry (`gcr snapshot-push`, `-registry` on the operator), under a tag named after the pod's UID.
-3. **Pick the node and pull there first.** The operator picks the target node (the scheduler's view: a node the pod's affinity, taints and resources allow, other than the source), and a Job there pulls the snapshot into gcr's snapshot directory, so it is local before the new pod asks for it.
-4. **Record the restore.** The operator writes a pending restore for `NAMESPACE/web-0`: the snapshot's directory on the target node, the node, and a random token, in a ConfigMap in `gcr-system` only the operator writes.
-5. **Delete the source.** The StatefulSet creates `web-0` again.
-6. **Steer the new pod.** The operator's mutating webhook on pod `CREATE` sees `web-0` with a pending restore, and adds:
+Built (step 3 below), with `-registry` on the operator:
+
+1. **Checkpoint and stop.** A Job on the source node runs `gcr snapshot -stop ID DIR`. The container is frozen, dumped as a snapshot (the format `gcr.dev/fork-from` starts from) and killed, not thawed, so its processes can't run on, or write to its volumes, after the checkpoint. The downtime starts here.
+2. **Push.** The same Job pushes the snapshot to the operator's registry (`gcr snapshot-push`), tagged with the pod's UID.
+3. **Record the restore.** The operator writes a pending restore for `NAMESPACE/web-0` into the ConfigMap `gcr-system/gcr-restores`: the snapshot's directory, its reference, and a random token. Only the operator writes it.
+4. **Delete the source.** The StatefulSet creates `web-0` again.
+5. **Steer the new pod.** The operator's mutating webhook on pod `CREATE` (for StatefulSets' opted-in pods) sees `web-0` with a pending restore, and adds:
    - `runtimeClassName: gcr-migrate`;
    - `gcr.dev/fork-from: <the snapshot's directory>` and `gcr.dev/restore-token: <the token>`;
-   - a required node affinity for the target node.
-   The kubelet there starts the container from the snapshot. The process carries on where it was frozen, in a pod with the same name and DNS name (and a new IP, so its TCP connections reset, as with any migration here), and the same volumes, reattached by Kubernetes on the new node.
-7. **Clean up.** Once the pod runs, the operator deletes the pending restore and the snapshot, on the node and in the registry.
+   - `gcr.dev/fork-wait: 100s`: the node's shim waits that long for the snapshot to arrive.
+6. **Pull where it lands.** The scheduler places the pod as it would any other, so the operator never picks the node. Once it is bound, a Job there pulls the snapshot into gcr's snapshot directory, and the waiting shim starts the container from it. The process carries on where it was frozen, in a pod with the same name and DNS name, a new IP (so its TCP connections reset, as with any migration here), and the same volumes, reattached by Kubernetes on the new node.
+7. **Clean up.** Once the pod is Ready, or the move has failed, the operator forgets the pending restore.
+
+**Drain's retries.** kubectl drain evicts by name, and retries while the operator answers 429, so its retries reach the new `web-0`. The operator answers 404 for a pod it moved or restored (the pod evicted is gone), unless that pod's own node is being drained too (cordoned, or tainted by the cluster autoscaler).
 
 ### What it costs
 
 - **Downtime is seconds,** not 0.3 s: dump, push, pull, deleting and creating the pod, and the restore. The pull overlaps nothing, since the source is stopped by then; most of the time goes to moving the memory twice. Pushing straight to the target node instead of a registry would halve that, and is the obvious follow-up.
 - **Volumes:** ReadWriteMany volumes are fine. ReadWriteOnce network volumes are detached from the source node and attached to the target by Kubernetes, adding their attach time (tens of seconds on some clouds). Node-local volumes (`local`, `hostPath`) can't move: such pods are refused, as now.
-- **A failure after step 1 can't fall back to the running source,** which is gone: the replacement then starts cold, as it would without gcr. Before step 1, nothing has changed.
+- **A failure after step 1 can't fall back to the running source,** which is gone: the pod then starts cold, as it would without gcr. If the webhook is down, the new pod isn't steered. If the pull or the restore fails, the operator deletes the pod again. Before step 1, nothing has changed.
 
 ### Who may restore what
 
-`gcr.dev/fork-from` names a host directory to restore from, so pod authors can't use it (`RestrictedAnnotations`), and `gcr-migrate`'s `PodAnnotations` gains it. But here the pod is created by the StatefulSet controller, not by the operator, so the `ValidatingAdmissionPolicy` that lets only the operator and cluster admins use `gcr-migrate` needs one more case: **the StatefulSet controller may, for a pod whose `gcr.dev/restore-token` is a pending restore's token.** The policy reads the pending restores' ConfigMap as its parameter, so a pod author who copies the annotations without a live token is refused. The token lives in the pod's annotations only for that one creation.
+`gcr.dev/fork-from` names a host directory to restore from, so pod authors can't use it (`RestrictedAnnotations`), and `gcr-migrate`'s `PodAnnotations` allow it. But here the pod is created by the StatefulSet controller, not by the operator. So the `ValidatingAdmissionPolicy` that lets only the operator and cluster admins use `gcr-migrate` has one more case: **the StatefulSet controller may, for a pod whose `gcr.dev/restore-token` and `gcr.dev/fork-from` are a pending restore's.**
+
+The policy reads `gcr-restores` as its parameter (`paramKind: ConfigMap`, `parameterNotFoundAction: Deny`). CEL has no JSON parser, so a restore is stored as JSON starting `{"token":"T","dir":"D",`, and the policy matches that prefix against the pod's annotations. A pod template that copies the annotations is refused, with a made-up token, the wrong directory, or a spent token, and so is a pod author with a live one. The token lives in the pod's annotations, but is good only while that restore is pending.
+
+The operator checks the policy has the parameter when it starts. One that finds an older policy evicts StatefulSets' pods rather than moving them, since the StatefulSet's new pod would be refused.
 
 ### Spot and node shutdown
 
@@ -116,7 +123,7 @@ How much fits before the node goes is the open question: a spot notice is two mi
 
 ### Order of work
 
-1. `gcr snapshot -stop`: checkpoint and stop, through the control API.
-2. Checkpoint-to-registry and restore-from-registry Jobs in `kubemigrate`, used by a new `kubectl gcr migrate --via-registry`, with bare pods first: the plugin creates the replacement itself. That tests the path end to end without the webhook.
-3. The mutating webhook, the pending restores, and the admission policy's new case: StatefulSets.
+1. `gcr snapshot -stop`: checkpoint and stop, through the control API. Built.
+2. Checkpoint-to-registry and restore-from-registry Jobs in `kubemigrate`, used by `kubectl gcr migrate -registry`, with bare pods first: the plugin creates the replacement itself. That tests the path end to end without the webhook. Built.
+3. The mutating webhook, the pending restores, and the admission policy's new case: StatefulSets. Built.
 4. Shutdown notices.
