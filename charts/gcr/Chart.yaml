@@ -5,8 +5,9 @@ description: >-
   containers, on every node; and, optionally, gcr-operator, which moves pods
   instead of restarting them when nodes are drained or shut down.
 type: application
-# A release packages the chart as its own version (hack/release.sh).
-version: 0.1.6
+# A chart/vX.Y.Z tag publishes it as version X.Y.Z, with the latest
+# release as its appVersion (.github/workflows/chart-release.yml).
+version: 0.1.0
 appVersion: v0.1.6
 home: https://makhov.github.io/gcr/
 sources:

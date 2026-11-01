@@ -1,0 +1,56 @@
+# Publishes the Helm chart (charts/gcr) to oci://ghcr.io/makhov/charts/gcr
+# on a chart/vX.Y.Z tag: the chart's version from the tag, its appVersion
+# (the image it installs) from the latest release tag (vX.Y.Z).
+name: Release Helm chart
+
+on:
+  push:
+    tags:
+      - "chart/v*"   # e.g. chart/v0.1.0
+
+permissions:
+  contents: read
+  packages: write   # to push to ghcr.io
+
+jobs:
+  release:
+    name: Package and publish
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-tags: true
+          fetch-depth: 0
+
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.22.1
+
+      - name: Versions from the tags
+        # chart/v0.2.0 → version 0.2.0; appVersion is the latest release,
+        # with its v, as gcr's image is tagged (v0.1.6).
+        run: |
+          echo "CHART_VERSION=${GITHUB_REF_NAME#chart/v}" >> "$GITHUB_ENV"
+          APP_VERSION=$(git tag --list 'v*' --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          if [ -z "$APP_VERSION" ]; then
+            echo "no release tag (vX.Y.Z) in the repository" >&2
+            exit 1
+          fi
+          echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_ENV"
+
+      - name: Stamp them into Chart.yaml
+        run: |
+          sed -i "s/^version:.*/version: ${CHART_VERSION}/" charts/gcr/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: ${APP_VERSION}/" charts/gcr/Chart.yaml
+
+      - run: helm lint --strict charts/gcr
+
+      - run: helm package charts/gcr --destination dist/
+
+      - name: Log in to ghcr.io
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" |
+            helm registry login ghcr.io --username "${{ github.repository_owner }}" --password-stdin
+
+      - name: Push to ghcr.io
+        run: helm push "dist/gcr-${CHART_VERSION}.tgz" "oci://ghcr.io/${{ github.repository_owner }}/charts"

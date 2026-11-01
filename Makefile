@@ -6,7 +6,7 @@ VM  := gcr
 # Run a command in the dev VM, in the same directory as here.
 IN_VM = limactl shell --workdir $(CURDIR) $(VM) --
 
-.PHONY: build static install vet test test-e2e test-k8s test-install vm criu bpf release release-publish image manifests chart-push
+.PHONY: build static install vet test test-e2e test-k8s test-install vm criu bpf release release-publish image manifests
 
 build:
 	CGO_ENABLED=1 go build -tags $(TAGS) -ldflags '$(VERSION_LDFLAGS)' -o $(BIN) ./cmd/containerd-shim-gcr-v2
@@ -93,10 +93,6 @@ release-publish:
 # deploy/gcr.yaml and deploy/gcr-operator.yaml, from the chart (charts/gcr).
 manifests:
 	hack/manifests.sh
-
-# Pushes the release's chart (dist/gcr-VERSION.tgz) to oci://ghcr.io/makhov/charts.
-chart-push:
-	helm push dist/gcr-$(VERSION:v%=%).tgz oci://ghcr.io/makhov/charts
 
 # The installer image (deploy/), from a release in dist/, for the
 # architectures it has: PUSH=1 pushes it.

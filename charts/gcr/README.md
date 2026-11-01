@@ -4,13 +4,16 @@ Installs [gcr](https://makhov.github.io/gcr/) on every node of a
 Kubernetes cluster that runs containerd, and, optionally, gcr-operator.
 
 ```sh
-v=$(curl -fsSLo /dev/null -w '%{url_effective}' https://github.com/makhov/gcr/releases/latest | sed 's#.*/##')
-helm install gcr https://github.com/makhov/gcr/releases/download/$v/gcr-${v#v}.tgz \
+helm install gcr oci://ghcr.io/makhov/charts/gcr \
   --namespace gcr-system --create-namespace \
   --set operator.enabled=true
 ```
 
 Or from a checkout: `helm install gcr charts/gcr -n gcr-system --create-namespace`.
+
+The chart is released on its own (`chart/vX.Y.Z` tags), and installs the
+gcr release that was the latest then (its `appVersion`); `image.tag`
+picks another.
 
 Its cluster-wide objects have fixed names (the RuntimeClasses `gcr` and
 `gcr-migrate`, the `gcr-migrate` admission policy, `gcr-operator`'s

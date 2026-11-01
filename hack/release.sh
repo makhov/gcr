@@ -6,9 +6,9 @@
 # gcr-operator-VERSION-linux-ARCH, the operator, for the image;
 # kubectl-gcr-VERSION-OS-ARCH, the kubectl plugin, for Linux and macOS;
 # gcr.yaml and gcr-operator.yaml, the installer DaemonSet and the operator
-# with this release's image; gcr-VERSION.tgz, the Helm chart (charts/gcr)
-# at this release; gcr-shutdown-guard.service, the systemd unit for nodes
-# whose pods move when they shut down; and SHA256SUMS. The Go binaries are static; CRIU, built in an Ubuntu 22.04
+# with this release's image; gcr-shutdown-guard.service, the systemd unit
+# for nodes whose pods move when they shut down; and SHA256SUMS. (The Helm
+# chart has releases of its own: chart/vX.Y.Z tags.) The Go binaries are static; CRIU, built in an Ubuntu 22.04
 # container (hack/criu-build.sh), needs glibc 2.35 or later, or, the static
 # one, nothing. Runs on a
 # Linux host with Docker that can build Go with cgo for each architecture
@@ -24,7 +24,6 @@ VERSION=${VERSION:?set VERSION}
 CRIU_VERSION=$(cat hack/criu-version)
 CRIU_IMAGE=${CRIU_IMAGE:-ubuntu:22.04}
 DOCKER=${DOCKER:-docker}
-HELM_IMAGE=alpine/helm:3.22.1
 HOST=$(go env GOARCH)
 REVISION=$(git rev-parse HEAD)
 VERSION_PKG=github.com/containerd/containerd/v2/version
@@ -82,7 +81,4 @@ for m in gcr gcr-operator; do
 	sed "s#image: ghcr.io/makhov/gcr:.*#image: ghcr.io/makhov/gcr:$VERSION#" "deploy/$m.yaml" >"dist/$m.yaml"
 done
 cp deploy/gcr-shutdown-guard.service dist/
-# The chart, versioned as the release (without its v), with its image.
-$DOCKER run --rm -v "$PWD:$PWD" -w "$PWD" -u "$(id -u):$(id -g)" -e HOME=/tmp "$HELM_IMAGE" \
-	package charts/gcr --version "${VERSION#v}" --app-version "$VERSION" --destination dist >/dev/null
 (cd dist && sha256sum gcr-* kubectl-gcr-* gcr.yaml gcr-operator.yaml | sort -u -k2 >SHA256SUMS)

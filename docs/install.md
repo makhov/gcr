@@ -130,16 +130,16 @@ On a cluster whose nodes run containerd, the Helm chart installs gcr on
 every node, and gcr-operator if you want it:
 
 ```sh
-v=$(curl -fsSLo /dev/null -w '%{url_effective}' https://github.com/makhov/gcr/releases/latest | sed 's#.*/##')
-helm install gcr https://github.com/makhov/gcr/releases/download/$v/gcr-${v#v}.tgz \
+helm install gcr oci://ghcr.io/makhov/charts/gcr \
   --namespace gcr-system --create-namespace
   # --set operator.enabled=true   for gcr-operator
 ```
 
 The [chart's README](https://github.com/makhov/gcr/tree/main/charts/gcr)
 lists its values: the operator and its registry, which nodes to install
-on, `gcr setup`'s options for k3s and RKE2. `helm upgrade` with a newer
-chart upgrades gcr, one node at a time.
+on, `gcr setup`'s options for k3s and RKE2. Each chart release installs
+the gcr release that was the latest when it was made; `helm upgrade` to a
+newer chart upgrades gcr, one node at a time.
 
 Or, without Helm, the same as plain manifests:
 
