@@ -1,7 +1,7 @@
 # Getting started
 
 This page installs gcr on a node and runs containers with it: from
-`ctr`, from Kubernetes on containerd, and from CRI-O. Then it takes a
+`ctr`, Docker, Kubernetes on containerd, and CRI-O. Then it takes a
 container through a snapshot and a fork. To try it on a Mac or
 another machine without a spare Linux node, use the
 [development VM](development.md#a-development-vm).
@@ -18,65 +18,21 @@ another machine without a spare Linux node, use the
 
 ## Install
 
-A release is one file per architecture, `gcr`, which carries the rest:
+On one host:
 
 ```sh
-v=v0.0.1 arch=amd64        # or arm64
-curl -Lo gcr https://github.com/makhov/gcr/releases/download/$v/gcr-$v-linux-$arch
+v=$(curl -fsSLo /dev/null -w '%{url_effective}' https://github.com/makhov/gcr/releases/latest | sed 's#.*/##')
+arch=amd64                 # or arm64
+curl -fLo gcr https://github.com/makhov/gcr/releases/download/$v/gcr-$v-linux-$arch
 chmod +x gcr
 sudo ./gcr setup           # -docker to register with dockerd too
 ```
 
-`gcr setup`:
-
-- installs `gcr` and the shim (`containerd-shim-gcr-v2`) into
-  `/usr/local/bin`;
-- installs gcr's CRIU ([makhov/criu](https://github.com/makhov/criu)) and
-  CRIU's CUDA plugin into `/var/lib/gcr`, where gcr uses them ahead of any
-  `criu` the node has, which it leaves alone;
-- registers the runtime with containerd in a drop-in,
-  `/etc/containerd/conf.d/gcr.toml`, making `config.toml` import `conf.d` if
-  it does not (keeping the old one as `config.toml.gcr-backup`), and with
-  dockerd with `-docker`;
-- restarts containerd (running containers carry on; `-no-restart` leaves
-  it to you);
-- and ends with `gcr doctor`: what the node has for gcr's features, and
-  what to do about what it lacks.
-
-The Go binaries are static; the CRIU needs glibc 2.35 or later (Ubuntu
-22.04, Debian 12, RHEL 10, and later). Where it does not run, as on Alpine
-(k0s's node image), setup installs a static CRIU instead, which loads no
-plugins, so no GPU checkpoints there; and, where the node's `tar` is not GNU
-tar (busybox's), a static GNU tar for CRIU, in `/var/lib/gcr/bin`. Running `gcr setup` again with a new
-`gcr` upgrades it; running containers keep the shim they started with.
-
-`gcr doctor` on its own checks a node any time:
-
-```
-$ sudo gcr doctor
-ok   kernel          6.14.0-1015
-ok   cgroup v2       unified hierarchy
-ok   shim            /usr/local/bin/containerd-shim-gcr-v2 v0.1.0
-ok   containerd      v2.4.2, runtime gcr registered
-ok   CRIU            /var/lib/gcr/bin/criu 4.2.1
-ok   Landlock        ABI 7
-off  netlink policy  no BPF LSM: containers' network configuration is limited by seccomp alone
-                     -> add bpf to the kernel's lsm= list (lockdown,capability,landlock,yama,apparmor) and reboot
-off  lazy restore    vm.unprivileged_userfaultfd = 0: no gcr.dev/lazy-restore or post-copy migration for containers in a user namespace
-                     -> sysctl vm.unprivileged_userfaultfd=1 (docs/fork.md#lazy-restore says what it exposes)
-...
-```
-
-Or build on the Linux host (cgo is required):
-
-```sh
-make install          # containerd-shim-gcr-v2 and gcr into /usr/local/bin
-make criu             # CRIU and its CUDA plugin, from a makhov/criu clone in ../criu at hack/criu-version's tag
-sudo gcr setup        # registers the runtime; this gcr carries nothing to install
-```
-
-containerd finds the shim by name on `PATH`: the runtime type
-`io.containerd.gcr.v2` maps to `containerd-shim-gcr-v2`.
+`gcr setup` installs gcr, its shim and its CRIU, registers the runtime
+with containerd, and ends with `gcr doctor`: what the host has for gcr's
+features. On Kubernetes, one manifest does it on every node.
+[Installation](install.md) has both, the kubectl plugin, gcr-operator,
+upgrades and uninstalling.
 
 ## With ctr
 
@@ -113,57 +69,12 @@ docker run --rm --runtime gcr busybox echo hello
 [Docker](docker.md) has the details, and how snapshots, forks and time
 travel work on Docker's containers.
 
-## With Kubernetes (CRI)
+## With Kubernetes
 
-On a cluster whose nodes run containerd, the installer DaemonSet sets gcr
-up on every node:
-
-```sh
-kubectl apply -f https://github.com/makhov/gcr/releases/download/v0.0.1/gcr.yaml
-```
-
-Each node gets a privileged pod (`gcr-system/gcr-installer`) that runs the
-release image's `gcr setup` on the host ([install](#install)): the shim and
-gcr's CRIU, the runtime registered with containerd. On k0s it writes
-`/etc/k0s/containerd.d/gcr.toml`, which k0s applies itself; elsewhere a
-containerd drop-in and a restart of containerd (running pods carry on).
-It then labels the node `gcr.dev/runtime=ready`, and the manifest's
-`gcr` RuntimeClass schedules pods only onto nodes with that label. A node
-missing something gcr needs keeps its pod crash-looping, with
-`gcr doctor`'s report in the pod's logs. A new image upgrades every node in
-turn; deleting the DaemonSet unlabels the nodes and leaves gcr on them.
-
-- `GCR_SETUP_ARGS` in the DaemonSet passes options to `gcr setup`:
-  `-containerd-config` and `-containerd-unit` for distributions that run
-  containerd their own way (k3s, RKE2).
-- The image is `ghcr.io/makhov/gcr:VERSION`; while the repository is
-  private, the DaemonSet needs an `imagePullSecrets` for it.
-- Nodes without glibc (Alpine) get a static CRIU and GNU tar: everything
-  but GPU checkpoints works there.
-
-Or by hand: register the runtime with containerd's CRI plugin in
-`/etc/containerd/config.toml` (or `sudo gcr setup`) and restart containerd:
-
-```toml
-version = 3
-[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr]
-  runtime_type = 'io.containerd.gcr.v2'
-  # Pass gcr's pod annotations (e.g. time travel) through to the runtime.
-  pod_annotations = ['gcr.dev/*']
-```
-
-Restart containerd after installing a new gcr: it reads the runtime's
-features (user namespaces, idmapped mounts) at startup.
-
-Then add a RuntimeClass and select it from pods:
+Once gcr is [installed on the cluster](install.md#on-kubernetes), a pod
+asks for it by its RuntimeClass:
 
 ```yaml
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-  name: gcr
-handler: gcr
----
 apiVersion: v1
 kind: Pod
 metadata:
@@ -178,18 +89,9 @@ spec:
       command: ["sleep", "3600"]
 ```
 
-If the kubelet uses the systemd cgroup driver, gcr follows it (CRI sends
-`slice:prefix:name` cgroup paths).
-
-containerd 1.7 takes config version 2, where the table is
-`[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gcr]`. Listing a
-runtime there replaces the default `runc` entry, so list that too.
-
-gcr is built on containerd 2.4's shim library. containerd 2.3 and later
-start it with their shim bootstrap protocol and use the task API's version
-3. For older releases (and CRI-O) gcr answers the way shims did before
-2.3 and serves the task API's version 2 as well, whose messages are the
-same.
+[Kubernetes](kubernetes.md) covers annotations, time travel and snapshots
+of pods, and moving them between nodes; [gcr-operator](operator.md) moves
+them when nodes are drained or shut down.
 
 ## With CRI-O
 

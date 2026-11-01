@@ -53,4 +53,4 @@ from. A point of a 256 MiB container that wrote little since the last is
 a few hundred KiB, against 257 MiB for a full one.
 
 It needs gcr's CRIU (`--seccomp-notify-socket`), which a release's
-`gcr setup` installs ([install](getting-started.md#install)).
+`gcr setup` installs ([install](install.md#on-a-host)).

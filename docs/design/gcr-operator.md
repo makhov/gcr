@@ -1,6 +1,6 @@
 # gcr-operator: evictions that migrate
 
-Status: milestones 1 (`kubectl gcr migrate`) and 2 (evictions, and Deployments' pods handed over) are built, and 3 (`emptyDir` volumes, Jobs); see [migration](../migration.md#draining-nodes-gcr-operator). The rest is a proposal.
+Status: built, all four milestones below, but for Deployments' and Jobs' pods at a node shutdown. The user-facing guide is [gcr-operator](../operator.md); this page is how it came to work the way it does.
 
 ## The goal
 
@@ -42,7 +42,7 @@ The ReplicaSet's choice of which pod to delete can be steered:
 
 Other owners:
 - **StatefulSets:** a pod's name is its identity, and two pods named `db-0` can't coexist, even briefly. Moving one means deleting the source after the dump and before creating a same-named target: a pause of the target's whole start, not of a migration. Later.
-- **Jobs:** adopted like ReplicaSets' pods, with two differences ([migration](../migration.md#draining-nodes-gcr-operator)). A Job deletes the more recently Ready of two pods and ignores `pod-deletion-cost`, so the target is handed over only once the source is no longer Ready. A Job counts a deleted pod as failed, so the source is marked `DisruptionTarget` before its processes go, for Jobs whose `podFailurePolicy` ignores that.
+- **Jobs:** adopted like ReplicaSets' pods, with two differences ([gcr-operator](../operator.md#deployments-and-jobs)). A Job deletes the more recently Ready of two pods and ignores `pod-deletion-cost`, so the target is handed over only once the source is no longer Ready. A Job counts a deleted pod as failed, so the source is marked `DisruptionTarget` before its processes go, for Jobs whose `podFailurePolicy` ignores that.
 - **Bare pods:** the target simply replaces the source.
 
 ## What moves, and what doesn't

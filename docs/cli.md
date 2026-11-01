@@ -30,7 +30,7 @@ Errors go to standard error with `gcr:` in front, and the exit status is
 ### `gcr setup`
 
 Installs gcr on the node and registers the runtime
-([install](getting-started.md#install)): `gcr` and the shim into
+([install](install.md#on-a-host)): `gcr` and the shim into
 `-bin-dir` (`/usr/local/bin`), and, from a release, gcr's CRIU and its CUDA
 plugin into `/var/lib/gcr`; a containerd drop-in in `conf.d` beside
 `-containerd-config`, in the configuration's own format version, which it
@@ -181,7 +181,7 @@ Runs on a Kubernetes node, as the systemd unit
 that opted in to moving (`gcr.dev/migrate-on-evict: "true"`) are
 checkpointed as the kubelet stops them. Each checkpoint is pushed to
 `REPOSITORY`, tagged with its pod's UID, for gcr-operator to restore
-elsewhere ([node shutdown](migration.md#node-shutdown)).
+elsewhere ([node shutdown](operator.md#node-shutdown)).
 
 It holds a systemd-logind delay lock on shutdowns. When a shutdown starts,
 it marks the node as shutting down (`/run/gcr/shutdown`), and pushes each
