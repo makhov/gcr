@@ -276,6 +276,15 @@ const AnnotationMemoryMerge = "gcr.dev/memory-merge"
 // snapshot's, which no fork changes.
 const AnnotationForkFrom = "gcr.dev/fork-from"
 
+// AnnotationForkWait, a duration (at most MaxForkWait), makes a container
+// forked from a snapshot that is not there yet wait for it: one that is
+// being pulled to this node, after the pod was placed here.
+const AnnotationForkWait = "gcr.dev/fork-wait"
+
+// MaxForkWait bounds AnnotationForkWait, below the kubelet's timeout for
+// creating a container (2 minutes).
+const MaxForkWait = 100 * time.Second
+
 // Root returns the libcontainer state directory for a containerd namespace.
 func Root(namespace string) string {
 	return filepath.Join(StateRoot, namespace)

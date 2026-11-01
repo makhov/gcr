@@ -134,6 +134,26 @@ What can move, for now:
 
 The pod gets a new name and IP, and its TCP connections reset. Services select it by its labels, which it keeps.
 
+### Through a registry
+
+`-registry` moves a pod through a checkpoint in a registry instead of from node to node:
+
+```sh
+kubectl gcr migrate -registry registry.example:5000/gcr-checkpoints pod/web
+```
+
+1. A replacement pod is created and placed by the scheduler. Its container is to start from the checkpoint (`gcr.dev/fork-from`), and its node's shim waits up to 100 s for it to arrive (`gcr.dev/fork-wait`).
+2. On the source node, `gcr snapshot -stop` checkpoints the container and stops it, and `gcr snapshot-push` pushes the checkpoint, tagged with the pod's UID.
+3. On the replacement's node, `gcr snapshot-pull` fetches it into `/var/lib/gcr/checkpoints`, and the container starts from it, carrying on where the source stopped.
+4. The source pod is deleted.
+
+The downtime is seconds rather than a fraction of one: 5.5 to 6.6 s on a three-node k0da cluster (arm64, a small process, a registry on the cluster's network), about half of it the two Jobs starting. But nothing on the source node is needed once the checkpoint is pushed. That's what a node about to go away needs, and a pod that can't run a twin next to itself, such as a StatefulSet's ([gcr-operator](design/gcr-operator.md#milestone-4-checkpoints-through-a-registry)).
+
+- **The nodes must reach the registry,** with the credentials in root's Docker config on each (`gcr snapshot-push`). `-plain-http` talks to it without TLS.
+- **Bare pods only, for now,** and no `emptyDir` volumes: a checkpoint holds the writable layer, not volumes.
+- **No way back once the source has stopped.** If the snapshot fails, the source runs on and the replacement is deleted. After the stop, a failure leaves the replacement waiting for the checkpoint, and `kubectl gcr` says where it is.
+- **The checkpoint stays in the registry,** and on the replacement's node, where the container's writable layer sits on it for as long as it runs.
+
 ## Draining nodes: gcr-operator
 
 `deploy/gcr-operator.yaml` runs gcr's operator. It turns evictions (`kubectl drain`, the cluster autoscaler, node upgrades) of pods that opt in into migrations:

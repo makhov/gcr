@@ -29,11 +29,13 @@ import (
 
 // RestrictedAnnotations are the gcr.dev annotations a Kubernetes pod may
 // use only where its handler lists them in PodAnnotations: with them a
-// pod author picks a host directory to restore from (fork-from), makes
-// the shim listen on the host's network for state to restore
+// pod author picks a host directory to restore from (fork-from), and
+// holds up the node's container creation waiting for it (fork-wait),
+// makes the shim listen on the host's network for state to restore
 // (migrate-in, migrate-token), or picks its host IDs (userns-base).
 var RestrictedAnnotations = []string{
 	container.AnnotationForkFrom,
+	container.AnnotationForkWait,
 	migrate.AnnotationIn,
 	migrate.AnnotationToken,
 	userns.AnnotationBase,
