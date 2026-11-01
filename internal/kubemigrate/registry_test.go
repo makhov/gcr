@@ -173,3 +173,23 @@ func TestSteer(t *testing.T) {
 		})
 	}
 }
+
+func TestStoppedByShutdown(t *testing.T) {
+	const msg = "Pod was terminated in response to imminent node shutdown."
+	for name, tc := range map[string]struct {
+		status corev1.PodStatus
+		want   bool
+	}{
+		"running": {corev1.PodStatus{Phase: corev1.PodRunning}, false},
+		"stopped by the kubelet, shutting down": {corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.DisruptionTarget,
+			Status: corev1.ConditionTrue, Reason: corev1.PodReasonTerminationByKubelet, Message: msg}}}, true},
+		"failed, shutting down": {corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Terminated", Message: msg}, true},
+		// Node-pressure eviction: no checkpoint was taken.
+		"stopped by the kubelet, evicted": {corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Evicted", Conditions: []corev1.PodCondition{{
+			Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue, Reason: corev1.PodReasonTerminationByKubelet, Message: "The node was low on resource: memory."}}}, false},
+	} {
+		if got := StoppedByShutdown(&corev1.Pod{Status: tc.status}); got != tc.want {
+			t.Errorf("%s: %v, want %v", name, got, tc.want)
+		}
+	}
+}

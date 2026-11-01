@@ -76,7 +76,7 @@ Other owners:
 1. **`gcr-operator migrate pod/NAME [--to NODE]`:** the operator, the node agent, the target RuntimeClass, and bare pods. No webhook yet.
 2. **Evictions:** the webhook, Deployments and ReplicaSets through the ownership handover, and fallback on failure. The demo: drain a node while a stateful process keeps running on another.
 3. **`emptyDir`, and Jobs.** Built.
-4. **StatefulSets, and spot and node shutdown through registry checkpoints** ([plan below](#milestone-4-checkpoints-through-a-registry)). StatefulSets built; shutdown notices next.
+4. **StatefulSets, and spot and node shutdown through registry checkpoints** ([below](#milestone-4-checkpoints-through-a-registry)). Built, but for Deployments' and Jobs' pods at a node shutdown.
 
 ## Milestone 4: checkpoints through a registry
 
@@ -115,15 +115,31 @@ The operator checks the policy has the parameter when it starts. One that finds 
 
 ### Spot and node shutdown
 
-The same checkpoint, triggered differently: on a node's shutdown notice (graceful node shutdown, or a spot interruption handler's taint), the operator checkpoints the opted-in pods on it to the registry right away, before the node goes, and records pending restores for them. Then:
-- a StatefulSet's or a ReplicaSet's replacement is steered to restore, as above, when its controller creates it;
-- a bare pod has no controller to create a replacement: the operator creates it.
+Built (step 4 below), for graceful node shutdowns: systemd's, which the kubelet handles with `shutdownGracePeriod`, and what spot reclaims on GKE are.
 
-How much fits before the node goes is the open question: a spot notice is two minutes on most clouds, and a few GiB of memory push in that time over a fast link.
+Spot handlers that drain the node first, such as AWS Node Termination Handler and Karpenter's interruption handling, go through evictions. The webhook already turns those into migrations. A graceful node shutdown doesn't: the kubelet stops the pods itself, and admits no new pod meanwhile, so no Job can reach the node to checkpoint them. So the checkpoint happens on the node:
+
+1. **`gcr shutdown-guard`** (a systemd unit on each node) holds a logind delay lock, as the kubelet does. When logind signals the shutdown, it marks it, in `/run/gcr/shutdown`.
+2. **The shim checkpoints as the kubelet stops.** The kubelet stops each pod's container through the CRI. If the node is marked and the pod opted in (`gcr.dev/migrate-on-evict`, which reaches the shim with the other `gcr.dev/*` pod annotations), the shim first snapshots and stops the container into `/var/lib/gcr/checkpoints/<pod UID>` (`gcr snapshot -stop`'s code). Only then does the stop go on. A kill waits for a snapshot in progress, so the kubelet's SIGTERM can't reach the process mid-dump, where the checkpoint would carry it along.
+3. **The guard pushes** each checkpoint to the registry, tagged with the pod's UID, as soon as it is written. It lets the shutdown go on once the kubelet has released its own lock (it has stopped every pod) and every checkpoint is pushed or failed, or after `-wait`.
+4. **The operator restores.** Its pod informer sees the kubelet's status on the pod: `Failed`, "Pod was terminated in response to imminent node shutdown.", with the condition `DisruptionTarget` (`TerminationByKubelet`).
+   - **A StatefulSet's pod:** the operator records a pending restore for it, and the webhook steers the pod the StatefulSet creates again, as for an eviction. The checkpoint is pulled onto the pod's node; the pull Job retries until the guard's push has arrived.
+   - **A bare pod:** the operator creates the replacement, as `kubectl gcr migrate -registry` does, and deletes the failed pod once it runs.
+
+**The race with the StatefulSet.** The StatefulSet replaces the pod as soon as the kubelet marks it failed, which can be within a second of the shutdown, since the dump is quick. The informer usually tells the operator first. If it hasn't yet when the new pod is created, the webhook looks up the last the informer saw of the pod being replaced. If that pod was on a node that isn't Ready, the webhook waits up to 2 s for the informer to say it was stopped by a shutdown, then records the restore and steers the new pod.
+
+**Measured** on two k0s VMs (arm64, Ubuntu 26.04, k0s v1.33, `shutdownGracePeriod: 60s`), `systemctl poweroff` of the node with a StatefulSet's pod and a bare pod, twice. Each time:
+- both containers were checkpointed and pushed within the first second;
+- both pods were restored on the other node 3.3 to 4.6 s after the shutdown started;
+- both carried on counting from where they were stopped, with 0 restarts.
+
+**Not yet:**
+- **Deployments' and Jobs' pods.** Their replacements get new names, so a pending restore can't be keyed by the pod's name, and the admission policy matches by name. A restore keyed by the replacement's owner would cover them.
+- **How much fits before the node goes:** a spot notice is two minutes on most clouds, and GKE's graceful shutdown 30 s. A few GiB of memory push in that time over a fast link.
 
 ### Order of work
 
 1. `gcr snapshot -stop`: checkpoint and stop, through the control API. Built.
 2. Checkpoint-to-registry and restore-from-registry Jobs in `kubemigrate`, used by `kubectl gcr migrate -registry`, with bare pods first: the plugin creates the replacement itself. That tests the path end to end without the webhook. Built.
 3. The mutating webhook, the pending restores, and the admission policy's new case: StatefulSets. Built.
-4. Shutdown notices.
+4. Graceful node shutdowns: the shim, `gcr shutdown-guard`, and the operator's informer. Built, for StatefulSets' and bare pods.

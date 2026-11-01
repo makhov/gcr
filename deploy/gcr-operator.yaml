@@ -18,10 +18,11 @@ metadata:
 rules:
   # The pods it moves: read them, mark them, create their targets, hand
   # those over to their ReplicaSets and Jobs, mark the sources disrupted
-  # (DisruptionTarget) and delete them.
+  # (DisruptionTarget) and delete them; and watch for those stopped as
+  # their nodes shut down.
   - apiGroups: [""]
     resources: [pods]
-    verbs: [get, list, create, patch, delete]
+    verbs: [get, list, watch, create, patch, delete]
   - apiGroups: [""]
     resources: [pods/status]
     verbs: [patch]

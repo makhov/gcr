@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 
 	"github.com/makhov/gcr/internal/container"
 	"github.com/makhov/gcr/internal/control"
+	"github.com/makhov/gcr/internal/nodeshutdown"
 	"github.com/makhov/gcr/test/e2e/framework"
 )
 
@@ -502,4 +504,58 @@ func TestSnapshotAndStop(t *testing.T) {
 	}
 	framework.Eventually(t, 10*time.Second, "the restored container to count on", func() bool { return fork.ReadInt("/tmp/count") > first+5 })
 	t.Logf("stopped at %d, restored at %d", at, first)
+}
+
+// TestNodeShutdownCheckpoint: a pod's container that opted in to moving,
+// stopped while its node shuts down (gcr shutdown-guard marks it), is
+// checkpointed and stopped rather than signalled, and carries on from
+// there (internal/nodeshutdown).
+func TestNodeShutdownCheckpoint(t *testing.T) {
+	ns := framework.NewNamespace(t, "gcr-e2e")
+	uid := framework.UniqueID("pod")
+	src := ns.Run(framework.UniqueID("shutdown"), framework.Spec{
+		Args: []string{"sh", "-c", counter},
+		// As containerd's CRI marks a pod's container.
+		Annotations: map[string]string{nodeshutdown.AnnotationOptIn: "true",
+			"io.kubernetes.cri.container-type": "container", "io.kubernetes.cri.sandbox-uid": uid},
+	})
+	framework.Eventually(t, time.Minute, "the container to count", func() bool {
+		n, err := strconv.Atoi(func() string { s, _ := src.ReadFile("/tmp/count"); return s }())
+		return err == nil && n > 10
+	})
+	if nodeshutdown.ShuttingDown() {
+		t.Skip("the node is shutting down")
+	}
+	if err := nodeshutdown.Begin(); err != nil {
+		t.Fatal(err)
+	}
+	dir := nodeshutdown.CheckpointPath(uid)
+	t.Cleanup(func() {
+		_ = nodeshutdown.Cancel()
+		_ = os.RemoveAll(dir)
+	})
+	// The kubelet's stop: SIGTERM. The checkpoint must not carry it.
+	if err := src.Task.Kill(ns.Ctx, syscall.SIGTERM); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	framework.Eventually(t, 10*time.Second, "the container to stop", func() bool { return src.Status() == containerd.Stopped })
+	if states, err := nodeshutdown.States(); err != nil || states[uid] != nodeshutdown.Ready {
+		t.Fatalf("checkpoint state %q (%v), want ready", states[uid], err)
+	}
+
+	fork := ns.Run(framework.UniqueID("restored"), framework.Spec{
+		Args:        []string{"sh", "-c", counter},
+		Annotations: map[string]string{container.AnnotationForkFrom: dir},
+	})
+	b, err := os.ReadFile(filepath.Join(dir, "upper", "tmp", "count"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	at, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	first := fork.ReadInt("/tmp/count")
+	if at <= 10 || first < at || first > at+2 {
+		t.Fatalf("stopped at %d, restored counting at %d: it should carry on from there", at, first)
+	}
+	framework.Eventually(t, 10*time.Second, "the restored container to count on", func() bool { return fork.ReadInt("/tmp/count") > first+5 })
+	t.Logf("stopped at %d by the node's shutdown, restored at %d", at, first)
 }

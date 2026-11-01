@@ -1,0 +1,28 @@
+# gcr shutdown-guard: when the node shuts down, pods that opted in to
+# moving (gcr.dev/migrate-on-evict: "true") are checkpointed as the kubelet
+# stops them, and pushed to a registry, for gcr-operator (run with the same
+# -registry) to restore elsewhere (docs/migration.md, Node shutdown).
+#
+# Needs the kubelet's graceful node shutdown (shutdownGracePeriod), and
+# logind's InhibitDelayMaxSec above it, by the time the checkpoints take to
+# push: /etc/systemd/logind.conf.d/zz-gcr.conf with
+#   [Login]
+#   InhibitDelayMaxSec=90
+# Set the registry in /etc/gcr/shutdown-guard.env:
+#   GCR_SHUTDOWN_REGISTRY=registry.example.com/gcr/checkpoints
+#   GCR_SHUTDOWN_ARGS=-wait 80s
+# Credentials for it go in root's Docker config, as for gcr snapshot-push.
+[Unit]
+Description=gcr: checkpoint pods that move to other nodes when this one shuts down
+Wants=network-online.target
+After=network-online.target systemd-logind.service
+
+[Service]
+Environment=HOME=/root
+EnvironmentFile=/etc/gcr/shutdown-guard.env
+ExecStart=/usr/local/bin/gcr shutdown-guard $GCR_SHUTDOWN_ARGS ${GCR_SHUTDOWN_REGISTRY}
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

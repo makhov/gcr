@@ -15,6 +15,7 @@
 //	gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF
 //	gcr snapshot-pull [-plain-http] [-store DIR] [-lazy] REF DIR
 //	gcr [-n namespace] migrate [-token TOKEN] [-post-copy] ID TARGET-URL
+//	gcr shutdown-guard [-plain-http] [-wait DURATION] REPOSITORY
 package main
 
 import (
@@ -24,8 +25,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"path"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -34,6 +38,7 @@ import (
 	"github.com/makhov/gcr/internal/control"
 	"github.com/makhov/gcr/internal/kube"
 	"github.com/makhov/gcr/internal/migrate"
+	"github.com/makhov/gcr/internal/nodeshutdown"
 	"github.com/makhov/gcr/internal/payload"
 	"github.com/makhov/gcr/internal/setup"
 	"github.com/makhov/gcr/internal/snapshot"
@@ -58,7 +63,8 @@ func main() {
 			"       gcr snapshot-rm DIR...\n"+
 			"       gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF\n"+
 			"       gcr snapshot-pull [-plain-http] [-store DIR] [-lazy] REF DIR\n"+
-			"       gcr [-n namespace] migrate [-token TOKEN] [-post-copy] ID TARGET-URL\n")
+			"       gcr [-n namespace] migrate [-token TOKEN] [-post-copy] ID TARGET-URL\n"+
+			"       gcr shutdown-guard [-plain-http] [-wait DURATION] REPOSITORY\n")
 	}
 	flag.Parse()
 	args := flag.Args()
@@ -226,6 +232,38 @@ func run(ctx context.Context, ns string, args []string) error {
 		}
 		fmt.Printf("%s@%s\n", repo.Reference.Registry+"/"+repo.Reference.Repository, desc.Digest)
 		return nil
+	case len(args) >= 1 && args[0] == "shutdown-guard":
+		// Run by systemd on a Kubernetes node: pods that opted in to
+		// moving (gcr.dev/migrate-on-evict) are checkpointed as the node
+		// shuts down, and pushed to REPOSITORY, tagged with their UIDs,
+		// for gcr-operator to restore elsewhere.
+		fs := flag.NewFlagSet("shutdown-guard", flag.ExitOnError)
+		plainHTTP := fs.Bool("plain-http", false, "speak HTTP, not HTTPS, to the registry")
+		wait := fs.Duration("wait", 80*time.Second, "how long a shutdown is held at most; logind's InhibitDelayMaxSec must be as long")
+		_ = fs.Parse(args[1:])
+		if fs.NArg() != 1 || strings.Contains(path.Base(fs.Arg(0)), ":") || strings.Contains(fs.Arg(0), "@") {
+			flag.Usage()
+			os.Exit(2)
+		}
+		if os.Getenv("HOME") == "" {
+			// systemd sets none: the registry's credentials are root's
+			// Docker config's.
+			_ = os.Setenv("HOME", "/root")
+		}
+		ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return nodeshutdown.Guard(ctx, nodeshutdown.GuardOptions{
+			Wait: *wait,
+			Log:  func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
+			Push: func(ctx context.Context, uid string) error {
+				repo, err := registry.Repository(fs.Arg(0)+":"+uid, *plainHTTP)
+				if err != nil {
+					return err
+				}
+				_, err = registry.Push(ctx, nodeshutdown.CheckpointPath(uid), repo, uid, registry.FormatTar)
+				return err
+			},
+		})
 	case len(args) >= 1 && args[0] == "migrate":
 		fs := flag.NewFlagSet("migrate", flag.ExitOnError)
 		token := fs.String("token", os.Getenv("GCR_MIGRATE_TOKEN"), "token the target expects (default $GCR_MIGRATE_TOKEN)")

@@ -17,6 +17,7 @@ require (
 	github.com/containerd/ttrpc v1.2.9
 	github.com/containerd/typeurl/v2 v2.3.0
 	github.com/cyphar/filepath-securejoin v0.7.0
+	github.com/godbus/dbus/v5 v5.2.2
 	github.com/klauspost/compress v1.20.0
 	github.com/opencontainers/cgroups v0.1.0
 	github.com/opencontainers/go-digest v1.0.0
@@ -70,7 +71,6 @@ require (
 	github.com/go-openapi/swag/stringutils v0.27.1 // indirect
 	github.com/go-openapi/swag/typeutils v0.27.1 // indirect
 	github.com/go-openapi/swag/yamlutils v0.27.1 // indirect
-	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
@@ -88,6 +88,7 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/opencontainers/selinux v1.15.1 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
+	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/vishvananda/netlink v1.3.1 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
