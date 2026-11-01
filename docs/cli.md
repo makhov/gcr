@@ -30,7 +30,7 @@ Errors go to standard error with `gcr:` in front, and the exit status is
 ### `gcr setup`
 
 Installs gcr on the node and registers the runtime
-([install](install.md#on-a-host)): `gcr` and the shim into
+([install](install.md#one-host)): `gcr` and the shim into
 `-bin-dir` (`/usr/local/bin`), and, from a release, gcr's CRIU and its CUDA
 plugin into `/var/lib/gcr`; a containerd drop-in in `conf.d` beside
 `-containerd-config`, in the configuration's own format version, which it

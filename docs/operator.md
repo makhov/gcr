@@ -19,7 +19,7 @@ never held up by the operator.
 
 ## Install
 
-It needs gcr on the cluster ([installed](install.md#on-kubernetes)), and
+It needs gcr on the cluster ([installed](install.md#your-own-cluster)), and
 two or more nodes with gcr. With the Helm chart, it's
 `--set operator.enabled=true` (and `--set operator.registry=REPO`,
 [below](#with-a-registry)). Without Helm:

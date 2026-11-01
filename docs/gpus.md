@@ -1,5 +1,10 @@
 # GPUs
 
+Snapshots, forks and checkpoints include what is on the GPU, so a model
+server can be snapshotted once it has loaded and started again from that
+moment ([warm starts](examples/warm-starts.md) measures it: 9 s against
+136 s cold).
+
 NVIDIA GPUs get into gcr containers through CDI: the NVIDIA device plugin
 (CDI strategy) and the spec nvidia-ctk generates
 (`/etc/cdi/nvidia.yaml`). containerd puts the device nodes, driver

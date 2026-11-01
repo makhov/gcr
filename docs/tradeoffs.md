@@ -1,12 +1,14 @@
 # What gcr is good for, and where it falls short
 
-gcr is a container runtime, not a virtual machine. Its containers share the
-host's kernel, as runc's do; what it adds is process state as something a
-platform can work with (checkpoint, restore, fork, rewind, migrate) and a
-container that is harder to break out of than runc's by default. This page
-says what that buys, what it costs, and what has not been shown yet. The
-[feature pages](index.md#what-it-does) have the details; numbers here come from them and from
-the end-to-end tests (arm64 VM, Linux 7.0, unless said otherwise).
+Read this before building on gcr. It says what you get, what it costs,
+and what has not been shown yet, with numbers from the end-to-end tests
+(arm64 VM, Linux 7.0, unless noted).
+
+The short version: gcr is a container runtime, not a virtual machine. Its
+containers share the host's kernel, as runc's do. What it adds is a
+container's process state as something you can work with (checkpoint,
+restore, fork, rewind, migrate), and a container that is harder to break
+out of than runc's by default.
 
 ## In one table
 
@@ -66,6 +68,35 @@ against runc's 22 ms, stop 17 against 31. It passes CRI conformance
 **Every feature is tested end to end.** Each one has a test that runs real
 containers through containerd and checks the outcome, and the hardening
 tests check that each refused call is refused, by return value.
+
+## Compared with runc
+
+Same host (arm64, Linux 7.0), containerd 2.4.2, runc v1.5.2 (the release
+gcr's libcontainer comes from), both runtimes on their defaults, with
+gcr's hardening and Landlock on:
+
+| | gcr | runc |
+| --- | --- | --- |
+| critest | 123 passed, 0 failed | 113 passed, 0 failed |
+| critest NRI tests | 11 of 11 | 11 of 11 |
+| StartContainer, median / p90 | 16.1 / 19.5 ms | 21.9 / 26.7 ms |
+| StopContainer, median / p90 | 16.5 / 21.3 ms | 30.7 / 34.1 ms |
+| CreatePod / StopPod, median | 52.2 / 53.4 ms | 54.8 / 65.2 ms |
+| Shim memory per pod (PSS, 10 pods) | ~6 MiB | ~4 MiB |
+
+gcr starts and stops containers faster because it runs libcontainer
+inside the shim instead of executing a runc binary per operation. It
+costs more memory for the same reason: the shim is a bigger binary, more
+of it resident, shared between shims on a node.
+
+runc skips critest's user namespace tests, which gcr passes. The other
+skips (NRI without a socket, benchmarks, an image volume field containerd
+does not report) are the same for both. The latencies are critest's own
+benchmarks over 50 sequential runs.
+
+[Differences from runc](runc-differences.md) covers behaviour rather than
+numbers: what will not work the same, and how to turn each protection
+off.
 
 ## Limitations
 

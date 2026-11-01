@@ -69,13 +69,21 @@ validation:
 nav:
   - Home: index.md
   - Start here:
-      - Getting started: getting-started.md
+      - Quickstart: getting-started.md
       - Installation: install.md
       - What gcr is good for: tradeoffs.md
       - Differences from runc: runc-differences.md
-  - Using gcr:
+  - Examples:
+      - examples/index.md
+      - Agent sandboxes: examples/agent-sandbox.md
+      - Warm starts: examples/warm-starts.md
+      - Node maintenance: examples/node-maintenance.md
+      - A warm pool across the fleet: examples/warm-pool.md
+  - Running containers:
       - Docker: docker.md
+      - ctr and containerd: ctr.md
       - Kubernetes: kubernetes.md
+      - CRI-O: crio.md
       - gcr-operator: operator.md
   - Features:
       - Fork: fork.md
