@@ -13,7 +13,7 @@ make vm T=test-e2e                        # build, install, run the end-to-end t
 
 The CRIU fork is expected next to this repository (`../criu`): a clone of
 [makhov/criu](https://github.com/makhov/criu) at the tag in
-`hack/criu-version` (`git -C ../criu checkout v4.2.1+gcr.0`), or on its
+`hack/criu-version` (`git -C ../criu checkout v4.2.1+gcr.1`), or on its
 `gcr` branch to change it. Changes go to that branch as pull requests, and
 a new tag (`v4.2.1+gcr.1`, ...) in `hack/criu-version` releases them. The
 runc fork comes in through `go.mod`. [Architecture](architecture.md) says what each package
