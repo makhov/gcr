@@ -7,7 +7,8 @@
 # kubectl-gcr-VERSION-OS-ARCH, the kubectl plugin, for Linux and macOS;
 # gcr.yaml and gcr-operator.yaml, the installer DaemonSet and the operator
 # with this release's image; gcr-shutdown-guard.service, the systemd unit
-# for nodes whose pods move when they shut down; and SHA256SUMS. The Go binaries are static; CRIU, built in an Ubuntu 22.04
+# for nodes whose pods move when they shut down; and SHA256SUMS. (The Helm
+# chart has releases of its own: chart/vX.Y.Z tags.) The Go binaries are static; CRIU, built in an Ubuntu 22.04
 # container (hack/criu-build.sh), needs glibc 2.35 or later, or, the static
 # one, nothing. Runs on a
 # Linux host with Docker that can build Go with cgo for each architecture

@@ -1,0 +1,48 @@
+# The image of the installer and the operator: gcr's release image.
+image:
+  repository: ghcr.io/makhov/gcr
+  # Default: the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Also creates the release's namespace (deploy/gcr.yaml, for kubectl apply).
+# With helm, use --create-namespace instead.
+createNamespace: false
+
+# gcr on the nodes: the RuntimeClasses gcr and gcr-migrate, the admission
+# policy that guards gcr-migrate, and the installer.
+runtime:
+  enabled: true
+  installer:
+    # A DaemonSet that runs `gcr setup` on every node and labels it
+    # gcr.dev/runtime=ready. Off where something else puts gcr on the nodes
+    # (k0da), and labels them.
+    enabled: true
+    # Passed on to gcr setup: -containerd-config and -containerd-unit for
+    # distributions that run containerd their own way (k3s, RKE2),
+    # -docker, -no-restart.
+    setupArgs: ""
+    nodeSelector: {}
+    tolerations:
+      - operator: Exists
+    resources:
+      requests: {cpu: 10m, memory: 16Mi}
+
+# gcr-operator: evictions of pods that opt in (gcr.dev/migrate-on-evict:
+# "true") become migrations to another node (docs/operator.md).
+operator:
+  enabled: false
+  # A registry repository (host[:port]/path) the nodes reach: StatefulSets'
+  # pods move through checkpoints there, and pods on nodes that shut down
+  # are restored from it. Without, StatefulSets' pods are evicted.
+  registry: ""
+  # Talk to the registry without TLS.
+  plainHTTP: false
+  # More of the operator's flags (docs/operator.md#flags).
+  extraArgs: []
+  # Keep it off nodes that shut down for good (spot): it goes with them.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  resources: {}

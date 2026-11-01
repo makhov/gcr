@@ -1,0 +1,17 @@
+{{- if .Values.runtime.enabled }}
+gcr's runtime classes are installed: pods ask for gcr with
+  runtimeClassName: gcr
+{{- if .Values.runtime.installer.enabled }}
+Nodes get gcr as the installer's pods finish; ready ones are labelled:
+  kubectl get nodes -l gcr.dev/runtime=ready
+{{- end }}
+{{- end }}
+{{- if .Values.operator.enabled }}
+
+gcr-operator moves pods that opt in (gcr.dev/migrate-on-evict: "true")
+when nodes are drained{{ if .Values.operator.registry }}, StatefulSets' pods and pods on nodes that shut down
+through {{ .Values.operator.registry }}{{ else }}; without operator.registry, StatefulSets' pods are evicted{{ end }}.
+  kubectl -n {{ .Release.Namespace }} logs deployment/gcr-operator
+{{- end }}
+
+Docs: https://makhov.github.io/gcr/

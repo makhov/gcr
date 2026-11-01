@@ -126,14 +126,28 @@ build gcr from source, see [Development](development.md).
 
 ## On Kubernetes
 
-On a cluster whose nodes run containerd, one manifest installs gcr on
-every node:
+On a cluster whose nodes run containerd, the Helm chart installs gcr on
+every node, and gcr-operator if you want it:
+
+```sh
+helm install gcr oci://ghcr.io/makhov/charts/gcr \
+  --namespace gcr-system --create-namespace
+  # --set operator.enabled=true   for gcr-operator
+```
+
+The [chart's README](https://github.com/makhov/gcr/tree/main/charts/gcr)
+lists its values: the operator and its registry, which nodes to install
+on, `gcr setup`'s options for k3s and RKE2. Each chart release installs
+the gcr release that was the latest when it was made; `helm upgrade` to a
+newer chart upgrades gcr, one node at a time.
+
+Or, without Helm, the same as plain manifests:
 
 ```sh
 kubectl apply -f https://github.com/makhov/gcr/releases/latest/download/gcr.yaml
 ```
 
-It creates, in the namespace `gcr-system`:
+Either way, it creates, in the namespace `gcr-system`:
 
 - **The installer DaemonSet** (`gcr-installer`). On each node, a
   privileged pod runs the release's `gcr setup` on the host (as
@@ -160,9 +174,9 @@ kubectl run demo --image=busybox --restart=Never \
 ```
 
 - **k0s** applies `/etc/k0s/containerd.d/gcr.toml` itself, without a
-  containerd restart. **k3s and RKE2** need `GCR_SETUP_ARGS` in the
-  DaemonSet set to `-containerd-config` and `-containerd-unit` for their
-  containerd.
+  containerd restart. **k3s and RKE2** need `-containerd-config` and
+  `-containerd-unit` for their containerd: the chart's
+  `runtime.installer.setupArgs`, or `GCR_SETUP_ARGS` in the DaemonSet.
 - **Nodes without glibc** (Alpine, k0s's image) get a static CRIU and GNU
   tar: everything but GPU checkpoints works there.
 - **[k0da](https://github.com/makhov/k0da)** (k0s in containers) installs
@@ -192,7 +206,10 @@ It needs a cluster admin's credentials: it creates pods on `gcr-migrate`.
 gcr-operator turns evictions (`kubectl drain`, the cluster autoscaler,
 node upgrades) of pods that opt in into live migrations. With a registry,
 it also moves StatefulSets' pods, and restores pods whose node shuts
-down. It needs `gcr.yaml` installed, and two or more nodes with gcr.
+down. It needs gcr installed, and two or more nodes with gcr.
+
+With the chart, `--set operator.enabled=true` (and
+`--set operator.registry=REPO`); without it:
 
 ```sh
 kubectl apply -f https://github.com/makhov/gcr/releases/latest/download/gcr-operator.yaml
@@ -212,22 +229,24 @@ runs `gcr shutdown-guard`, and gcr-operator runs with a registry.
 ## Upgrading
 
 - **One host:** run the new release's `gcr setup`.
-- **Kubernetes:** apply the new release's `gcr.yaml`, and
-  `gcr-operator.yaml` if you run it. The installer DaemonSet upgrades one
-  node at a time. Running pods keep the shim they started with; new pods
+- **Kubernetes:** `helm upgrade` with the new release's chart, or apply
+  its `gcr.yaml`, and `gcr-operator.yaml` if you run it. The installer
+  DaemonSet upgrades one node at a time. Running pods keep the shim they started with; new pods
   get the new one.
 
 ## Uninstalling
 
-On Kubernetes:
+On Kubernetes, `helm uninstall gcr -n gcr-system`, or:
 
 ```sh
 kubectl delete -f https://github.com/makhov/gcr/releases/latest/download/gcr-operator.yaml
 kubectl delete -f https://github.com/makhov/gcr/releases/latest/download/gcr.yaml
 ```
 
-Deleting the DaemonSet takes the `gcr.dev/runtime=ready` label off the
-nodes and leaves gcr installed on them. Pods on `gcr` keep running.
+This leaves gcr installed on the nodes, and pods on `gcr` keep running.
+The nodes may keep their `gcr.dev/runtime=ready` label, since the
+installer's permissions go with it:
+`kubectl label nodes --all gcr.dev/runtime-` takes it off.
 
 On a host, after the containers on gcr are gone:
 

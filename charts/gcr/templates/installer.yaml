@@ -1,0 +1,94 @@
+{{- if and .Values.runtime.enabled .Values.runtime.installer.enabled }}
+# A DaemonSet runs `gcr setup` on each node (deploy/install.sh): it installs
+# the shim and gcr's CRIU, registers the runtime with containerd and
+# restarts it (running pods carry on), and labels the node
+# gcr.dev/runtime=ready. Pods with runtimeClassName: gcr run there. A node
+# that lacks something gcr needs keeps its pod crash-looping, with gcr
+# doctor's report in its logs. Deleting it leaves gcr installed on the
+# nodes, but unlabels them.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gcr-installer
+  namespace: {{ .Release.Namespace }}
+---
+# To label its own node.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gcr-installer
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gcr-installer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gcr-installer
+subjects:
+  - kind: ServiceAccount
+    name: gcr-installer
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gcr-installer
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels: {app: gcr-installer}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 1}
+  template:
+    metadata:
+      labels: {app: gcr-installer}
+    spec:
+      serviceAccountName: gcr-installer
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # It installs onto the host and restarts containerd: host PID 1's
+      # namespaces, and the host's files.
+      hostPID: true
+      priorityClassName: system-node-critical
+      {{- with .Values.runtime.installer.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.runtime.installer.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: install
+          image: {{ include "gcr.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            privileged: true
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef: {fieldPath: spec.nodeName}
+            # Passed on to gcr setup: -containerd-config and
+            # -containerd-unit for distributions that run containerd their
+            # own way (k3s, RKE2), -docker, -no-restart.
+            - name: GCR_SETUP_ARGS
+              value: {{ .Values.runtime.installer.setupArgs | quote }}
+          volumeMounts:
+            - {name: host, mountPath: /host}
+          {{- with .Values.runtime.installer.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      volumes:
+        - name: host
+          hostPath: {path: /}
+{{- end }}
