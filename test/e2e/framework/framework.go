@@ -253,6 +253,16 @@ func (c *Container) Remove() {
 					}
 				}
 				c.ns.t.Logf("restore.log, lazy-diag (%d lines):\n%s", len(diag), strings.Join(diag[:min(len(diag), 60)], "\n"))
+				// The guard's catch: a write into a lazy page during the
+				// content restore, with its backtrace, or a read that hit
+				// one (EFAULT).
+				lines := strings.Split(string(rl), "\n")
+				for i, line := range lines {
+					if strings.Contains(line, "lazy-diag: SIGSEGV") || strings.Contains(line, "Bad address") {
+						c.ns.t.Logf("restore.log at line %d:\n%s", i+1, strings.Join(lines[max(0, i-15):min(len(lines), i+35)], "\n"))
+						break
+					}
+				}
 				// Everything criu did between the premap check and the
 				// restorer's first remap: lazy pages turned resident there.
 				var window []string
