@@ -1732,9 +1732,11 @@ func (c *Container) Kill(sig syscall.Signal, all bool) error {
 // cgroupGone says whether err is the container's cgroup having been
 // removed, which happens once every process in it has exited: killing
 // them, or all of them, has nothing left to do. libcontainer checks the
-// cgroup exists, then reads it, and it can go in between.
+// cgroup exists, then reads it, and it can go in between. A cgroup on its
+// way out still has its files, but writing cgroup.kill there fails with
+// ENODEV.
 func cgroupGone(err error) bool {
-	return errors.Is(err, libcontainer.ErrCgroupNotExist) || errors.Is(err, fs.ErrNotExist)
+	return errors.Is(err, libcontainer.ErrCgroupNotExist) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ENODEV)
 }
 
 // Delete removes a stopped container: libcontainer state, rootfs mounts, stdio.
