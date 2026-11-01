@@ -1,5 +1,16 @@
 # Troubleshooting
 
+**Start with `sudo gcr doctor`.** It checks the kernel, cgroups, the
+shim, containerd's registration, CRIU, Landlock, the netlink policy and
+the rest, and says what to do about anything it finds
+([what its lines mean](install.md#checking-a-node)). Most "it does not
+work on this node" problems are one `off` or `MISSING` line.
+
+If a container fails to start, the error gcr returns usually says exactly
+what is wrong: [errors gcr returns](#errors-gcr-returns) lists them with
+the fix. If a program inside the container fails instead, it is probably
+[a refused system call](#a-program-fails-with-eperm-or-enosys).
+
 ## Where to look
 
 - **The shim's log** is containerd's (`journalctl -u containerd`), each
@@ -54,7 +65,7 @@ has `Hardening = 'off'` and `Landlock = 'off'`.
 | `... is not a snapshot` | `fork-from` names a directory without `images/` and `upper/` | check the path; `gcr snapshot` makes them |
 | `... is in use by container ..., snapshot ...` | `gcr snapshot-rm` of a snapshot something mounts | remove the forks, and the snapshots of them, first (`gcr snapshot-users`) |
 | `time travel every ... keeping ... points: the handler allows at most ...` | the annotations ask for more than `TimeTravel` allows | ask for less, or raise the handler's limits |
-| `time travel in a container CRI-O runs` | CRI-O tracks a container by its process, which a rewind replaces | run it under containerd ([getting started](getting-started.md#with-cri-o)) |
+| `time travel in a container CRI-O runs` | CRI-O tracks a container by its process, which a rewind replaces | run it under containerd ([CRI-O](crio.md)) |
 | `live migration into a container CRI-O runs` | CRI-O wants the process when it creates the container, before the source has sent one | make the target a containerd container |
 | `rewind of a container on a network its caller set up` | time travel under Docker on a bridge network | run it with `--network none` or `host` ([Docker](docker.md#networking)) |
 | `gcr's user namespaces need the rootfs as overlay mounts from containerd` | `gcr.dev/host-users=false` or `UserNamespaces = 'always'` under CRI-O | use `hostUsers: false` (CRI-O's user namespaces) |

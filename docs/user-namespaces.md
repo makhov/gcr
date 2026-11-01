@@ -1,5 +1,12 @@
 # User namespaces
 
+gcr's main protection, and the one most likely to surprise you: root
+inside a container is not root on the host, so files on a bind mount
+appear to belong to someone else, and anything needing real root fails.
+[What the hardening breaks](compatibility.md#gcrs-user-namespaces-where-they-apply)
+has the symptoms; `gcr.dev/host-users=true` opts a container out where
+the handler allows it.
+
 Containers run in a user namespace by default: root inside is an
 unprivileged range of 65536 host IDs, one range per pod (all containers of a
 pod share the sandbox's user namespace, so they can share volumes and

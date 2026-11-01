@@ -5,104 +5,113 @@ hide:
 
 # gcr
 
-A containerd runtime (`io.containerd.gcr.v2`) that treats a running
-container's processes as something a platform can work with: snapshot it
-without stopping it, fork it any number of times, rewind it to an earlier
-point, move it to another host. It runs containers in-process through
-libcontainer, with no runc binary, and hardens them by default beyond
-what runc does.
+**gcr runs containers like any other runtime, and then lets you do four
+things runc cannot: snapshot a container while it keeps running, start
+copies of it, rewind it to an earlier moment, and move it to another
+machine without restarting it.**
+
+It is a containerd runtime (`io.containerd.gcr.v2`), so `ctr`, Docker,
+Kubernetes and CRI-O drive it with the commands you already use. Pick the
+runtime and the rest stays the same.
+
+## Try it
+
+On a Linux box with Docker, this installs gcr and runs a container on it:
 
 ```sh
-gcr snapshot warm /var/lib/gcr/snapshots/warm          # the parent keeps running
-ctr run -d --runtime io.containerd.gcr.v2 \
-  --annotation gcr.dev/fork-from=/var/lib/gcr/snapshots/warm IMAGE fork-1 CMD
+arch=$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
+v=$(curl -fsSLo /dev/null -w '%{url_effective}' https://github.com/makhov/gcr/releases/latest | sed 's#.*/##')
+curl -fLo gcr "https://github.com/makhov/gcr/releases/download/$v/gcr-$v-linux-$arch" && chmod +x gcr
+
+sudo ./gcr setup -docker        # installs gcr, registers it with containerd and Docker
+docker run --rm --runtime gcr busybox echo hello
 ```
 
-[Get started](getting-started.md){ .md-button .md-button--primary }
-[Install](install.md){ .md-button }
+No Linux box? [A VM on your laptop](install.md#a-vm-on-your-laptop) or a
+throwaway cluster works too.
+
+[Quickstart: first fork in 10 minutes](getting-started.md){ .md-button .md-button--primary }
+[Examples](examples/index.md){ .md-button }
 [GitHub](https://github.com/makhov/gcr){ .md-button }
 
-## What you can do with it
+## Why you might want this
 
 <div class="grid cards" markdown>
 
--   :material-undo-variant: **Give an agent undo**
+-   :material-undo-variant: **Undo for agent sandboxes**
 
     ---
 
-    Run each command in a sandbox after a point on its timeline, and take
-    any of them back: files, processes and their memory. A dropped
-    database comes back with its rows.
+    Mark a point before a command, let the agent run it, and take it back
+    if it went wrong: files, processes, and what they held in memory. A
+    dropped database comes back with its rows.
 
-    [:octicons-arrow-right-24: Time travel](time-travel.md)
+    [:octicons-arrow-right-24: Agent sandboxes](examples/agent-sandbox.md)
 
--   :material-source-branch: **Let an agent branch**
-
-    ---
-
-    Fork its sandbox, running services and all, try several approaches at
-    once, keep the one that worked. A fork holds only the memory it
-    touches.
-
-    [:octicons-arrow-right-24: Fork](fork.md)
-
--   :material-fire: **Start warm**
+-   :material-source-branch: **Several attempts at once**
 
     ---
 
-    Fork new containers from a snapshot of one that has already loaded
-    its model or interpreter, on this node or, through a registry, on any
-    other, reading only what each touches.
+    Fork a running sandbox, services and all, try three fixes in
+    parallel, keep the one that passed. Each fork pays only for the
+    memory it touches.
 
-    [:octicons-arrow-right-24: Moving snapshots](snapshot-registry.md)
+    [:octicons-arrow-right-24: Branching](examples/agent-sandbox.md)
 
--   :material-truck-fast: **Move what cannot restart**
+-   :material-fire: **Start warm instead of cold**
 
     ---
 
-    Migrate a running container to another node with a downtime that does
-    not grow with its memory. In Kubernetes, drains and node shutdowns
-    move pods instead of restarting them.
+    Snapshot a container once its model is on the GPU or its interpreter
+    is up, then start new ones from that moment. vLLM answers in 9
+    seconds instead of 136.
 
-    [:octicons-arrow-right-24: gcr-operator](operator.md)
+    [:octicons-arrow-right-24: Warm starts](examples/warm-starts.md)
+
+-   :material-truck-fast: **Drain a node without restarting work**
+
+    ---
+
+    Move a running container to another machine with downtime measured in
+    hundreds of milliseconds, whatever it holds in memory. In Kubernetes,
+    `kubectl drain` becomes a migration.
+
+    [:octicons-arrow-right-24: Node maintenance](examples/node-maintenance.md)
 
 </div>
 
 ## What it does
 
-- **Fork.** Start new containers from a snapshot of a running one, with
-  its memory (an interpreter up, a model loaded) and its files. Forks
-  share the snapshot's files without copying them, and, opt-in, its
-  memory.
-- **Snapshots between hosts** through any OCI registry, including ones
-  backed by S3.
-- **Time travel.** A point on the container's timeline at every `exec`,
-  or on request, incremental where the kernel tracks dirty pages, and a
-  rewind to any of them in place.
-- **Live migration** to another host, pre-copy where the kernel tracks
-  dirty memory, or post-copy, optionally over mutual TLS. In Kubernetes,
-  gcr-operator turns evictions into migrations, and moves StatefulSets'
-  pods and pods on nodes that shut down through checkpoints in a
-  registry.
-- **GPUs.** NVIDIA GPUs through CDI, with CUDA state in checkpoints and
-  forks.
-- **Hardening.** User namespaces by default, a denied set of system calls
-  on top of any seccomp profile, supervised mounts, a netlink policy in
-  the kernel (BPF LSM), and Landlock confining each container to its
-  root. Docker-in-Docker runs unprivileged.
-- **A drop-in runtime** for containerd 1.7 to 2.4 and Kubernetes: the
-  whole task API, CRI conformance. CRI-O runs it too, with snapshots and
-  forks but without time travel or migration, and so does Docker
-  (`docker run --runtime gcr`).
+| | |
+| --- | --- |
+| **[Fork](fork.md)** | Start containers from a snapshot of a running one, with its memory and files. Forks share the snapshot's files, and optionally its memory, so ten forks cost far less than ten containers. |
+| **[Time travel](time-travel.md)** | Points on a container's timeline, taken on request or after every `exec`, and a rewind to any of them in place. |
+| **[Live migration](migration.md)** | Move a running container to another host, over mutual TLS if you want it. |
+| **[Snapshots between hosts](snapshot-registry.md)** | Push a snapshot to any OCI registry, including S3-backed ones, and fork from it on another node. |
+| **[GPUs](gpus.md)** | NVIDIA GPUs through CDI, with CUDA state inside snapshots and forks. |
+| **[Hardening](hardening.md)** | Tighter defaults than runc: user namespaces, a denied set of syscalls on top of any seccomp profile, supervised mounts, a netlink policy in the kernel, and Landlock. Docker-in-Docker still runs, unprivileged. |
+| **[Drop-in runtime](runc-differences.md)** | containerd 1.7 to 2.4, Kubernetes (CRI conformance passes), Docker, and CRI-O with some features missing. |
+
+Containers start in 16 ms against runc's 22, because gcr runs
+libcontainer inside the shim instead of executing a binary per operation.
+[The full comparison](tradeoffs.md#compared-with-runc).
+
+## What it is not
+
+gcr is a container runtime, not a virtual machine: its containers share
+the host's kernel. For hostile code from many tenants on one host, use
+gVisor, Kata or Firecracker, or run gcr inside a VM per tenant.
+[What gcr is good for, and where it falls short](tradeoffs.md) is the
+honest version, with numbers.
 
 ## Requirements
 
-- Linux 6.12+ with cgroup v2, run as root
-- containerd 1.7 or later, or CRI-O with some features missing
+- Linux 6.12 or later, cgroup v2, root
+- containerd 1.7+, or CRI-O with [some features missing](crio.md)
 - libseccomp
-- for checkpoints, forks, time travel and migration: CRIU, the fork at
-  [makhov/criu](https://github.com/makhov/criu) for time travel and for
-  Landlock across restores
+- CRIU for snapshots, forks, time travel and migration. `gcr setup`
+  installs the one gcr needs; you do not have to.
 
-[Installation](install.md) sets it up on a host or a cluster, and
-[Getting started](getting-started.md) runs a first fork.
+Not every host can do everything, so `gcr doctor` tells you what yours
+can. [Installation](install.md) covers one host, a throwaway cluster and
+your own cluster.

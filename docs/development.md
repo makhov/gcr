@@ -2,6 +2,10 @@
 
 ## A development VM
 
+This VM is for building gcr. To *use* a release on a laptop instead,
+`hack/try-vm.yaml` is a plain Ubuntu VM with containerd and Docker
+([a VM on your laptop](install.md#a-vm-on-your-laptop)).
+
 Everything builds and runs in a Linux VM (kernel 6.12+, containerd 2.4, CRIU):
 
 ```sh

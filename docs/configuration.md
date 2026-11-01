@@ -1,22 +1,41 @@
 # Configuration
 
-gcr has two kinds of settings:
+Most people need none of this. gcr's defaults run containers hardened, in
+a user namespace, and that is the right setting for most workloads.
 
-- **Runtime handler options** are set by the node's operator and apply to
-  every container started through that handler. All of gcr's security
-  settings are here, so a workload cannot loosen them.
-- **Annotations** are set per container (or per pod) and turn on features
-  such as fork, time travel or migration. The only security-related one,
-  `gcr.dev/host-users`, can opt a container out of gcr's user namespace,
-  and only where the handler allows it.
+You come here for one of three reasons:
 
-To run different workloads with different settings, define several
-handlers and pick one per pod with a RuntimeClass (see Recipes).
+1. **A workload does not work** under gcr's defaults, and you need to know
+   which protection to relax, and where. Start with
+   [recipes](#recipes), and
+   [what the hardening breaks](compatibility.md) if you have an error
+   message in hand.
+2. **You want a feature** that is off until someone allows it: forks,
+   time travel, migration. See [turning features on](#turning-features-on).
+3. **You want stricter settings than the defaults** for untrusted code.
+   See [the strict recipe](#untrusted-code).
 
-## Where options are set
+## The two kinds of settings, and why
 
-**Kubernetes (CRI).** Set them in the handler's `options` table in
-containerd's config, then restart containerd:
+| | Set by | Applies to | Examples |
+| --- | --- | --- | --- |
+| **Handler options** | whoever runs the node | every container of that runtime handler | all the security settings, what pods may ask for |
+| **Annotations** | whoever creates the container or pod | that container | time travel, forks, lazy restore, migration |
+
+The split is the point: a workload cannot loosen its own isolation. Every
+security setting is a handler option, so a pod author cannot turn
+hardening off by adding an annotation. The one exception,
+`gcr.dev/host-users`, works only where the handler allows it.
+
+That is also how you give different workloads different settings: define
+several handlers, and let each pod pick one with a RuntimeClass. A
+handler is just a name in containerd's configuration with an options
+table under it.
+
+## Where options go
+
+**Kubernetes and anything else using the CRI.** In the handler's
+`options` table in containerd's configuration, then restart containerd:
 
 ```toml
 version = 3
@@ -28,7 +47,8 @@ version = 3
     UserNamespaces = 'always'
 ```
 
-Or keep them in a file of their own:
+Or keep them in a file, which is easier to manage with configuration
+management:
 
 ```toml
   [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr.options]
@@ -41,23 +61,123 @@ Hardening = 'always'
 UserNamespaces = 'always'
 ```
 
-When `ConfigPath` is set, gcr reads only that file and ignores any other
-options in the table.
+With `ConfigPath` set, gcr reads only that file and ignores other options
+in the table.
 
-**CRI-O.** Name the file with `runtime_config_path` in the handler's
-table ([getting started](getting-started.md#with-cri-o)); CRI-O passes it to gcr like `ConfigPath`.
+**containerd 1.7** uses configuration version 2, where the table is
+`[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gcr]`.
+
+**CRI-O** names the file with `runtime_config_path` in the handler's
+table, which it passes to gcr like `ConfigPath` ([CRI-O](crio.md)).
 Options that need gcr to mount the rootfs (`UserNamespaces = 'always'`)
-fail there.
+cannot work there.
 
-**ctr or containerd's client.** Pass the file per container:
+**ctr and containerd clients** pass a file per container:
+`ctr run --runtime-config-path /etc/gcr/gcr.toml …` ([ctr](ctr.md)).
 
-```sh
-ctr run --runtime io.containerd.gcr.v2 --runtime-config-path /etc/gcr/gcr.toml IMAGE ID CMD...
+gcr checks the values when it creates a container: a wrong one fails the
+create with an error naming the setting and the values it accepts, rather
+than running something less safe than you asked for.
+
+## Turning features on
+
+Time travel is an annotation, so on a node where pods may use
+`gcr.dev/*` it needs nothing further. Forks and migration are different:
+their annotations name a path or an address on the node, so a pod author
+who could set them freely would have more than their own container. The
+handler has to allow them.
+
+| To let pods | Set on the handler |
+| --- | --- |
+| Take and use snapshots (`gcr.dev/fork-from`) | `PodAnnotations = ['gcr.dev/fork-from']` and `SnapshotRoots = [...]` |
+| Receive migrations (`gcr.dev/migrate-in`, `gcr.dev/migrate-token`) | `PodAnnotations` with those; `gcr setup` already registers a `gcr-migrate` handler for this |
+| Choose their user namespace range (`gcr.dev/userns-base`) | `PodAnnotations = ['gcr.dev/userns-base']` |
+| Bound what time travel may ask for | `TimeTravel` with `MinInterval` and `MaxKeep` |
+
+Containers created outside Kubernetes are not restricted this way:
+whoever reaches containerd's socket is root already.
+
+## Recipes
+
+Each of these is a handler plus the RuntimeClass that selects it. Install
+the RuntimeClass once, and pods opt in with `runtimeClassName`.
+
+### Untrusted code
+
+Stricter than the defaults: a user namespace always, hardening even for
+pods that ask for `Unconfined`, and no nested user namespaces.
+
+```toml
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr-strict]
+  runtime_type = 'io.containerd.gcr.v2'
+  pod_annotations = ['gcr.dev/*']
+  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr-strict.options]
+    UserNamespaces = 'always'
+    Hardening = 'always'
+    NestedUserNamespaces = 'deny'
 ```
 
-Without options, every setting takes its default. gcr checks the values
-when it creates a container. An unknown value fails the create with an
-error that names the setting and the values it accepts.
+```yaml
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gcr-strict
+handler: gcr-strict
+```
+
+A container that cannot run in a user namespace (a privileged one, one
+sharing the host's namespaces) is refused here with the reason, instead
+of quietly running as host root. That refusal is the feature.
+
+Still a shared kernel: for code from several hostile tenants on one host,
+use a VM-based runtime ([what gcr is good for](tradeoffs.md)).
+
+### Agent sandboxes that fork
+
+Pods may fork, but only from directories you nominate:
+
+```toml
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr-forks]
+  runtime_type = 'io.containerd.gcr.v2'
+  pod_annotations = ['gcr.dev/*']
+  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr-forks.options]
+    PodAnnotations = ['gcr.dev/fork-from']
+    SnapshotRoots = ['/var/lib/gcr/snapshots', '/var/lib/gcr/layers']
+```
+
+Include the store that `gcr snapshot-pull` writes to
+(`/var/lib/gcr/layers`), or pulled snapshots will not fork.
+[A warm pool across the fleet](examples/warm-pool.md) uses this.
+
+### Sandboxing tools inside containers
+
+bubblewrap, rootless podman or buildah, Nix builds: these mount inside a
+user namespace of their own, which Landlock forbids.
+
+```toml
+[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr-nested]
+  runtime_type = 'io.containerd.gcr.v2'
+  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr-nested.options]
+    Landlock = 'off'      # mounts in nested namespaces still go through the supervisor
+    Hardening = 'always'  # so Unconfined pods get gcr's profile and guarded nested namespaces
+```
+
+Landlock off costs you the protection against escapes through leaked file
+descriptors (CVE-2024-21626); the mount allowlist and the syscall filter
+stay. Use this handler for the workloads that need it, not as the
+default.
+
+### Node agents
+
+CNI plugins, eBPF observability, VPN daemons: they create tunnels, load
+BPF programs, or use raw and packet sockets. Run them on runc, or on a
+handler with `Hardening = 'off'` and `NetlinkPolicy = 'off'`. Most are
+privileged anyway, which gcr does not harden.
+
+### Docker
+
+Docker takes the same options through `runtimeType` entries in
+`daemon.json`, one per handler ([Docker](docker.md)).
 
 ## Handler options
 
@@ -310,52 +430,6 @@ the platform intends: privileged runs with no hardening, `CAP_SYS_ADMIN`
 runs without Landlock, and a seccomp profile of its own decides the
 argument rules. Who may ask for those is a matter for Kubernetes admission
 (Pod Security Standards), as it is with runc.
-
-## Recipes
-
-**A default and a strict handler.** The strict one is for untrusted code:
-user namespaces always, hardening even for `Unconfined` pods, no nested
-user namespaces.
-
-```toml
-[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr]
-  runtime_type = 'io.containerd.gcr.v2'
-  pod_annotations = ['gcr.dev/*']
-
-[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr-strict]
-  runtime_type = 'io.containerd.gcr.v2'
-  pod_annotations = ['gcr.dev/*']
-  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr-strict.options]
-    UserNamespaces = 'always'
-    Hardening = 'always'
-    NestedUserNamespaces = 'deny'
-```
-
-```yaml
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata:
-  name: gcr-strict
-handler: gcr-strict
-```
-
-**Sandboxing tools inside containers** (bubblewrap, rootless podman or
-buildah, Nix builds). They need to mount in a user namespace of their
-own, which Landlock forbids:
-
-```toml
-[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr-nested]
-  runtime_type = 'io.containerd.gcr.v2'
-  [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr-nested.options]
-    Landlock = 'off'      # mounts in nested namespaces go through the supervisor's allowlist
-    Hardening = 'always'  # so Unconfined pods get gcr's profile and its guarded nested namespaces
-```
-
-**Node agents** (CNI plugins, eBPF observability, VPN daemons) create
-tunnels, load BPF programs, or use raw and packet sockets. Run them with
-runc, or with a gcr handler that has `Hardening = 'off'` and
-`NetlinkPolicy = 'off'`. Most of them are privileged anyway, which gcr
-does not harden.
 
 ## Seeing what applied
 

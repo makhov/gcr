@@ -2,7 +2,7 @@
 
 gcr runs Kubernetes pods through containerd's CRI, like runc: it passes
 CRI conformance (critest), on containerd 1.7 to 2.4. This page covers
-running pods on it once it is [installed](install.md#on-kubernetes), and
+running pods on it once it is [installed](install.md#your-own-cluster), and
 what gcr adds there.
 
 ## Running a pod on gcr
@@ -42,6 +42,10 @@ What to expect compared with runc:
 - **The kubelet's cgroup driver,** cgroupfs or systemd, is followed: CRI
   says which in the cgroup paths it sends.
 - [Differences from runc](runc-differences.md) has the rest.
+
+For what to do with it once pods run: [node maintenance without
+restarts](examples/node-maintenance.md), and
+[a warm pool across the fleet](examples/warm-pool.md).
 
 ## Pod annotations
 

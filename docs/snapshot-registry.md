@@ -1,5 +1,10 @@
 # Moving snapshots between hosts
 
+A snapshot is taken on one host, but it does not have to stay there. Push
+it to a registry and any other host can fork from it, which is how you
+warm a whole fleet from one loaded process
+([a warm pool across the fleet](examples/warm-pool.md)).
+
 Snapshots travel through any OCI registry: one backed by S3, ECR, GHCR,
 Harbor, Zot.
 

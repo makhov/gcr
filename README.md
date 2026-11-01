@@ -1,13 +1,29 @@
 # gcr
 
-A containerd runtime (`io.containerd.gcr.v2`) that treats a running
-container's processes as something a platform can work with: snapshot it
-without stopping it, fork it any number of times, rewind it to an earlier
-point, move it to another host. It runs containers in-process through
-libcontainer, with no runc binary, and hardens them by default beyond
-what runc does. `gcr` is a placeholder name.
+A containerd runtime that lets you do four things runc cannot: snapshot a
+container while it keeps running, start copies of it, rewind it to an
+earlier moment, and move it to another machine without restarting it.
+
+It runs containers in-process through libcontainer, with no runc binary,
+and hardens them by default beyond what runc does. `gcr` is a placeholder
+name.
 
 Documentation: **[makhov.github.io/gcr](https://makhov.github.io/gcr/)**
+
+## Try it
+
+On a Linux box with Docker:
+
+```sh
+arch=$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
+v=$(curl -fsSLo /dev/null -w '%{url_effective}' https://github.com/makhov/gcr/releases/latest | sed 's#.*/##')
+curl -fLo gcr "https://github.com/makhov/gcr/releases/download/$v/gcr-$v-linux-$arch" && chmod +x gcr
+
+sudo ./gcr setup -docker          # installs gcr, registers it, reports on the host
+docker run --rm --runtime gcr busybox echo hello
+```
+
+Then snapshot a running container and start two more from it:
 
 ```sh
 gcr snapshot warm /var/lib/gcr/snapshots/warm          # the parent keeps running
@@ -15,22 +31,25 @@ ctr run -d --runtime io.containerd.gcr.v2 \
   --annotation gcr.dev/fork-from=/var/lib/gcr/snapshots/warm IMAGE fork-1 CMD
 ```
 
+[Quickstart](docs/getting-started.md) does this end to end, including an
+undo, in about ten minutes. No Linux box?
+[A VM on your laptop](docs/install.md#a-vm-on-your-laptop).
+
 ## What you can do with it
 
-- **Give an agent undo.** Run each command in a sandbox after a point on
-  its timeline, and take any of them back: files, processes and their
-  memory. A dropped database comes back with its rows.
-- **Let an agent branch.** Fork its sandbox, running services and all,
-  try several approaches at once, keep the one that worked. A fork holds
-  only the memory it touches.
-- **Start warm.** Fork new containers from a snapshot of one that has
-  already loaded its model or interpreter, on this node or, through a
-  registry, on any other, reading only what each touches.
-- **Move what cannot restart.** Migrate a running container to another
-  node with a downtime that does not grow with its memory.
-
-[`examples/agent-sandbox`](examples/agent-sandbox) does the first two
-through Docker, with a small Python helper and nothing else.
+- **[Give an agent undo.](docs/examples/agent-sandbox.md)** Mark a point
+  before each command and take any of them back: files, processes and
+  their memory. A dropped database comes back with its rows.
+- **[Let an agent branch.](docs/examples/agent-sandbox.md)** Fork its
+  sandbox, running services and all, try several approaches at once, keep
+  the one that worked. A fork holds only the memory it touches.
+- **[Start warm.](docs/examples/warm-starts.md)** Fork new containers
+  from a snapshot of one that has already loaded its model: vLLM answers
+  in 9 s instead of 136. Through a registry, on
+  [any node](docs/examples/warm-pool.md).
+- **[Move what cannot restart.](docs/examples/node-maintenance.md)**
+  Migrate a running container to another node, or let `kubectl drain`
+  move pods instead of restarting them.
 
 ## What it does
 
@@ -62,63 +81,52 @@ through Docker, with a small Python helper and nothing else.
   pods, and pods on nodes that shut down, through checkpoints in a
   registry. [gcr-operator](docs/operator.md)
 
+Containers start in 16 ms against runc's 22 ms, and stop in 17 against
+31, because libcontainer runs in the shim rather than as a binary per
+operation. [The full comparison](docs/tradeoffs.md#compared-with-runc).
+
 Not yet: the NVIDIA ioctl proxy, restoring onto another GPU index,
 SELinux labels for supervised mounts.
-
-## Compared with runc
-
-Same host (arm64, Linux 7.0), containerd 2.4.2, runc v1.5.2 (the release
-gcr's libcontainer comes from), both runtimes on their defaults (gcr's
-hardening and Landlock on):
-
-| | gcr | runc |
-| --- | --- | --- |
-| critest | 123 passed, 0 failed | 113 passed, 0 failed |
-| critest NRI tests | 11 of 11 | 11 of 11 |
-| StartContainer, median / p90 | 16.1 / 19.5 ms | 21.9 / 26.7 ms |
-| StopContainer, median / p90 | 16.5 / 21.3 ms | 30.7 / 34.1 ms |
-| CreatePod / StopPod, median | 52.2 / 53.4 ms | 54.8 / 65.2 ms |
-| Shim memory per pod (PSS, 10 pods) | ~6 MiB | ~4 MiB |
-
-runc skips the user namespace tests, which gcr passes; the rest of critest's
-skips (NRI without a socket, benchmarks, an image volume field containerd
-does not report) are the same for both. Latencies are critest's
-benchmarks, 50 sequential runs: gcr runs libcontainer in the shim instead of
-executing a runc binary per operation. gcr's shim is the bigger binary
-(more of it resident, shared between shims).
+[What gcr is good for, and where it falls short](docs/tradeoffs.md) is
+the honest account.
 
 ## Requirements
 
 - Linux 6.12+ with cgroup v2, run as root
 - containerd 1.7 or later, or CRI-O with some features missing
 - libseccomp
-- for checkpoints, forks, time travel and migration: CRIU, the fork at
-  [makhov/criu](https://github.com/makhov/criu) for time travel and for
-  Landlock across restores
+- for checkpoints, forks, time travel and migration: CRIU, which
+  `gcr setup` installs (the fork at
+  [makhov/criu](https://github.com/makhov/criu), for time travel and for
+  Landlock across restores)
 
-[Installation](docs/install.md) sets it up on a host or a Kubernetes
-cluster, and [Getting started](docs/getting-started.md) runs a first fork.
+`gcr doctor` reports what a host can do.
 
 ## Documentation
 
 Also as a site: [makhov.github.io/gcr](https://makhov.github.io/gcr/).
 
-- [Installation](docs/install.md): one host, a Kubernetes cluster, the
-  kubectl plugin, gcr-operator
-- [Getting started](docs/getting-started.md): run with `ctr`, Docker,
-  Kubernetes or CRI-O, and a first fork
-- Using gcr: [Docker](docs/docker.md), [Kubernetes](docs/kubernetes.md),
-  [gcr-operator](docs/operator.md)
-- [What gcr is good for, and where it falls short](docs/tradeoffs.md)
-- [Differences from runc](docs/runc-differences.md): what will not work
-  as on runc, and how to turn each protection off
-- Features: [fork](docs/fork.md), [moving snapshots](docs/snapshot-registry.md),
-  [time travel](docs/time-travel.md), [live migration](docs/migration.md),
-  [GPUs](docs/gpus.md)
+- **[Quickstart](docs/getting-started.md):** install it, fork a running
+  container, undo a command
+- **[Installation](docs/install.md):** one host, a VM, a throwaway
+  cluster, your own cluster, the kubectl plugin, gcr-operator
+- **[Examples](docs/examples/index.md):** agent sandboxes, warm starts,
+  node maintenance, a warm pool across the fleet
+- **[Configuration](docs/configuration.md):** what to change and why,
+  with recipes
+- Running containers: [Docker](docs/docker.md),
+  [ctr](docs/ctr.md), [Kubernetes](docs/kubernetes.md),
+  [CRI-O](docs/crio.md), [gcr-operator](docs/operator.md)
+- Features: [fork](docs/fork.md),
+  [moving snapshots](docs/snapshot-registry.md),
+  [time travel](docs/time-travel.md),
+  [live migration](docs/migration.md), [GPUs](docs/gpus.md)
 - Isolation: [user namespaces](docs/user-namespaces.md),
-  [hardening](docs/hardening.md), [what the hardening breaks](docs/compatibility.md),
+  [hardening](docs/hardening.md),
+  [what the hardening breaks](docs/compatibility.md),
   [security model](docs/security.md)
-- Reference: [configuration and annotations](docs/configuration.md),
-  [the `gcr` command](docs/cli.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Architecture](docs/architecture.md), [development and tests](docs/development.md)
+- Reference: [the `gcr` command](docs/cli.md),
+  [troubleshooting](docs/troubleshooting.md),
+  [differences from runc](docs/runc-differences.md)
+- Inside gcr: [architecture](docs/architecture.md),
+  [development and tests](docs/development.md)
