@@ -9,6 +9,7 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -80,4 +81,74 @@ func TestDecideSelf(t *testing.T) {
 	if resp := o.decide(context.Background(), req); resp.Allowed || resp.Result.Code != 429 {
 		t.Fatalf("allowed while moving a pod: %+v", resp)
 	}
+}
+
+// TestDecideHandover: a pod another operator was moving is taken over
+// once that operator is gone, and left to it while it is not; a stopping
+// operator starts nothing; its own eviction waits for the pods on its node
+// that would move.
+func TestDecideHandover(t *testing.T) {
+	fresh := time.Now().UTC().Format(time.RFC3339)
+	operatorPod := func(name string, phase corev1.PodPhase, deleting bool) *corev1.Pod {
+		p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "gcr-system"}, Status: corev1.PodStatus{Phase: phase}}
+		if deleting {
+			p.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+		}
+		return p
+	}
+	self := metav1.ObjectMeta{Namespace: "gcr-system", Name: "op-new"}
+	req := &admissionv1.AdmissionRequest{Name: "p", Namespace: "default"}
+	for name, tc := range map[string]struct {
+		others  []*corev1.Pod
+		started bool
+	}{
+		"its operator gone":        {nil, true},
+		"its operator running":     {[]*corev1.Pod{operatorPod("op-old", corev1.PodRunning, false)}, false},
+		"its operator terminating": {[]*corev1.Pod{operatorPod("op-old", corev1.PodRunning, true)}, false},
+		"its operator finished":    {[]*corev1.Pod{operatorPod("op-old", corev1.PodFailed, false)}, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			objs := []runtime.Object{pod(map[string]string{annotationOptIn: "true", annotationState: "migrating " + fresh + " by op-old"})}
+			for _, p := range tc.others {
+				objs = append(objs, p)
+			}
+			cs := fake.NewSimpleClientset(objs...)
+			started := false
+			o := &operator{cs: cs, moving: map[string]bool{}, self: self, start: func(*corev1.Pod) { started = true }}
+			resp := o.decide(context.Background(), req)
+			if started != tc.started || resp.Allowed {
+				t.Fatalf("started %v, allowed %v; want started %v, refused", started, resp.Allowed, tc.started)
+			}
+			got, _ := cs.CoreV1().Pods("default").Get(context.Background(), "p", metav1.GetOptions{})
+			if s := got.Annotations[annotationState]; tc.started && !strings.HasSuffix(s, " by op-new") {
+				t.Errorf("taken over, but marked %q", s)
+			}
+		})
+	}
+
+	t.Run("stopping", func(t *testing.T) {
+		started := false
+		o := &operator{cs: fake.NewSimpleClientset(pod(map[string]string{annotationOptIn: "true"})), moving: map[string]bool{},
+			self: self, stopping: true, start: func(*corev1.Pod) { started = true }}
+		if resp := o.decide(context.Background(), req); resp.Allowed || started || resp.Result.Code != 429 {
+			t.Fatalf("allowed %v, started %v: a stopping operator must turn it away for its successor", resp.Allowed, started)
+		}
+	})
+
+	t.Run("its own node", func(t *testing.T) {
+		mine := pod(map[string]string{annotationOptIn: "true"})
+		cs := fake.NewSimpleClientset(mine)
+		o := &operator{cs: cs, moving: map[string]bool{}, self: self, node: "n1"}
+		own := &admissionv1.AdmissionRequest{Name: self.Name, Namespace: self.Namespace}
+		if resp := o.decide(context.Background(), own); resp.Allowed {
+			t.Fatal("evicted before the pod on its node moved")
+		}
+		mine.Annotations[annotationState] = "failed: x"
+		if _, err := cs.CoreV1().Pods("default").Update(context.Background(), mine, metav1.UpdateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if resp := o.decide(context.Background(), own); !resp.Allowed {
+			t.Fatalf("refused once the pod on its node could not move: %s", resp.Result.Message)
+		}
+	})
 }

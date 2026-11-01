@@ -1,6 +1,6 @@
 # gcr-operator: evictions that migrate
 
-Status: milestones 1 (`kubectl gcr migrate`) and 2 (evictions, and Deployments' pods handed over) are built, and `emptyDir` volumes of 3; see [migration](../migration.md#draining-nodes-gcr-operator). The rest is a proposal.
+Status: milestones 1 (`kubectl gcr migrate`) and 2 (evictions, and Deployments' pods handed over) are built, and 3 (`emptyDir` volumes, Jobs); see [migration](../migration.md#draining-nodes-gcr-operator). The rest is a proposal.
 
 ## The goal
 
@@ -42,7 +42,7 @@ The ReplicaSet's choice of which pod to delete can be steered:
 
 Other owners:
 - **StatefulSets:** a pod's name is its identity, and two pods named `db-0` can't coexist, even briefly. Moving one means deleting the source after the dump and before creating a same-named target: a pause of the target's whole start, not of a migration. Later.
-- **Jobs:** they count pods by labels, too, so similar adoption should work; not in the first version.
+- **Jobs:** adopted like ReplicaSets' pods, with two differences ([migration](../migration.md#draining-nodes-gcr-operator)). A Job deletes the more recently Ready of two pods and ignores `pod-deletion-cost`, so the target is handed over only once the source is no longer Ready. A Job counts a deleted pod as failed, so the source is marked `DisruptionTarget` before its processes go, for Jobs whose `podFailurePolicy` ignores that.
 - **Bare pods:** the target simply replaces the source.
 
 ## What moves, and what doesn't
@@ -75,5 +75,5 @@ Other owners:
 
 1. **`gcr-operator migrate pod/NAME [--to NODE]`:** the operator, the node agent, the target RuntimeClass, and bare pods. No webhook yet.
 2. **Evictions:** the webhook, Deployments and ReplicaSets through the ownership handover, and fallback on failure. The demo: drain a node while a stateful process keeps running on another.
-3. **`emptyDir`, and Jobs.** `emptyDir` is built.
+3. **`emptyDir`, and Jobs.** Built.
 4. **StatefulSets, and spot and node shutdown through registry checkpoints.**

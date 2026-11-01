@@ -43,3 +43,23 @@ func TestArrived(t *testing.T) {
 		t.Errorf("an old record is kept: %v", err)
 	}
 }
+
+// TestDeparted: a container that migrated away is recorded apart from
+// those a migration came into.
+func TestDeparted(t *testing.T) {
+	ArrivedDir = filepath.Join(t.TempDir(), "migrated")
+	DepartedDir = filepath.Join(t.TempDir(), "departed")
+	key := ArrivedKey(map[string]string{"io.kubernetes.cri.sandbox-uid": "u1", "io.kubernetes.cri.container-name": "c"})
+	if Departed(key) {
+		t.Fatal("departed before any migration")
+	}
+	if err := MarkDeparted(key); err != nil || !Departed(key) {
+		t.Fatalf("after MarkDeparted: %v, departed %v", err, Departed(key))
+	}
+	if Arrived(key) {
+		t.Error("a departure counts as an arrival")
+	}
+	if Departed("") {
+		t.Error("a container that is not a pod's counts as departed")
+	}
+}

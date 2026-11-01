@@ -15,15 +15,22 @@ metadata:
   name: gcr-operator
 rules:
   # The pods it moves: read them, mark them, create their targets, hand
-  # those over to their ReplicaSets and delete the sources.
+  # those over to their ReplicaSets and Jobs, mark the sources disrupted
+  # (DisruptionTarget) and delete them.
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list, create, patch, delete]
+  - apiGroups: [""]
+    resources: [pods/status]
+    verbs: [patch]
   - apiGroups: [""]
     resources: [pods/log]
     verbs: [get]
   - apiGroups: [apps]
     resources: [replicasets, daemonsets]
+    verbs: [get]
+  - apiGroups: [batch]
+    resources: [jobs]
     verbs: [get]
   # Its own certificate's CA, in its webhook's configuration.
   - apiGroups: [admissionregistration.k8s.io]
@@ -87,6 +94,8 @@ spec:
       labels: {app.kubernetes.io/name: gcr-operator}
     spec:
       serviceAccountName: gcr-operator
+      # Evicted with the pods it moves, it finishes moving them first.
+      terminationGracePeriodSeconds: 120
       containers:
         - name: operator
           image: ghcr.io/makhov/gcr:v0.1.0
@@ -94,9 +103,12 @@ spec:
           env:
             - name: POD_NAMESPACE
               valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
-            # Its own evictions wait for the migrations it runs.
+            # Its own evictions wait for the migrations it runs, and for
+            # the pods to move off its node first.
             - name: POD_NAME
               valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
           ports:
             - containerPort: 8443
           readinessProbe:

@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -46,6 +47,9 @@ const (
 	// node it must not go back to, which targetPod added to its node
 	// affinity (and takes out again when it moves on).
 	annotationMigratedFrom = "gcr.dev/migrated-from"
+	// labelTargetOf is on a target pod: its source's UID, so that a
+	// migration's leftovers can be found again (its operator gone mid-way).
+	labelTargetOf = "gcr.dev/target-of"
 )
 
 // info is what gcr info prints (control.Info).
@@ -122,6 +126,14 @@ func Migrate(ctx context.Context, cs kubernetes.Interface, ns, name string, o Op
 		return res, fmt.Errorf("%s/%s is on %s already", ns, name, o.Node)
 	}
 
+	// A target an earlier attempt left, its migrator gone mid-way: it
+	// waits for a migration that will not come.
+	if old, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: labelTargetOf + "=" + string(src.UID)}); err == nil {
+		for _, p := range old.Items {
+			log("deleting %s, left by an earlier attempt", p.Name)
+			_ = cs.CoreV1().Pods(ns).Delete(ctx, p.Name, metav1.DeleteOptions{GracePeriodSeconds: new(int64)})
+		}
+	}
 	log("asking %s for %s's user namespace", src.Spec.NodeName, name)
 	out, err := runJob(ctx, cs, o, src.Spec.NodeName, "info", nil, o.GCR, "-n", containerdNamespace, "info", id)
 	if err != nil {
@@ -145,13 +157,22 @@ func Migrate(ctx context.Context, cs kubernetes.Interface, ns, name string, o Op
 	// A ReplicaSet's pod: the target stays out of its sight until it runs
 	// the pod's processes, or the ReplicaSet would delete it as one too
 	// many while it waits for them.
+	// A Job's likewise: it would delete one of two pods, or count the
+	// target as a run of its own.
 	var held map[string]string
-	if ownedByReplicaSet(src) {
+	switch {
+	case ownedBy(src, "ReplicaSet"):
 		rs, err := cs.AppsV1().ReplicaSets(ns).Get(ctx, src.OwnerReferences[0].Name, metav1.GetOptions{})
 		if err != nil {
 			return res, fmt.Errorf("the pod's ReplicaSet: %w", err)
 		}
 		held = holdBack(dst, rs.Spec.Selector)
+	case ownedBy(src, "Job"):
+		job, err := cs.BatchV1().Jobs(ns).Get(ctx, src.OwnerReferences[0].Name, metav1.GetOptions{})
+		if err != nil {
+			return res, fmt.Errorf("the pod's Job: %w", err)
+		}
+		held = holdBack(dst, job.Spec.Selector)
 	}
 	dst, err = cs.CoreV1().Pods(ns).Create(ctx, dst, metav1.CreateOptions{})
 	if err != nil {
@@ -188,6 +209,19 @@ func Migrate(ctx context.Context, cs kubernetes.Interface, ns, name string, o Op
 	_, port, _ := net.SplitHostPort(addr)
 	target := "http://" + net.JoinHostPort(dst.Status.HostIP, port)
 
+	// Gone by disruption, not by failing: a Job whose podFailurePolicy
+	// ignores DisruptionTarget does not count the source against its
+	// backoffLimit, as with an eviction. Set before the migration: a
+	// Job's source fails as its processes go (restartPolicy: Never), and
+	// the Job judges it then. Taken back if the migration fails.
+	if err := disrupted(ctx, cs, ns, name, true, "migrating to "+res.Node); err != nil {
+		log("marking %s as disrupted failed: %v", name, err)
+	}
+	defer func() {
+		if !handedOver {
+			_ = disrupted(context.WithoutCancel(ctx), cs, ns, name, false, "the migration failed")
+		}
+	}()
 	log("migrating %s from %s to %s (%s)", name, src.Spec.NodeName, res.Node, target)
 	// The target's shim listens once the kubelet has created its
 	// container; until then the migration is refused before anything
@@ -199,7 +233,13 @@ done
 echo "$out"; exit 1`, o.GCR, containerdNamespace, id, target)
 	out, err = runJob(ctx, cs, o, src.Spec.NodeName, "migrate", map[string]string{"TOKEN": token}, "sh", "-c", script)
 	res.Output = out
-	if err != nil {
+	switch {
+	case errors.Is(err, errNoOutput):
+		// It migrated; what is missing is only how long that took. The
+		// handover must go ahead, or the pod's controller would replace
+		// the source with a cold one.
+		log("%v: the downtime is unknown", err)
+	case err != nil:
 		return res, fmt.Errorf("gcr migrate on %s: %w\n%s", src.Spec.NodeName, err, out)
 	}
 	for _, line := range strings.Split(out, "\n") {
@@ -220,14 +260,24 @@ echo "$out"; exit 1`, o.GCR, containerdNamespace, id, target)
 		if err := waitReady(ctx, cs, ns, dst.Name, o.Timeout); err != nil {
 			return res, fmt.Errorf("the pod runs in %s now, but it is not Ready: %w", dst.Name, err)
 		}
-		cost, _ := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]string{
-			"controller.kubernetes.io/pod-deletion-cost": "-2147483648"}}})
-		if _, err := cs.CoreV1().Pods(ns).Patch(ctx, name, types.MergePatchType, cost, metav1.PatchOptions{}); err != nil && !apierrors.IsNotFound(err) {
-			return res, fmt.Errorf("the pod runs in %s now, but marking %s for deletion failed: %w", dst.Name, name, err)
+		if ownedBy(src, "Job") {
+			// A Job of two pods deletes the more recently Ready one,
+			// the target, unless the other is not Ready: the source's
+			// processes are gone, so it is not, once its kubelet sees.
+			log("waiting for %s to be no longer Ready", name)
+			if err := waitNotReady(ctx, cs, ns, name, o.Timeout); err != nil {
+				return res, fmt.Errorf("the pod runs in %s now, but %s is still Ready: %w", dst.Name, name, err)
+			}
+		} else {
+			cost, _ := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]string{
+				"controller.kubernetes.io/pod-deletion-cost": "-2147483648"}}})
+			if _, err := cs.CoreV1().Pods(ns).Patch(ctx, name, types.MergePatchType, cost, metav1.PatchOptions{}); err != nil && !apierrors.IsNotFound(err) {
+				return res, fmt.Errorf("the pod runs in %s now, but marking %s for deletion failed: %w", dst.Name, name, err)
+			}
 		}
 		log("handing %s over to %s %s", dst.Name, src.OwnerReferences[0].Kind, src.OwnerReferences[0].Name)
 		if err := handOver(ctx, cs, src, dst.Name, held); err != nil {
-			return res, fmt.Errorf("the pod runs in %s now, but handing it over to its ReplicaSet failed: %w", dst.Name, err)
+			return res, fmt.Errorf("the pod runs in %s now, but handing it over to its %s failed: %w", dst.Name, src.OwnerReferences[0].Kind, err)
 		}
 	}
 	log("deleting %s", name)
@@ -239,7 +289,8 @@ echo "$out"; exit 1`, o.GCR, containerdNamespace, id, target)
 		if err != nil {
 			return false, err
 		}
-		return p.Status.Phase == corev1.PodRunning, nil
+		// A Job's pod may be done already.
+		return p.Status.Phase == corev1.PodRunning || p.Status.Phase == corev1.PodSucceeded, nil
 	}); err != nil {
 		return res, fmt.Errorf("target %s after the migration: %w", dst.Name, err)
 	}
@@ -252,10 +303,10 @@ func Movable(p *corev1.Pod) (string, error) {
 	switch {
 	case p.Status.Phase != corev1.PodRunning:
 		return "", fmt.Errorf("not running (%s)", p.Status.Phase)
-	case len(p.OwnerReferences) > 1 || len(p.OwnerReferences) == 1 && !ownedByReplicaSet(p):
+	case len(p.OwnerReferences) > 1 || len(p.OwnerReferences) == 1 && !ownedBy(p, "ReplicaSet") && !ownedBy(p, "Job"):
 		// Its controller would replace it with a cold one once it is
-		// deleted; ReplicaSets' pods are handed over (handOver).
-		return "", fmt.Errorf("owned by %s %s: only pods without an owner, or a ReplicaSet's, can be moved yet", p.OwnerReferences[0].Kind, p.OwnerReferences[0].Name)
+		// deleted; ReplicaSets' and Jobs' pods are handed over (handOver).
+		return "", fmt.Errorf("owned by %s %s: only pods without an owner, or a ReplicaSet's or a Job's, can be moved yet", p.OwnerReferences[0].Kind, p.OwnerReferences[0].Name)
 	case len(p.Spec.Containers) != 1 || len(p.Status.ContainerStatuses) != 1:
 		return "", fmt.Errorf("%d containers: only pods with one can be moved yet", len(p.Spec.Containers))
 	case p.Spec.HostUsers != nil && !*p.Spec.HostUsers:
@@ -330,8 +381,46 @@ func dropNotOn(p *corev1.Pod, node string) {
 	}
 }
 
-func ownedByReplicaSet(p *corev1.Pod) bool {
-	return len(p.OwnerReferences) == 1 && p.OwnerReferences[0].Kind == "ReplicaSet" &&
+// disrupted sets pod name's DisruptionTarget condition, which eviction
+// sets too, to on, with message.
+func disrupted(ctx context.Context, cs kubernetes.Interface, ns, name string, on bool, message string) error {
+	status := corev1.ConditionFalse
+	if on {
+		status = corev1.ConditionTrue
+	}
+	patch, _ := json.Marshal(map[string]any{"status": map[string]any{"conditions": []map[string]any{{
+		"type": "DisruptionTarget", "status": status, "reason": "Migration", "message": message,
+		"lastTransitionTime": metav1.Now(),
+	}}}})
+	_, err := cs.CoreV1().Pods(ns).Patch(ctx, name, types.StrategicMergePatchType, patch, metav1.PatchOptions{}, "status")
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// waitNotReady waits for pod name not to be Ready, or gone.
+func waitNotReady(ctx context.Context, cs kubernetes.Interface, ns, name string, timeout time.Duration) error {
+	return wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
+		p, err := cs.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		for _, c := range p.Status.Conditions {
+			if c.Type == corev1.PodReady {
+				return c.Status != corev1.ConditionTrue, nil
+			}
+		}
+		return true, nil
+	})
+}
+
+// ownedBy says whether p's one owner is its controller, of kind kind.
+func ownedBy(p *corev1.Pod, kind string) bool {
+	return len(p.OwnerReferences) == 1 && p.OwnerReferences[0].Kind == kind &&
 		p.OwnerReferences[0].Controller != nil && *p.OwnerReferences[0].Controller
 }
 
@@ -365,9 +454,12 @@ func holdBack(dst *corev1.Pod, sel *metav1.LabelSelector) map[string]string {
 // adopts it: the ReplicaSet then has one pod too many, and deletes the
 // source, which no longer runs, first.
 func handOver(ctx context.Context, cs kubernetes.Interface, src *corev1.Pod, target string, held map[string]string) error {
+	// A Job tracks its pods with a finalizer, which the target takes on
+	// with the rest.
 	patch := map[string]any{"metadata": map[string]any{
 		"labels":          held,
 		"ownerReferences": src.OwnerReferences,
+		"finalizers":      src.Finalizers,
 	}}
 	b, err := json.Marshal(patch)
 	if err != nil {
@@ -394,11 +486,15 @@ func targetPod(src *corev1.Pod, node, addr, token string, inf info) *corev1.Pod 
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        fmt.Sprintf("%s-%x", base, suffix),
 			Namespace:   src.Namespace,
-			Labels:      src.Labels,
+			Labels:      map[string]string{},
 			Annotations: map[string]string{},
 		},
 		Spec: *src.Spec.DeepCopy(),
 	}
+	for k, v := range src.Labels {
+		dst.Labels[k] = v
+	}
+	dst.Labels[labelTargetOf] = string(src.UID)
 	for k, v := range src.Annotations {
 		dst.Annotations[k] = v
 	}
@@ -508,10 +604,13 @@ func runJob(ctx context.Context, cs kubernetes.Interface, o Options, node, what 
 		return out, fmt.Errorf("job %s failed", name)
 	}
 	if err != nil {
-		return "", fmt.Errorf("job %s succeeded, but its output: %w", name, err)
+		return "", fmt.Errorf("job %s succeeded, but %w: %w", name, errNoOutput, err)
 	}
 	return out, nil
 }
+
+// errNoOutput is a Job that succeeded but whose log could not be read.
+var errNoOutput = errors.New("its output could not be read")
 
 func jobLogs(ctx context.Context, cs kubernetes.Interface, ns, job string) (string, error) {
 	// Right after the Job is done, its pod may not be listed yet, or its
@@ -519,7 +618,7 @@ func jobLogs(ctx context.Context, cs kubernetes.Interface, ns, job string) (stri
 	// Job here prints something, so an empty log is one not read yet.
 	var out string
 	var last error
-	_ = wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, 15*time.Second, true, func(ctx context.Context) (bool, error) {
+	_ = wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, 30*time.Second, true, func(ctx context.Context) (bool, error) {
 		pods, err := cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{LabelSelector: "job-name=" + job})
 		switch {
 		case err != nil:
@@ -529,7 +628,9 @@ func jobLogs(ctx context.Context, cs kubernetes.Interface, ns, job string) (stri
 			last = fmt.Errorf("no pod of job %s", job)
 			return false, nil
 		}
-		r, err := cs.CoreV1().Pods(ns).GetLogs(pods.Items[0].Name, &corev1.PodLogOptions{}).Stream(ctx)
+		attempt, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		r, err := cs.CoreV1().Pods(ns).GetLogs(pods.Items[0].Name, &corev1.PodLogOptions{}).Stream(attempt)
 		if err != nil {
 			last = err
 			return false, nil
