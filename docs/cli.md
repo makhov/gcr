@@ -18,6 +18,7 @@ gcr [-n namespace] snapshot [-stop] ID DIR
 gcr snapshot-users DIR
 gcr snapshot-rm DIR...
 gcr [-n NS] snapshot-image [-plain-http] ID REF
+gcr snapshot-build [flags] IMAGE REF [-- COMMAND...]
 gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF
 gcr snapshot-pull [-plain-http] [-store DIR] [-lazy] REF DIR
 gcr [-n namespace] migrate [-token TOKEN] [-post-copy] ID TARGET-URL
@@ -129,6 +130,14 @@ image that runs as any other: a container created from it is restored
 from the snapshot ([snapshots as images](snapshot-images.md)). The
 container's own image comes from containerd's content store. Prints the
 image by digest. `kubectl gcr snapshot` runs it on a pod's node.
+
+### `gcr snapshot-build [flags] IMAGE REF [-- COMMAND...]`
+
+Runs IMAGE the way a Kubernetes pod's container runs, until `-ready`
+succeeds in it, and pushes a snapshot of it to REF as an image pods run
+warm (`snapshot-image`): for CI. Its flags say what the pod has
+(`-volume`, `-no-service-account`, `-user`, `-no-new-privileges`), which
+a restore checks ([building one in CI](snapshot-images.md#building-one-in-ci)).
 
 ### `gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF`
 
