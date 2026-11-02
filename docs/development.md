@@ -73,6 +73,20 @@ REPO=makhov/gcr TOKEN=$(gh api -X POST \
 It is a host the repository's workflows execute code on, so use one you
 are willing to give everyone with write access.
 
+## Documentation
+
+The site at [makhov.github.io/gcr](https://makhov.github.io/gcr/) is
+built from `docs/` with mkdocs (`mkdocs.yml`). To see a change before
+pushing it:
+
+```sh
+make docs-serve-dev        # http://localhost:8000/gcr/, rebuilt as you edit; needs Docker
+make docs                  # builds site/ as CI does: broken links fail it; needs mkdocs
+```
+
+`DOCS_DEV_PORT=8001` serves it on another port. `make docs` needs
+mkdocs on your machine (`pip install -r docs/requirements.txt`).
+
 ## Releases
 
 `make release` (`hack/release.sh`) builds, for linux/amd64 and

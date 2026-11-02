@@ -6,7 +6,7 @@ VM  := gcr
 # Run a command in the dev VM, in the same directory as here.
 IN_VM = limactl shell --workdir $(CURDIR) $(VM) --
 
-.PHONY: build static install vet test test-e2e test-k8s test-install vm criu bpf release release-publish image manifests
+.PHONY: build static install vet test test-e2e test-k8s test-install vm criu bpf release release-publish image manifests docs docs-serve-dev
 
 build:
 	CGO_ENABLED=1 go build -tags $(TAGS) -ldflags '$(VERSION_LDFLAGS)' -o $(BIN) ./cmd/containerd-shim-gcr-v2
@@ -106,3 +106,18 @@ image:
 test-install:
 	DOCKER="$(DOCKER)" hack/e2e-install.sh
 
+# The documentation site (mkdocs.yml), into site/, as CI builds it: a
+# broken link or a page missing from the nav fails it. Needs mkdocs:
+# pip install -r docs/requirements.txt, or use docs-serve-dev.
+docs:
+	@command -v mkdocs >/dev/null || { echo 'mkdocs required: pip install -r docs/requirements.txt, or make docs-serve-dev' >&2; exit 1; }
+	mkdocs build --strict
+
+# Serves the site on http://localhost:$(DOCS_DEV_PORT)/gcr/, rebuilt as files
+# change, from a container with mkdocs (docs/Dockerfile): nothing to
+# install but Docker.
+DOCKER ?= docker
+DOCS_DEV_PORT ?= 8000
+docs-serve-dev:
+	$(DOCKER) build -q -t gcr-docs -f docs/Dockerfile docs
+	$(DOCKER) run --rm --init -v "$(CURDIR):/gcr:ro" -p '$(DOCS_DEV_PORT):8000' gcr-docs
