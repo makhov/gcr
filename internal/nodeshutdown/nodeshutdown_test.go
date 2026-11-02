@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestPodUID(t *testing.T) {
@@ -55,5 +56,57 @@ func TestStates(t *testing.T) {
 	}
 	if err := Cancel(); err != nil || ShuttingDown() {
 		t.Fatalf("after Cancel: %v, shutting down %v", err, ShuttingDown())
+	}
+}
+
+// Await: gone once migrated; checkpointed on the operator's word, with no
+// word within PlanWait, or with a migration planned but not ended within
+// LiveWait; never while one is under way.
+func TestAwait(t *testing.T) {
+	Dir = filepath.Join(t.TempDir(), "shutdown")
+	PlanWait, LiveWait, ReleaseWait = 300*time.Millisecond, 900*time.Millisecond, 600*time.Millisecond
+	never := func() bool { return false }
+	after := func(d time.Duration) func() bool {
+		at := time.Now().Add(d)
+		return func() bool { return time.Now().After(at) }
+	}
+	timed := func(f func() bool) (bool, time.Duration) {
+		start := time.Now()
+		ok := f()
+		return ok, time.Since(start)
+	}
+	if ok, took := timed(func() bool { return Await("none", never, never) }); ok || took < PlanWait {
+		t.Errorf("no plan: %v after %s, want a checkpoint after %s", ok, took, PlanWait)
+	}
+	_ = Plan("cp", Checkpoint)
+	if ok, took := timed(func() bool { return Await("cp", never, never) }); ok || took > PlanWait/2 {
+		t.Errorf("checkpoint planned: %v after %s, want one at once", ok, took)
+	}
+	_ = Plan("live", Live)
+	// Migrated, not released: held until ReleaseWait.
+	if ok, took := timed(func() bool { return Await("live", after(200*time.Millisecond), never) }); !ok || took < 200*time.Millisecond+ReleaseWait {
+		t.Errorf("live, migrated, not released: %v after %s, want held %s more", ok, took, ReleaseWait)
+	}
+	go func() { time.Sleep(400 * time.Millisecond); _ = Plan("live", Released) }()
+	if ok, took := timed(func() bool { return Await("live", after(200*time.Millisecond), never) }); !ok || took > 200*time.Millisecond+ReleaseWait {
+		t.Errorf("live, migrated, released: %v after %s", ok, took)
+	}
+	_ = os.Remove(filepath.Join(Dir, "live"+Released))
+	if ok, took := timed(func() bool { return Await("live", never, never) }); ok || took < LiveWait {
+		t.Errorf("live, never migrated: %v after %s, want a checkpoint after %s", ok, took, LiveWait)
+	}
+	// Under way past LiveWait: it waits for the migration's end.
+	start := time.Now()
+	stillBusy := func() bool { return time.Since(start) < 1200*time.Millisecond }
+	if ok, took := timed(func() bool { return Await("live", never, stillBusy) }); ok || took < 1200*time.Millisecond {
+		t.Errorf("migrating past LiveWait: %v after %s, want to wait for it", ok, took)
+	}
+	// A plan changes: the other goes.
+	_ = Plan("live", Checkpoint)
+	if planned("live", Live) || !planned("live", Checkpoint) {
+		t.Error("the plan did not change")
+	}
+	if err := Plan("../x", Live); err == nil {
+		t.Error("a path as a pod UID")
 	}
 }

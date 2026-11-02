@@ -80,6 +80,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// client-go's default, 5 a second, queues the webhooks' calls behind
+	// the moves' when a node's pods all move at once, past the webhooks'
+	// timeout.
+	cfg.QPS, cfg.Burst = 50, 100
 	cs, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -101,14 +105,15 @@ func main() {
 	}
 
 	op := &operator{cs: cs, opts: kubemigrate.Options{Namespace: *namespace, Image: *image, GCR: *gcrPath}, moving: map[string]bool{}, replaced: map[string]time.Time{}, restoring: map[types.UID]*kubemigrate.Restore{}, last: map[string]lastPod{},
-		owned: map[types.UID]map[types.UID]lastPod{},
-		self:  metav1.ObjectMeta{Namespace: *namespace, Name: os.Getenv("POD_NAME")}, node: os.Getenv("NODE_NAME")}
+		owned: map[types.UID]map[types.UID]lastPod{}, nodesDown: map[string]bool{},
+		self: metav1.ObjectMeta{Namespace: *namespace, Name: os.Getenv("POD_NAME")}, node: os.Getenv("NODE_NAME")}
 	if *registry != "" {
 		if owned, err := restoresReady(ctx, cs, *webhook); err != nil {
 			log.Printf("StatefulSets' pods are evicted, not moved: %v", err)
 		} else {
 			op.registry = kubemigrate.RegistryOptions{Repository: *registry, PlainHTTP: *plainHTTP}
 			op.ownedRestores = owned
+			op.execRun = kubemigrate.ExecRunner(cfg, cs, *namespace)
 			log.Printf("StatefulSets' pods move through %s, and pods on nodes shutting down are restored from it", *registry)
 			if !owned {
 				log.Printf("Deployments' and Jobs' pods on nodes shutting down start cold: admission policy %s is older than this operator; apply gcr.yaml (or the chart) again",
@@ -164,8 +169,13 @@ type operator struct {
 	// restore their pods. claimMu serializes claiming those restores.
 	ownedRestores bool
 	claimMu       sync.Mutex
-	stopping      bool // on its way out: it starts no migration
-	moves         sync.WaitGroup
+	// execRun runs commands on a node through gcr's installer pod there,
+	// for nodes shutting down (shutdownNode), which have been, by name, in
+	// nodesDown.
+	execRun   kubemigrate.Runner
+	nodesDown map[string]bool
+	stopping  bool // on its way out: it starts no migration
+	moves     sync.WaitGroup
 	// start moves a pod in the background: move, but for tests; and
 	// startRestore restores one: restore.
 	start        func(*corev1.Pod)
@@ -370,6 +380,11 @@ func (o *operator) waitingOnNode(ctx context.Context) int {
 // StatefulSet creates again even before then (lateRestore).
 func (o *operator) watchShutdowns(ctx context.Context) {
 	f := informers.NewSharedInformerFactory(o.cs, 0)
+	nodes := f.Core().V1().Nodes().Informer()
+	_, _ = nodes.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    o.nodeSeen,
+		UpdateFunc: func(_, obj any) { o.nodeSeen(obj) },
+	})
 	pods := f.Core().V1().Pods().Informer()
 	_, _ = pods.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(obj any) { o.seen(obj, false) },
@@ -382,6 +397,136 @@ func (o *operator) watchShutdowns(ctx context.Context) {
 		},
 	})
 	f.Start(ctx.Done())
+}
+
+// nodeShuttingDown is in the Ready condition's message of a node whose
+// kubelet is stopping its pods for a graceful node shutdown, from its
+// start.
+const nodeShuttingDown = "node is shutting down"
+
+// nodeSeen follows a node from the informer: one starting to shut down
+// has its pods that would move on a drain migrate live (shutdownNode).
+func (o *operator) nodeSeen(obj any) {
+	n, ok := obj.(*corev1.Node)
+	if !ok || o.execRun == nil {
+		return
+	}
+	down := false
+	for _, c := range n.Status.Conditions {
+		down = down || c.Type == corev1.NodeReady && strings.Contains(c.Message, nodeShuttingDown)
+	}
+	o.mu.Lock()
+	start := down && !o.nodesDown[n.Name] && !o.stopping
+	if start || !down {
+		o.nodesDown[n.Name] = down
+	}
+	o.mu.Unlock()
+	if start {
+		go o.shutdownNode(n.Name)
+	}
+}
+
+// shutdownNode moves the opted-in pods of node, which is shutting down,
+// that a drain would migrate live, as a drain does: their containers'
+// shims hold the kubelet's stop meanwhile (nodeshutdown.Await). The rest
+// are checkpointed there as the kubelet stops them, and restored from the
+// registry (shutdownStopped); so are those whose migration fails. Its
+// plan for each reaches the node through gcr's installer pod there, as do
+// the migrations: the node admits no Job.
+func (o *operator) shutdownNode(node string) {
+	ctx := context.Background()
+	if !kubemigrate.HasInstaller(ctx, o.cs, o.opts.Namespace, node) {
+		log.Printf("node %s shuts down, and gcr's installer does not run there: its pods are checkpointed, not migrated live", node)
+		return
+	}
+	pods, err := o.cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{FieldSelector: "spec.nodeName=" + node})
+	if err != nil {
+		log.Printf("node %s shuts down: %v", node, err)
+		return
+	}
+	var live []*corev1.Pod
+	var liveUIDs, checkpointUIDs []string
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if p.Annotations[annotationOptIn] != "true" || p.DeletionTimestamp != nil {
+			continue
+		}
+		if _, err := kubemigrate.Movable(p); err == nil {
+			live = append(live, p)
+			liveUIDs = append(liveUIDs, string(p.UID))
+		} else {
+			checkpointUIDs = append(checkpointUIDs, string(p.UID))
+		}
+	}
+	if len(live) == 0 && len(checkpointUIDs) == 0 {
+		return
+	}
+	// Restored from a checkpoint only if their migrations fail.
+	o.mu.Lock()
+	for _, p := range live {
+		o.restoring[p.UID] = nil
+	}
+	o.mu.Unlock()
+	plan := func(how string, uids []string) error {
+		if len(uids) == 0 {
+			return nil
+		}
+		_, err := o.execRun(ctx, node, "plan", nil, append([]string{o.opts.GCR, "shutdown-plan", how}, uids...)...)
+		return err
+	}
+	if err := plan("-checkpoint", checkpointUIDs); err != nil {
+		log.Printf("node %s shuts down: %v", node, err) // they are checkpointed, a little later
+	}
+	if err := plan("-live", liveUIDs); err != nil {
+		log.Printf("node %s shuts down, and its pods are checkpointed, not migrated live: %v", node, err)
+		o.mu.Lock()
+		for _, p := range live {
+			delete(o.restoring, p.UID)
+		}
+		o.mu.Unlock()
+		return
+	}
+	log.Printf("node %s shuts down: migrating %d pods live, %d through checkpoints", node, len(live), len(checkpointUIDs))
+	for _, p := range live {
+		o.mu.Lock()
+		if o.stopping {
+			o.mu.Unlock()
+			return
+		}
+		o.moves.Add(1)
+		o.mu.Unlock()
+		go o.moveLive(p)
+	}
+}
+
+// moveLive migrates pod off its node, shutting down, as a drain does; if
+// it cannot, the pod is checkpointed there and restored from the registry.
+func (o *operator) moveLive(pod *corev1.Pod) {
+	defer o.moves.Done()
+	key := pod.Namespace + "/" + pod.Name
+	opts := o.opts
+	opts.Run = o.execRun
+	opts.Log = func(format string, args ...any) { log.Printf(key+": "+format, args...) }
+	res, err := kubemigrate.Migrate(context.Background(), o.cs, pod.Namespace, pod.Name, opts)
+	if err != nil {
+		log.Printf("%s: its node %s shuts down, and it could not migrate live, so it is checkpointed: %v", key, pod.Spec.NodeName, firstLine(err.Error()))
+		o.mu.Lock()
+		delete(o.restoring, pod.UID)
+		o.mu.Unlock()
+		if _, err := o.execRun(context.Background(), pod.Spec.NodeName, "plan", nil, o.opts.GCR, "shutdown-plan", "-checkpoint", string(pod.UID)); err != nil {
+			log.Printf("%s: %v (it is checkpointed, a little later)", key, err)
+		}
+		return
+	}
+	// Handed over: the kubelet may let the source go, which would have
+	// had its controller start another, cold, before.
+	if _, err := o.execRun(context.Background(), pod.Spec.NodeName, "plan", nil, o.opts.GCR, "shutdown-plan", "-released", string(pod.UID)); err != nil {
+		log.Printf("%s: %v (the kubelet stops it a little later)", key, err)
+	}
+	if res.Downtime == "" {
+		res.Downtime = "unknown: " + strings.ReplaceAll(strings.TrimSpace(res.Output), "\n", " | ")
+	}
+	log.Printf("%s moved off %s, shutting down, to %s as %s (downtime %s)", key, pod.Spec.NodeName, res.Node, res.Target, res.Downtime)
 }
 
 // seen follows a pod from the informer.

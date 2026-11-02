@@ -90,6 +90,23 @@ type Options struct {
 	Timeout time.Duration
 	// Log, if set, is told each step.
 	Log func(format string, args ...any)
+	// Run runs the migration's commands on the source node: a Job, if
+	// nil. A node shutting down admits no new pod; ExecRunner runs them
+	// in a pod already there.
+	Run Runner
+}
+
+// Runner runs command on node, in the host's namespaces, with env (which
+// may hold secrets: not in its command line), and returns its output. what
+// names the step.
+type Runner func(ctx context.Context, node, what string, env map[string]string, command ...string) (string, error)
+
+// run runs command on node with o.Run, or a Job.
+func (o Options) run(ctx context.Context, cs kubernetes.Interface, node, what string, env map[string]string, command ...string) (string, error) {
+	if o.Run != nil {
+		return o.Run(ctx, node, what, env, command...)
+	}
+	return runJob(ctx, cs, o, node, what, env, command...)
 }
 
 // Result describes a finished migration.
@@ -135,7 +152,7 @@ func Migrate(ctx context.Context, cs kubernetes.Interface, ns, name string, o Op
 		}
 	}
 	log("asking %s for %s's user namespace", src.Spec.NodeName, name)
-	out, err := runJob(ctx, cs, o, src.Spec.NodeName, "info", nil, o.GCR, "-n", containerdNamespace, "info", id)
+	out, err := o.run(ctx, cs, src.Spec.NodeName, "info", nil, o.GCR, "-n", containerdNamespace, "info", id)
 	if err != nil {
 		return res, fmt.Errorf("gcr info on %s: %w\n%s", src.Spec.NodeName, err, out)
 	}
@@ -215,7 +232,7 @@ func Migrate(ctx context.Context, cs kubernetes.Interface, ns, name string, o Op
   case "$out" in *"connection refused"*) sleep 1;; *) echo "$out"; exit 1;; esac
 done
 echo "$out"; exit 1`, o.GCR, containerdNamespace, id, target)
-	out, err = runJob(ctx, cs, o, src.Spec.NodeName, "migrate", map[string]string{"TOKEN": token}, "sh", "-c", script)
+	out, err = o.run(ctx, cs, src.Spec.NodeName, "migrate", map[string]string{"TOKEN": token}, "sh", "-c", script)
 	res.Output = out
 	switch {
 	case errors.Is(err, errNoOutput):

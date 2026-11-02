@@ -140,6 +140,20 @@ And with a Deployment's two pods and an Indexed Job's two (`podFailurePolicy` ig
 - the Deployment's in 4.8 and 6.5 s, the Job's in 24 s, 20 s of it the Job controller waiting before it replaces a failed pod;
 - the Job finished with `succeeded: 2` and no failures counted.
 
+**Live, when the pod can move live.** A shutdown leaves time for a live move: the kubelet holds it for `shutdownGracePeriod`, and the node keeps its network until the end. So pods that move live on an eviction (a Deployment's, a Job's, a bare pod) move live at a shutdown too, with the same ~0.3 s pause, instead of being restored from a checkpoint seconds later:
+
+1. **The operator sees the shutdown first.** Its node informer sees the kubelet set the node's `Ready` condition to "node is shutting down", which the kubelet does before it stops any pod. The operator then sorts the node's opted-in pods: those that can move live (`kubemigrate.Movable`), and the rest.
+2. **It tells the shim, on the node.** No Job can start on a node shutting down, but `exec` into a running pod still works. So the operator execs `gcr shutdown-plan -live UID...` (and `-checkpoint UID...` for the rest) into the node's gcr-installer pod, which enters the host's namespaces. The plan is a marker file per pod under `/run/gcr/shutdown`.
+3. **The shim holds the kill.** When the kubelet stops a container whose pod is planned live, the shim doesn't checkpoint it. It waits for the live move to take the container (it is gone, or it is migrating, which has no timeout). It then waits for `-released`, until the operator has handed the target to the controller, so that the controller sees the pod failed only after its replacement already runs. For pods planned for a checkpoint, or with no plan within 5 s, it checkpoints as before.
+4. **The operator moves each pod** as for an eviction, with every step that runs on a node (`gcr info`, `gcr migrate`) exec'd into that node's installer pod instead of run as a Job.
+5. **If a live move fails,** the operator plans the pod `-checkpoint`, and the shim checkpoints it: the pod is restored as above.
+
+Measured on the same two VMs, `systemctl poweroff` of the node with a Deployment's two pods, an Indexed Job's two and a StatefulSet's: the four moved live, with 305 to 387 ms of downtime, each handed over to its controller; the StatefulSet's pod was restored from its checkpoint 3.3 s after the shutdown; all carried on counting, with 0 restarts.
+
+What it needs:
+- **The installer pod on the node** (the chart's `runtime.installer`, on by default), and `pods/exec` on it (verbs `get` for WebSocket exec and `create` for SPDY). Without it, every pod goes through a checkpoint.
+- **API capacity:** each move makes a few dozen requests in a few seconds, so the operator's client allows 50 requests per second (burst 100), and the mutating webhook's timeout is 15 s. With client-go's default of 5, the webhook timed out under a shutdown's moves, and the pods started cold.
+
 **Not yet:**
 - **How much fits before the node goes:** a spot notice is two minutes on most clouds, and GKE's graceful shutdown 30 s. A few GiB of memory push in that time over a fast link.
 
@@ -148,4 +162,4 @@ And with a Deployment's two pods and an Indexed Job's two (`podFailurePolicy` ig
 1. `gcr snapshot -stop`: checkpoint and stop, through the control API. Built.
 2. Checkpoint-to-registry and restore-from-registry Jobs in `kubemigrate`, used by `kubectl gcr migrate -registry`, with bare pods first: the plugin creates the replacement itself. That tests the path end to end without the webhook. Built.
 3. The mutating webhook, the pending restores, and the admission policy's new case: StatefulSets. Built.
-4. Graceful node shutdowns: the shim, `gcr shutdown-guard`, and the operator's informer. Built, for StatefulSets' and bare pods.
+4. Graceful node shutdowns: the shim, `gcr shutdown-guard`, and the operator's informer. Built, for StatefulSets' and bare pods, then Deployments' and Jobs'; then live moves for the pods that can move live.

@@ -37,10 +37,14 @@ rules:
     resources: [jobs]
     verbs: [get]
   # A StatefulSet's pod: whether its volumes can follow it, and whether a
-  # pod its StatefulSet created again is on a node being drained.
+  # pod its StatefulSet created again is on a node being drained; and
+  # nodes starting to shut down, whose pods it moves.
   - apiGroups: [""]
-    resources: [persistentvolumeclaims, persistentvolumes, nodes]
+    resources: [persistentvolumeclaims, persistentvolumes]
     verbs: [get]
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list, watch]
   # Its own certificate's CA, in its webhooks' configurations.
   - apiGroups: [admissionregistration.k8s.io]
     resources: [validatingwebhookconfigurations, mutatingwebhookconfigurations]
@@ -79,6 +83,11 @@ rules:
   - apiGroups: [""]
     resources: [secrets]
     verbs: [create, delete]
+  # Commands on a node shutting down, which admits no Job, in gcr's
+  # installer pod there: over WebSocket (get), or SPDY (create).
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [get, create]
   - apiGroups: [""]
     resources: [configmaps]
     verbs: [create]
@@ -223,9 +232,10 @@ webhooks:
   - name: restores.gcr.dev
     admissionReviewVersions: [v1]
     sideEffects: None
-    # If the operator is down, the pod starts cold, as without gcr.
+    # If the operator is down, the pod starts cold, as without gcr. It
+    # may wait 2 s for its informer to see the pod a new one replaces.
     failurePolicy: Ignore
-    timeoutSeconds: 5
+    timeoutSeconds: 15
     clientConfig:
       service:
         name: gcr-operator

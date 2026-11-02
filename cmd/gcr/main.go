@@ -16,6 +16,7 @@
 //	gcr snapshot-pull [-plain-http] [-store DIR] [-lazy] REF DIR
 //	gcr [-n namespace] migrate [-token TOKEN] [-post-copy] ID TARGET-URL
 //	gcr shutdown-guard [-plain-http] [-wait DURATION] REPOSITORY
+//	gcr shutdown-plan -live|-checkpoint|-released POD-UID...
 package main
 
 import (
@@ -64,7 +65,8 @@ func main() {
 			"       gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF\n"+
 			"       gcr snapshot-pull [-plain-http] [-store DIR] [-lazy] REF DIR\n"+
 			"       gcr [-n namespace] migrate [-token TOKEN] [-post-copy] ID TARGET-URL\n"+
-			"       gcr shutdown-guard [-plain-http] [-wait DURATION] REPOSITORY\n")
+			"       gcr shutdown-guard [-plain-http] [-wait DURATION] REPOSITORY\n"+
+			"       gcr shutdown-plan -live|-checkpoint|-released POD-UID...\n")
 	}
 	flag.Parse()
 	args := flag.Args()
@@ -264,6 +266,37 @@ func run(ctx context.Context, ns string, args []string) error {
 				return err
 			},
 		})
+	case len(args) >= 1 && args[0] == "shutdown-plan":
+		// gcr-operator's plan for pods of a node shutting down, which it
+		// runs there: migrate them live, or restore them from checkpoints.
+		fs := flag.NewFlagSet("shutdown-plan", flag.ExitOnError)
+		live := fs.Bool("live", false, "the operator migrates them live: their containers run on until it has")
+		checkpoint := fs.Bool("checkpoint", false, "they are checkpointed as the kubelet stops them, for the operator to restore")
+		released := fs.Bool("released", false, "migrated live, they are handed over to their controllers: the kubelet may stop them")
+		_ = fs.Parse(args[1:])
+		n := 0
+		for _, b := range []bool{*live, *checkpoint, *released} {
+			if b {
+				n++
+			}
+		}
+		if n != 1 || fs.NArg() == 0 {
+			flag.Usage()
+			os.Exit(2)
+		}
+		plan := nodeshutdown.Checkpoint
+		switch {
+		case *live:
+			plan = nodeshutdown.Live
+		case *released:
+			plan = nodeshutdown.Released
+		}
+		for _, uid := range fs.Args() {
+			if err := nodeshutdown.Plan(uid, plan); err != nil {
+				return err
+			}
+		}
+		return nil
 	case len(args) >= 1 && args[0] == "migrate":
 		fs := flag.NewFlagSet("migrate", flag.ExitOnError)
 		token := fs.String("token", os.Getenv("GCR_MIGRATE_TOKEN"), "token the target expects (default $GCR_MIGRATE_TOKEN)")
