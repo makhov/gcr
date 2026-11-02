@@ -118,7 +118,9 @@ jobs:
     runs-on: [self-hosted, linux, x64]
     steps:
       - name: Install gcr
-        run: curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sudo sh
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sh
+          sudo gcr setup
       - name: Log in
         run: echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Snapshot

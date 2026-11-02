@@ -17,14 +17,15 @@ cluster](install.md#a-throwaway-cluster) is one.
 
 ## 1. Install gcr
 
-One command downloads the latest release, checks it, and sets it up for
-containerd and Docker:
+Install the `gcr` binary, then let it set up containerd and Docker:
 
 ```sh
-curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sudo sh -s -- -docker
+curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sh
+sudo gcr setup -docker
 ```
 
-It runs `gcr setup`, which installs the `gcr` command and its shim, registers the
+The script downloads the latest release, checks it, and puts it in
+`/usr/local/bin`. `gcr setup` installs the `gcr` command and its shim, registers the
 runtime with containerd (and, with `-docker`, with Docker), restarts both,
 and then reports on the host:
 

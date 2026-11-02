@@ -14,7 +14,8 @@ start copies of it, take it back to an earlier moment, or move it to
 another machine, without restarting it.
 
 ```sh
-curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sudo sh -s -- -docker
+curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sh
+sudo gcr setup -docker
 ```
 
 [Get started](getting-started.md){ .md-button .md-button--primary }
@@ -30,7 +31,7 @@ curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sudo s
 
     ---
 
-    One command on a Linux host, or a Helm chart on a Kubernetes
+    Two commands on a Linux host, or a Helm chart on a Kubernetes
     cluster. [Install](install.md)
 
 -   **2. Run containers as usual**

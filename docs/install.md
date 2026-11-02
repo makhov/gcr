@@ -31,25 +31,27 @@ says what a node has ([below](#checking-a-node)).
 
 ## One host
 
-```sh
-curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sudo sh
-```
-
-The script downloads the latest release for your machine's architecture,
-checks it against the release's `SHA256SUMS`, and runs `gcr setup`.
-Arguments after `sh -s --` go to `gcr setup`:
+Two steps: install the `gcr` binary, then let it set up the host.
 
 ```sh
-curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sudo sh -s -- -docker      # register with Docker too
-curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sudo GCR_VERSION=v0.1.7 sh  # a given release
+curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sh
+sudo gcr setup              # add -docker to register with Docker too
 ```
 
-A release is one file per architecture that carries the shim, gcr's
-CRIU and its CUDA plugin inside it. To fetch it without running anything,
-`GCR_NO_SETUP=1` leaves it in `./gcr`, checked; then run
-`sudo ./gcr setup` yourself.
+**The install script** picks the latest release for your machine's
+architecture, checks it against the release's `SHA256SUMS`, and puts it
+in `/usr/local/bin` (with `sudo` if it has to). It changes nothing else.
+`GCR_VERSION=v0.1.7` picks a release, and `GCR_BIN_DIR` another
+directory:
 
-`gcr setup`:
+```sh
+curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | GCR_VERSION=v0.1.7 sh
+```
+
+A release is one file per architecture that carries the shim, gcr's CRIU
+and its CUDA plugin inside it.
+
+**`gcr setup`**:
 
 - installs `gcr` and `containerd-shim-gcr-v2` into `/usr/local/bin`;
 - unpacks gcr's CRIU and CUDA plugin into `/var/lib/gcr`;
@@ -243,8 +245,9 @@ curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sh -s 
 kubectl gcr
 ```
 
-It works on Linux and macOS, and installs to `/usr/local/bin` (with
-`sudo` if it needs to), or to `GCR_BIN_DIR`.
+The same script as for gcr, with `kubectl-gcr`: it works on Linux and
+macOS, and installs into `/usr/local/bin` (with `sudo` if it needs to),
+or `GCR_BIN_DIR`.
 
 Each command creates one of gcr's [operations](operations.md), which
 [gcr-operator](#gcr-operator) carries out: install it too. Running the
@@ -273,7 +276,7 @@ node also runs `gcr shutdown-guard`
 
 ## Upgrading
 
-- **One host:** run the install command again.
+- **One host:** run both steps again: the install script, then `sudo gcr setup`.
 - **Kubernetes:** `helm upgrade`, or apply the new `gcr.yaml` (and
   `gcr-operator.yaml`). The DaemonSet rolls one node at a time.
 

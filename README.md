@@ -14,7 +14,8 @@ Documentation: **[makhov.github.io/gcr](https://makhov.github.io/gcr/)**
 On a Linux machine with Docker:
 
 ```sh
-curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sudo sh -s -- -docker
+curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sh
+sudo gcr setup -docker
 docker run --rm --runtime gcr busybox echo hello
 ```
 
@@ -23,7 +24,7 @@ Linux machine? [A VM on your laptop](docs/install.md#a-vm-on-your-laptop).
 
 ## How to use it
 
-1. **Install it:** one command on a host, or a Helm chart on a cluster.
+1. **Install it:** two commands on a host, or a Helm chart on a cluster.
 2. **Run containers as usual,** with gcr as the runtime: `docker run
    --runtime gcr`, or `runtimeClassName: gcr` in a pod.
 3. **Work with them while they run:**

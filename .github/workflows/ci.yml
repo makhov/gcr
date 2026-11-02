@@ -45,13 +45,13 @@ jobs:
           git diff --exit-code deploy/ || { echo "deploy/ is out of date with charts/gcr; run make manifests"; exit 1; }
 
   install-script:
-    # install.sh, which the docs pipe to sh: it lints, and downloads and
-    # checks the latest release's gcr and kubectl plugin.
+    # install.sh, which the docs pipe to sh: it lints, and installs the
+    # latest release's gcr and kubectl plugin, checked.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - run: shellcheck -s sh install.sh
-      - run: GCR_NO_SETUP=1 sh install.sh && ./gcr version
+      - run: GCR_BIN_DIR="$RUNNER_TEMP/bin" sh install.sh && "$RUNNER_TEMP/bin/gcr" version
       - run: GCR_BIN_DIR="$RUNNER_TEMP/bin" sh install.sh kubectl-gcr && { "$RUNNER_TEMP/bin/kubectl-gcr" || true; } 2>&1 | grep -q usage
 
   e2e:

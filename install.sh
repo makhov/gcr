@@ -1,24 +1,21 @@
 #!/bin/sh
-# Installs gcr from its GitHub releases:
+# Installs the gcr binary from gcr's GitHub releases:
 #
-#   curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sudo sh
+#   curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sh
 #
-# downloads the gcr binary for this machine, checks it against the
-# release's SHA256SUMS, and runs `gcr setup`, which installs gcr and its
-# shim and registers the runtime with containerd. Arguments go to gcr
-# setup (docs/cli.md#gcr-setup):
+# picks the release (the latest, or GCR_VERSION) and this machine's build,
+# checks it against the release's SHA256SUMS, and installs it into
+# /usr/local/bin, with sudo if it has to. It changes nothing else: `sudo
+# gcr setup` then registers gcr with containerd (docs/install.md).
 #
-#   curl -sSfL .../install.sh | sudo sh -s -- -docker     # Docker too
-#
-# With kubectl-gcr as the first argument it installs the kubectl plugin
+# With kubectl-gcr as the argument it installs the kubectl plugin
 # instead, on Linux or macOS:
 #
 #   curl -sSfL .../install.sh | sh -s -- kubectl-gcr
 #
 # Environment:
 #   GCR_VERSION   the release to install, such as v0.1.8 (default: the latest)
-#   GCR_BIN_DIR   where the kubectl plugin goes (default: /usr/local/bin)
-#   GCR_NO_SETUP  set to 1: only download gcr, to ./gcr, without gcr setup
+#   GCR_BIN_DIR   where it goes (default: /usr/local/bin)
 set -eu
 
 repo=https://github.com/makhov/gcr
@@ -73,20 +70,21 @@ aarch64 | arm64) arch=arm64 ;;
 *) fail "no release for $(uname -m): gcr is built for amd64 and arm64" ;;
 esac
 
-what=gcr
-if [ "${1:-}" = kubectl-gcr ]; then
+case ${1:-gcr} in
+gcr)
+	what=gcr
+	[ "$os" = linux ] || fail "gcr runs on Linux only; on $os, try it in a VM (docs/install.md#a-vm-on-your-laptop), or install the kubectl plugin: sh -s -- kubectl-gcr"
+	;;
+kubectl-gcr)
 	what=kubectl-gcr
-	shift
 	case $os in
 	linux | darwin) ;;
 	*) fail "no kubectl-gcr for $os: it is built for Linux and macOS" ;;
 	esac
-else
-	[ "$os" = linux ] || fail "gcr runs on Linux only; on $os, try it in a VM (docs/install.md#a-vm-on-your-laptop), or install the kubectl plugin: sh -s -- kubectl-gcr"
-	if [ "${GCR_NO_SETUP:-}" != 1 ] && [ "$(id -u)" != 0 ]; then
-		fail "gcr setup needs root: pipe this to sudo sh"
-	fi
-fi
+	;;
+-*) fail "$1 is gcr setup's: install gcr first, then run sudo gcr setup $*" ;;
+*) fail "unknown argument $1: give none for gcr, or kubectl-gcr for the kubectl plugin" ;;
+esac
 
 version=${GCR_VERSION:-$(latest)}
 asset=$what-$version-$os-$arch
@@ -103,28 +101,21 @@ want=$(awk -v f="$asset" '$2 == f || $2 == "*" f { print $1 }' "$tmp/SHA256SUMS"
 [ "$(sha256 "$tmp/$what")" = "$want" ] || fail "$asset does not match its checksum in SHA256SUMS"
 chmod 0755 "$tmp/$what"
 
-if [ "$what" = kubectl-gcr ]; then
-	dir=${GCR_BIN_DIR:-/usr/local/bin}
-	mkdir -p "$dir" 2>/dev/null || true
-	if [ -w "$dir" ]; then
-		mv "$tmp/kubectl-gcr" "$dir/kubectl-gcr"
-	elif have sudo; then
-		echo "Installing to $dir with sudo"
-		sudo mkdir -p "$dir"
-		sudo mv "$tmp/kubectl-gcr" "$dir/kubectl-gcr"
-	else
-		fail "cannot write to $dir: set GCR_BIN_DIR, or run as root"
-	fi
-	echo "Installed kubectl-gcr $version to $dir: try kubectl gcr"
-	exit 0
+# Into the directory first, then renamed over the old one: a gcr that is
+# running goes on with its own copy.
+dir=${GCR_BIN_DIR:-/usr/local/bin}
+sudo=
+mkdir -p "$dir" 2>/dev/null || true
+if [ ! -w "$dir" ]; then
+	have sudo || fail "cannot write to $dir: run as root, or set GCR_BIN_DIR"
+	echo "Installing into $dir with sudo"
+	sudo=sudo
+	$sudo mkdir -p "$dir"
 fi
+$sudo cp "$tmp/$what" "$dir/.$what.new"
+$sudo mv "$dir/.$what.new" "$dir/$what"
+echo "Installed $what $version as $dir/$what"
 
-if [ "${GCR_NO_SETUP:-}" = 1 ]; then
-	mv "$tmp/gcr" ./gcr
-	echo "Downloaded gcr $version to ./gcr"
-	exit 0
+if [ "$what" = gcr ]; then
+	echo "Next: sudo gcr setup (add -docker to register with Docker too)"
 fi
-
-# gcr setup copies itself to its -bin-dir (/usr/local/bin), so the
-# download can go once it is done.
-"$tmp/gcr" setup "$@"
