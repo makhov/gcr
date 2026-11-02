@@ -95,6 +95,10 @@ then a Snapshot names nothing but its pod:
 | `registry`, no `image` | `REGISTRY/NAMESPACE/POD`, tagged with the Snapshot's name. |
 | neither | the same, in the operator's registry (`-snapshot-registry`). |
 
+The tag is the Snapshot's own name, so a Snapshot you write has the tag
+you give it; `kubectl gcr` lets the API server generate the name
+(`counter-mz7qd`), and the tag is that.
+
 With neither, and no registry on the operator, the Snapshot fails saying
 so — nothing is pushed anywhere by accident. `status.image` is the digest
 of what was pushed in every case, so read the image from there rather

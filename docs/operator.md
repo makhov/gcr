@@ -406,6 +406,11 @@ snapshot/counter-mz7qd created; waiting for gcr-operator
 registry.example.com/snapshots/team-a/counter@sha256:5131e882dfe8c88d17f895ef8dc5b693f0e30f28e4cc9e0936943c2322c86d61
 ```
 
+The plugin lets the API server name the Snapshot (`counter-mz7qd`), so
+the tag it pushes is that name: fine when the digest is what you use, and
+not if you want to find the image by tag later. For a tag you choose,
+write the resource with a `metadata.name` of your own, as above.
+
 [Operations as resources](operations.md) is the reference: every field of
 all four kinds, what each status says, and
 [who may create them](operations.md#who-may-do-what) — creating one needs

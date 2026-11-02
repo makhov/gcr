@@ -70,9 +70,11 @@ spec:
   pod: counter
 ```
 
-`kubectl gcr snapshot pod/counter` does the same without the file. Read
-`status.image` for what was pushed, by digest, whichever way you name it;
-that digest is what a pod should run.
+`kubectl gcr snapshot pod/counter` does the same without the file, with
+the API server naming the Snapshot, and so the tag: write the resource
+yourself for a tag you choose. Read `status.image` for what was pushed,
+by digest, whichever way you name it; that digest is what a pod should
+run.
 
 ## Building one in CI
 
