@@ -40,7 +40,7 @@ restarted docker
 
 ok   kernel          6.17.0-40-generic
 ok   cgroup v2       unified hierarchy
-ok   shim            /usr/local/bin/containerd-shim-gcr-v2 v0.1.6
+ok   shim            /usr/local/bin/containerd-shim-gcr-v2 v0.1.8
 ok   containerd      2.2.1, runtime gcr registered
 ok   docker          runtime gcr registered
 ok   CRIU            /var/lib/gcr/bin/criu 4.2.1 (v4.2.1+gcr.1)

@@ -569,7 +569,7 @@ spec:
       terminationGracePeriodSeconds: 120
       containers:
         - name: operator
-          image: ghcr.io/makhov/gcr:v0.1.6
+          image: ghcr.io/makhov/gcr:v0.1.8
           imagePullPolicy: IfNotPresent
           command: [/gcr-operator]
           # StatefulSets' pods move through checkpoints in a registry the
