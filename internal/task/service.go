@@ -722,7 +722,8 @@ func (s *service) fromCRIO(id string) bool {
 // checkpointForShutdown checkpoints and stops container c, the kubelet
 // stopping it as its node shuts down, if its pod opted in to moving
 // (nodeshutdown): before the signal, which a checkpoint would carry
-// along. It says whether it did. Asked again (SIGTERM, then SIGKILL),
+// along; unless gcr-operator migrates it live meanwhile. It says whether
+// the container is gone that way or the other. Asked again (SIGTERM, then SIGKILL),
 // it does nothing more: the first ask waits for the checkpoint.
 func (s *service) checkpointForShutdown(ctx context.Context, c *container.Container, id string) bool {
 	s.mu.Lock()
@@ -734,6 +735,14 @@ func (s *service) checkpointForShutdown(ctx context.Context, c *container.Contai
 	ex.shutdownOnce.Do(func() {
 		uid := ex.shutdownUID
 		log := log.G(ctx).WithField("pod", uid)
+		// gcr-operator may migrate it live, as on a drain: it runs on
+		// until the migration has moved it.
+		begin := time.Now()
+		if nodeshutdown.Await(uid, func() bool { return !c.Running() }, c.Migrating) {
+			ex.checkpointed = true
+			log.WithField("took", time.Since(begin)).Info("node shutdown: migrated live")
+			return
+		}
 		// The kubelet's context ends with its stop timeout: the
 		// checkpoint is bounded by the shutdown's own delay instead.
 		ctx := context.WithoutCancel(ctx)
@@ -742,7 +751,7 @@ func (s *service) checkpointForShutdown(ctx context.Context, c *container.Contai
 			return
 		}
 		dir := nodeshutdown.CheckpointPath(uid)
-		begin := time.Now()
+		begin = time.Now()
 		if err := s.snapshot(ctx, c, ex, dir, true); err != nil {
 			log.WithError(err).Warn("node shutdown: checkpoint failed; stopping it")
 			_ = nodeshutdown.Set(uid, nodeshutdown.Failed, err.Error())

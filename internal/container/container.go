@@ -1121,6 +1121,9 @@ func (c *Container) SetMigrating(on bool) error {
 	return nil
 }
 
+// Migrating says whether a migration out of the container is under way.
+func (c *Container) Migrating() bool { return c.isMigrating() }
+
 func (c *Container) isMigrating() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()

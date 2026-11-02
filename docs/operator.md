@@ -11,8 +11,9 @@ Pods opt in with one annotation, and then:
   checkpoint in a registry, in seconds, and keep their name, DNS name and
   volumes.
 - **A node shutting down** (`systemctl poweroff`, a spot reclaim through
-  the kubelet's graceful node shutdown) checkpoints them as the kubelet
-  stops them, and the operator restores them on another node.
+  the kubelet's graceful node shutdown) moves them as for a drain: live
+  where they can, and otherwise through a checkpoint the node takes as the
+  kubelet stops them, restored on another node.
 
 A pod that can't move is evicted, as it would be without gcr: a drain is
 never held up by the operator.
@@ -105,9 +106,9 @@ What then happens to each kind of pod:
 
 | Pod | When evicted (drain, autoscaler) | When its node shuts down |
 | --- | --- | --- |
-| A Deployment's (ReplicaSet's) | moved live, handed over to the ReplicaSet | restored in a pod the ReplicaSet creates, with a registry |
-| A Job's | moved live, handed over to the Job; the run carries on | restored in a pod the Job creates (of the same index), with a registry |
-| A bare pod | moved live | restored from its checkpoint, with a registry |
+| A Deployment's (ReplicaSet's) | moved live, handed over to the ReplicaSet | moved live, handed over to the ReplicaSet; if that fails, restored in a pod the ReplicaSet creates, with a registry |
+| A Job's | moved live, handed over to the Job; the run carries on | moved live, handed over to the Job; if that fails, restored in a pod the Job creates (of the same index), with a registry |
+| A bare pod | moved live | moved live; if that fails, restored from its checkpoint, with a registry |
 | A StatefulSet's | moved through the registry, with one; evicted without | restored from its checkpoint, with a registry |
 | Others (DaemonSets) | evicted | stopped |
 
@@ -211,7 +212,15 @@ and the StatefulSet starts it cold, as without gcr.
 ## Node shutdown
 
 When a node shuts down gracefully, the kubelet stops its pods itself, and
-admits no new pods meanwhile. So the checkpoints are taken on the node:
+admits no new pods meanwhile. The operator sees the node go not ready
+("node is shutting down") before the kubelet stops any pod, and:
+- **moves the pods that can move live,** as for a drain, through `exec`
+  into the node's gcr-installer pod, since no Job can start there. The
+  node holds each such pod's stop until its move is done and handed over,
+  so its controller never sees it fail;
+- **leaves the rest to a checkpoint,** and any pod whose live move failed.
+
+The checkpoints are taken on the node:
 `gcr shutdown-guard` holds the shutdown, the shim checkpoints each
 opted-in container as the kubelet stops it, and the guard pushes the
 checkpoints to the registry. The operator then restores the pods on
@@ -222,6 +231,12 @@ another node:
 
 On two k0s VMs, `systemctl poweroff` of a node, with every pod there
 carrying on counting on the other node, with no restarts:
+- a Deployment's two pods and an Indexed Job's two, moved live: 305 to
+  387 ms of downtime each;
+- a StatefulSet's pod, restored: 3.3 s after the shutdown.
+
+Through checkpoints alone (no installer pod on the node, or a live move
+failed):
 - a StatefulSet's pod and a bare pod: 3.3 to 4.6 s after the shutdown;
 - a Deployment's two pods: 4.8 and 6.5 s;
 - an Indexed Job's two pods, each in the new pod of its index: 24 s, of
@@ -230,7 +245,9 @@ carrying on counting on the other node, with no restarts:
 
 ### Setting it up
 
-The operator needs a [registry](#with-a-registry). Then, on each node:
+The operator needs a [registry](#with-a-registry), and, for live moves,
+gcr's installer pod on each node (the chart's `runtime.installer`, on by
+default; `gcr.yaml` has it). Then, on each node:
 
 1. **Turn on the kubelet's graceful node shutdown,** in its
    configuration (on k0s, in a worker profile):
@@ -320,6 +337,7 @@ the pod was paused:
 ```
 default/counter-dc564fd68-qctk2 moved to ns-worker-0 as counter-dc564fd68-qctk2-4b1e2a (downtime 346ms)
 default/web-0 moved to rel-worker-1 as web-0 (downtime 6.333s (from the stop to Ready))
+default/web-d9487b6cc-p485h moved off lima-sd2, shutting down, to lima-sd1 as web-d9487b6cc-p485h-916782 (downtime 309ms)
 default/lone restored on lima-sd1 as lone-5f9a39 (downtime 4.538s (from the shutdown seen to Ready))
 ```
 
@@ -337,6 +355,7 @@ Every failure falls back to what Kubernetes does without gcr:
 | A live move fails | The target is deleted, the pod keeps running, and the next eviction goes through. |
 | A StatefulSet's checkpoint fails before the stop | The pod keeps running, and the next eviction goes through. |
 | …after the stop, or its restore fails | The pod is deleted again, and starts cold. |
+| A live move at a shutdown fails | The pod is checkpointed instead, and restored from the registry. |
 | A shutdown's checkpoint never reaches the registry | The StatefulSet's pod starts cold after 3 minutes; the bare pod stays failed. |
 
 If the operator itself is drained in the middle of moves, it finishes

@@ -13,16 +13,24 @@
 // pushes each checkpoint to the registry, tagged with the pod's UID, and
 // lets the shutdown go on once they are pushed.
 //
+// A pod gcr-operator can migrate live, as it does on a drain, goes that way
+// instead: the operator says so (gcr shutdown-plan, run on the node through
+// gcr's installer pod), and the shim holds the kubelet's stop while the
+// migration runs, the container running on meanwhile (Await).
+//
 // The state is files in Dir: Dir itself while the node shuts down, and
 // UID.pending, UID.ready or UID.failed for each pod's checkpoint, then
-// UID.pushed once the guard has pushed it.
+// UID.pushed once the guard has pushed it; and the operator's plan for a
+// pod, UID.live or UID.checkpoint.
 package nodeshutdown
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Dir is there while the node shuts down, and holds the checkpoints'
@@ -36,6 +44,86 @@ var CheckpointDir = "/var/lib/gcr/checkpoints"
 // AnnotationOptIn is the pod's opt-in to moving rather than stopping:
 // gcr-operator's, for evictions too.
 const AnnotationOptIn = "gcr.dev/migrate-on-evict"
+
+// The operator's plans for a pod, the suffixes of its file in Dir.
+const (
+	Live       = ".live"       // it migrates the pod, live
+	Checkpoint = ".checkpoint" // it restores the pod from a checkpoint
+	// Released: it has handed the pod migrated live over to its
+	// controller, and the kubelet may stop it. Before, the pod failing
+	// would have its ReplicaSet or Job start another, cold.
+	Released = ".released"
+)
+
+// How long Await waits: for the operator's plan, for a migration it
+// planned, and, once migrated, for its release. They add up to less than
+// the kubelet's shutdownGracePeriod for ordinary pods (60 s, 10 of them
+// for critical ones, here), after which it stops gcr's installer, which
+// the operator works through.
+var (
+	PlanWait    = 5 * time.Second
+	LiveWait    = 30 * time.Second
+	ReleaseWait = 15 * time.Second
+)
+
+// Plan records the operator's plan for pod uid, Live or Checkpoint.
+func Plan(uid, plan string) error {
+	if strings.ContainsAny(uid, "/\x00") || strings.HasPrefix(uid, ".") || uid == "" {
+		return fmt.Errorf("pod UID %q", uid)
+	}
+	if err := Begin(); err != nil {
+		return err
+	}
+	switch plan {
+	case Live:
+		_ = os.Remove(filepath.Join(Dir, uid+Checkpoint))
+	case Checkpoint:
+		_ = os.Remove(filepath.Join(Dir, uid+Live))
+	}
+	return os.WriteFile(filepath.Join(Dir, uid+plan), nil, 0o600)
+}
+
+// Await waits, as the kubelet stops pod uid's container while the node
+// shuts down, for it to migrate away: true once gone says the container
+// has (the migration stops it), and the operator has released the pod
+// (or ReleaseWait has passed). False if it is to be checkpointed here
+// instead: the operator planned a checkpoint, gave no plan within
+// PlanWait, or planned a migration that did not end within LiveWait.
+// While busy (a migration under way), it waits on.
+func Await(uid string, gone, busy func() bool) bool {
+	start := time.Now()
+	var goneAt time.Time
+	for {
+		if goneAt.IsZero() && gone() {
+			goneAt = time.Now()
+		}
+		if !goneAt.IsZero() {
+			if !planned(uid, Live) || planned(uid, Released) || time.Since(goneAt) > ReleaseWait {
+				return true
+			}
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		if !busy() {
+			limit := PlanWait
+			if planned(uid, Checkpoint) {
+				return false
+			}
+			if planned(uid, Live) {
+				limit = LiveWait
+			}
+			if time.Since(start) > limit {
+				return false
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func planned(uid, plan string) bool {
+	_, err := os.Stat(filepath.Join(Dir, uid+plan))
+	return err == nil
+}
 
 // States of a pod's checkpoint, the suffixes of its file in Dir.
 const (
