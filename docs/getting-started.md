@@ -17,18 +17,15 @@ cluster](install.md#a-throwaway-cluster) is one.
 
 ## 1. Install gcr
 
-A release is a single file that carries everything else it needs, its
-CRIU included:
+Install the `gcr` binary, then let it set up containerd and Docker:
 
 ```sh
-arch=$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
-v=$(curl -fsSLo /dev/null -w '%{url_effective}' https://github.com/makhov/gcr/releases/latest | sed 's#.*/##')
-curl -fLo gcr "https://github.com/makhov/gcr/releases/download/$v/gcr-$v-linux-$arch" && chmod +x gcr
-
-sudo ./gcr setup -docker
+curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sh
+sudo gcr setup -docker
 ```
 
-`gcr setup` installs the `gcr` command and its shim, registers the
+The script downloads the latest release, checks it, and puts it in
+`/usr/local/bin`. `gcr setup` installs the `gcr` command and its shim, registers the
 runtime with containerd (and, with `-docker`, with Docker), restarts both,
 and then reports on the host:
 

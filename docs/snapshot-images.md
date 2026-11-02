@@ -119,9 +119,8 @@ jobs:
     steps:
       - name: Install gcr
         run: |
-          v=$(curl -fsSLo /dev/null -w '%{url_effective}' https://github.com/makhov/gcr/releases/latest | sed 's#.*/##')
-          curl -fLo gcr "https://github.com/makhov/gcr/releases/download/$v/gcr-$v-linux-amd64"
-          chmod +x gcr && sudo ./gcr setup
+          curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sh
+          sudo gcr setup
       - name: Log in
         run: echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Snapshot

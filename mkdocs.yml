@@ -47,6 +47,9 @@ theme:
   icon:
     repo: fontawesome/brands/github
 
+extra_css:
+  - stylesheets/home.css
+
 markdown_extensions:
   - admonition
   - attr_list
