@@ -36,7 +36,7 @@ kubectl -n gcr-system logs deployment/gcr-operator
 ```
 
 ```
-serving evictions on :8443; migrations' Jobs run ghcr.io/makhov/gcr:v0.1.6
+serving evictions on :8443; migrations' Jobs run ghcr.io/makhov/gcr:v0.1.8
 ```
 
 The manifest creates, in `gcr-system`:
