@@ -31,20 +31,25 @@ says what a node has ([below](#checking-a-node)).
 
 ## One host
 
-A release is one file per architecture that carries the shim, gcr's CRIU
-and its CUDA plugin inside it:
-
 ```sh
-arch=$(uname -m | sed -e s/x86_64/amd64/ -e s/aarch64/arm64/)
-v=$(curl -fsSLo /dev/null -w '%{url_effective}' https://github.com/makhov/gcr/releases/latest | sed 's#.*/##')
-curl -fLo gcr "https://github.com/makhov/gcr/releases/download/$v/gcr-$v-linux-$arch"
-curl -fsSL "https://github.com/makhov/gcr/releases/download/$v/SHA256SUMS" | grep " gcr-$v-linux-$arch\$" | sed "s# gcr-.*# gcr#" | sha256sum -c
-chmod +x gcr
-
-sudo ./gcr setup            # add -docker to register with Docker too
+curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sudo sh
 ```
 
-That one command:
+The script downloads the latest release for your machine's architecture,
+checks it against the release's `SHA256SUMS`, and runs `gcr setup`.
+Arguments after `sh -s --` go to `gcr setup`:
+
+```sh
+curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sudo sh -s -- -docker      # register with Docker too
+curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sudo GCR_VERSION=v0.1.7 sh  # a given release
+```
+
+A release is one file per architecture that carries the shim, gcr's
+CRIU and its CUDA plugin inside it. To fetch it without running anything,
+`GCR_NO_SETUP=1` leaves it in `./gcr`, checked; then run
+`sudo ./gcr setup` yourself.
+
+`gcr setup`:
 
 - installs `gcr` and `containerd-shim-gcr-v2` into `/usr/local/bin`;
 - unpacks gcr's CRIU and CUDA plugin into `/var/lib/gcr`;
@@ -66,7 +71,8 @@ configuration elsewhere: `-containerd-config FILE` and `-containerd-unit
 UNIT` say where, and which unit to restart. On **k0s** gcr writes
 `/etc/k0s/containerd.d/gcr.toml`, which k0s applies itself.
 
-To upgrade, run a newer release's `gcr setup` again. Running containers
+To upgrade, run the install command again (or a newer release's `gcr
+setup`). Running containers
 keep the shim they started with.
 
 ### Registering it by hand
@@ -233,12 +239,12 @@ pushes a running pod's container to a registry as an image that pods run
 where kubectl finds plugins:
 
 ```sh
-v=$(curl -fsSLo /dev/null -w '%{url_effective}' https://github.com/makhov/gcr/releases/latest | sed 's#.*/##')
-os=darwin arch=arm64       # or linux, amd64
-curl -fLo kubectl-gcr "https://github.com/makhov/gcr/releases/download/$v/kubectl-gcr-$v-$os-$arch"
-chmod +x kubectl-gcr && sudo mv kubectl-gcr /usr/local/bin/
-kubectl gcr migrate -h
+curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sh -s -- kubectl-gcr
+kubectl gcr
 ```
+
+It works on Linux and macOS, and installs to `/usr/local/bin` (with
+`sudo` if it needs to), or to `GCR_BIN_DIR`.
 
 Each command creates one of gcr's [operations](operations.md), which
 [gcr-operator](#gcr-operator) carries out: install it too. Running the
@@ -267,7 +273,7 @@ node also runs `gcr shutdown-guard`
 
 ## Upgrading
 
-- **One host:** run the new release's `gcr setup`.
+- **One host:** run the install command again.
 - **Kubernetes:** `helm upgrade`, or apply the new `gcr.yaml` (and
   `gcr-operator.yaml`). The DaemonSet rolls one node at a time.
 
