@@ -17,7 +17,10 @@
 // the pod it creates again, a bare pod in a replacement.
 //
 // And it carries out gcr.dev's operations on pods: Snapshots, Migrations,
-// TimePoints and Rewinds (api/v1alpha1, docs/operations.md).
+// TimePoints and Rewinds (api/v1alpha1, docs/operations.md). With
+// -snapshot-registry, a Snapshot that names no image puts one there, as
+// NAMESPACE/POD tagged with the Snapshot's name, and reports it in
+// status.image.
 package main
 
 import (
@@ -78,6 +81,8 @@ func main() {
 	gcrPath := flag.String("gcr", "/usr/local/bin/gcr", "gcr's path on the nodes")
 	registry := flag.String("registry", "", "move StatefulSets' pods through checkpoints in this registry repository (host[:port]/path), which the nodes reach")
 	plainHTTP := flag.Bool("plain-http", false, "talk to -registry without TLS")
+	snapshotRegistry := flag.String("snapshot-registry", "", "keep Snapshots' images in this registry repository (host[:port]/path) when they name no image of their own")
+	snapshotPlainHTTP := flag.Bool("snapshot-plain-http", false, "talk to -snapshot-registry without TLS")
 	flag.Parse()
 
 	cfg, err := rest.InClusterConfig()
@@ -126,6 +131,10 @@ func main() {
 			go op.watchShutdowns(ctx)
 		}
 	}
+	if *snapshotRegistry != "" {
+		op.snapshotRegistry = kubemigrate.RegistryOptions{Repository: *snapshotRegistry, PlainHTTP: *snapshotPlainHTTP}
+		log.Printf("Snapshots that name no image go to %s, as NAMESPACE/POD tagged with the Snapshot's name", *snapshotRegistry)
+	}
 	dyn, err := dynamic.NewForConfig(cfg)
 	if err != nil {
 		log.Fatal(err)
@@ -158,6 +167,9 @@ type operator struct {
 	// registry is where StatefulSets' pods move through; with none, they
 	// are evicted.
 	registry kubemigrate.RegistryOptions
+	// snapshotRegistry is where Snapshots that name no image put theirs;
+	// with none, such a Snapshot fails (api/v1alpha1).
+	snapshotRegistry kubemigrate.RegistryOptions
 
 	mu     sync.Mutex
 	moving map[string]bool // namespace/name of pods being moved

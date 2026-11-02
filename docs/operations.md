@@ -70,7 +70,8 @@ metadata:
 spec:
   pod: counter
   container: c            # may be left out in a pod with one container
-  image: registry.example.com/snapshots/counter:v1
+  image: registry.example.com/snapshots/counter:v1   # optional, see below
+  registry: registry.example.com/snapshots           # optional, see below
   pushSecret: registry-push   # optional, see below
   plainHTTP: false        # true for a registry without TLS
 status:
@@ -82,6 +83,22 @@ status:
 `status.image` is the pushed image by digest; pods run it on the `gcr`
 RuntimeClass ([snapshots as images](snapshot-images.md)). The pod keeps
 running: it is paused while it is dumped, typically a few seconds.
+
+**Where the image goes.** A cluster usually has one registry for
+snapshots, configured on the operator
+([a registry for snapshots](operator.md#a-registry-for-snapshots)), and
+then a Snapshot names nothing but its pod:
+
+| The spec says | The image is |
+| --- | --- |
+| `image` | that, exactly. |
+| `registry`, no `image` | `REGISTRY/NAMESPACE/POD`, tagged with the Snapshot's name. |
+| neither | the same, in the operator's registry (`-snapshot-registry`). |
+
+With neither, and no registry on the operator, the Snapshot fails saying
+so — nothing is pushed anywhere by accident. `status.image` is the digest
+of what was pushed in every case, so read the image from there rather
+than rebuilding the name.
 
 **Credentials.** `pushSecret` names a `kubernetes.io/dockerconfigjson`
 Secret in the Snapshot's namespace:
@@ -172,7 +189,7 @@ operation, named after the pod, waits for it and prints the result:
 
 | Command | Creates |
 |---------|---------|
-| `kubectl gcr snapshot [-c C] [--push-secret S] [--plain-http] pod/P IMAGE` | a Snapshot; prints the image by digest |
+| `kubectl gcr snapshot [-c C] [--registry REPO] [--push-secret S] [--plain-http] pod/P [IMAGE]` | a Snapshot; prints the image by digest. Without IMAGE it goes to the operator's registry for snapshots |
 | `kubectl gcr migrate [--to NODE] [--through-registry] pod/P` | a Migration |
 | `kubectl gcr point [-c C] pod/P [LABEL]` | a TimePoint; prints `#N` |
 | `kubectl gcr rewind [-c C] pod/P N` | a Rewind |

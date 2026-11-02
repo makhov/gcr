@@ -166,13 +166,21 @@ spec:
           {{- if .Values.operator.plainHTTP }}
           {{- $args = append $args "-plain-http" }}
           {{- end }}
+          {{- if .Values.operator.snapshotRegistry }}
+          {{- $args = concat (list "-snapshot-registry" .Values.operator.snapshotRegistry) $args }}
+          {{- end }}
+          {{- if .Values.operator.snapshotPlainHTTP }}
+          {{- $args = append $args "-snapshot-plain-http" }}
+          {{- end }}
           {{- if $args }}
           args:
             {{- toYaml $args | nindent 12 }}
           {{- else }}
           # StatefulSets' pods move through checkpoints in a registry the
-          # nodes reach (without, they are evicted), operator.registry:
-          # args: [-registry, registry.example.com/gcr/checkpoints]
+          # nodes reach (without, they are evicted), operator.registry;
+          # Snapshots that name no image go to operator.snapshotRegistry:
+          # args: [-registry, registry.example.com/gcr/checkpoints,
+          #        -snapshot-registry, registry.example.com/snapshots]
           {{- end }}
           env:
             - name: POD_NAMESPACE

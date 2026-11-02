@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -134,5 +135,81 @@ func TestPickUpStopping(t *testing.T) {
 	got, _ := dyn.Resource(v1alpha1.Snapshots).Namespace("default").Get(ctx, "s", metav1.GetOptions{})
 	if phase, _, _ := unstructured.NestedString(got.Object, "status", "phase"); phase != "" {
 		t.Fatalf("phase %s", phase)
+	}
+}
+
+func TestSnapshotRef(t *testing.T) {
+	for name, tc := range map[string]struct {
+		spec  v1alpha1.SnapshotSpec
+		usual string
+		ref   string
+		ours  bool
+		fails bool
+	}{
+		"its own image": {
+			spec: v1alpha1.SnapshotSpec{Target: v1alpha1.Target{Pod: "counter"}, Image: "registry.example/snap:v1"},
+			ref:  "registry.example/snap:v1",
+		},
+		"its own image, over both registries": {
+			spec:  v1alpha1.SnapshotSpec{Target: v1alpha1.Target{Pod: "counter"}, Image: "registry.example/snap:v1", Registry: "other.example/snaps"},
+			usual: "registry.example/snaps",
+			ref:   "registry.example/snap:v1",
+		},
+		"the operator's registry": {
+			spec:  v1alpha1.SnapshotSpec{Target: v1alpha1.Target{Pod: "counter"}},
+			usual: "registry.example/snaps",
+			ref:   "registry.example/snaps/team-a/counter:counter-v1",
+			ours:  true,
+		},
+		"a trailing slash on it": {
+			spec:  v1alpha1.SnapshotSpec{Target: v1alpha1.Target{Pod: "counter"}},
+			usual: "registry.example/snaps/",
+			ref:   "registry.example/snaps/team-a/counter:counter-v1",
+			ours:  true,
+		},
+		"the registry it names": {
+			spec:  v1alpha1.SnapshotSpec{Target: v1alpha1.Target{Pod: "counter"}, Registry: "other.example/snaps"},
+			usual: "registry.example/snaps",
+			ref:   "other.example/snaps/team-a/counter:counter-v1",
+		},
+		"no image and no registry at all": {
+			spec:  v1alpha1.SnapshotSpec{Target: v1alpha1.Target{Pod: "counter"}},
+			fails: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := &v1alpha1.Snapshot{
+				ObjectMeta: metav1.ObjectMeta{Name: "counter-v1", Namespace: "team-a"},
+				Spec:       tc.spec,
+			}
+			ref, ours, err := snapshotRef(s, tc.usual)
+			if tc.fails {
+				if err == nil {
+					t.Fatalf("got %q, want an error", ref)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ref != tc.ref {
+				t.Errorf("ref: got %q, want %q", ref, tc.ref)
+			}
+			if ours != tc.ours {
+				t.Errorf("ours: got %v, want %v", ours, tc.ours)
+			}
+		})
+	}
+}
+
+// A Snapshot's name becomes the image's tag, so one that cannot be a tag
+// has to say so rather than push something else.
+func TestSnapshotRefBadName(t *testing.T) {
+	s := &v1alpha1.Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: strings.Repeat("a", 129), Namespace: "team-a"},
+		Spec:       v1alpha1.SnapshotSpec{Target: v1alpha1.Target{Pod: "counter"}},
+	}
+	if ref, _, err := snapshotRef(s, "registry.example/snaps"); err == nil {
+		t.Fatalf("got %q, want an error", ref)
 	}
 }

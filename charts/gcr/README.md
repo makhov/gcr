@@ -39,6 +39,8 @@ webhooks, the `gcr.dev` CRDs): install it once per cluster, in
 | `operator.enabled` | `false` | [gcr-operator](https://makhov.github.io/gcr/operator/): drains move pods instead of evicting them. |
 | `operator.registry` | `""` | A registry repository (`host[:port]/path`) for StatefulSets' pods and node shutdowns. |
 | `operator.plainHTTP` | `false` | The registry without TLS. |
+| `operator.snapshotRegistry` | `""` | A registry repository (`host[:port]/path`) for Snapshots that name no image: the image is `NAMESPACE/POD` there, tagged with the Snapshot's name. |
+| `operator.snapshotPlainHTTP` | `false` | That registry without TLS. |
 | `operator.extraArgs` | `[]` | More of the operator's [flags](https://makhov.github.io/gcr/operator/#flags). |
 | `operator.nodeSelector`, `.tolerations`, `.affinity` | | Where it runs: keep it off nodes that shut down for good. |
 | `operator.resources` | `{}` | |
