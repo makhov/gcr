@@ -8,6 +8,8 @@ import (
 	"os"
 	"runtime"
 
+	"github.com/containerd/errdefs"
+	"github.com/opencontainers/runc/libcontainer/configs"
 	"golang.org/x/sys/unix"
 )
 
@@ -52,4 +54,40 @@ func inUTS(path string, fn func() error) error {
 		errc <- fn()
 	}()
 	return <-errc
+}
+
+// checkRestoredNetwork refuses a restore that left the container's init
+// outside the network namespace its spec joins: CRIU leaves a process
+// whose images were dumped in its own network namespace (the host's) in
+// the one it runs in, which would give a pod the node's network.
+func (c *Container) checkRestoredNetwork(proc interface{ Pid() (int, error) }) error {
+	want := c.cfg.Namespaces.PathOf(configs.NEWNET)
+	if want == "" {
+		return nil
+	}
+	pid, err := proc.Pid()
+	if err != nil {
+		return err
+	}
+	same, err := sameNamespace(want, fmt.Sprintf("/proc/%d/ns/net", pid))
+	if err != nil {
+		return err
+	}
+	if !same {
+		_ = unix.Kill(pid, unix.SIGKILL)
+		return fmt.Errorf("its processes are not in the network namespace it joins (%s): "+
+			"a snapshot taken in the host's network cannot be restored into a pod's: %w", want, errdefs.ErrFailedPrecondition)
+	}
+	return nil
+}
+
+func sameNamespace(a, b string) (bool, error) {
+	var sa, sb unix.Stat_t
+	if err := unix.Stat(a, &sa); err != nil {
+		return false, err
+	}
+	if err := unix.Stat(b, &sb); err != nil {
+		return false, err
+	}
+	return sa.Dev == sb.Dev && sa.Ino == sb.Ino, nil
 }

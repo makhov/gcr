@@ -66,6 +66,7 @@ func main() {
 			"       gcr snapshot-users DIR\n"+
 			"       gcr snapshot-rm DIR...\n"+
 			"       gcr [-n namespace] snapshot-image [-plain-http] ID REF\n"+
+			"       gcr snapshot-build [flags] IMAGE REF [-- COMMAND...]\n"+
 			"       gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF\n"+
 			"       gcr snapshot-pull [-plain-http] [-store DIR] [-lazy] REF DIR\n"+
 			"       gcr [-n namespace] migrate [-token TOKEN] [-post-copy] ID TARGET-URL\n"+
@@ -201,6 +202,13 @@ func run(ctx context.Context, ns string, args []string) error {
 			errs = append(errs, snapshot.Remove(dir))
 		}
 		return errors.Join(errs...)
+	case len(args) == 2 && args[0] == snapimage.HolderCommand:
+		return snapimage.Holder(args[1])
+	case len(args) >= 1 && args[0] == "snapshot-build":
+		// Runs IMAGE as a Kubernetes pod's container would run, until it
+		// is ready, and pushes a snapshot of it to REF as an image pods
+		// run (snapshot-image): for CI, on a host with containerd and gcr.
+		return snapshotBuild(ctx, args[1:])
 	case len(args) >= 1 && args[0] == "snapshot-image":
 		// A snapshot of a running container, pushed to REF as an image
 		// that runs as any other, restoring the container's processes
@@ -436,4 +444,70 @@ func snapshotImage(ctx context.Context, ns, id, ref string, plainHTTP bool) (str
 		return "", err
 	}
 	return repo.Reference.Registry + "/" + repo.Reference.Repository + "@" + desc.Digest.String(), nil
+}
+
+// stringsFlag is a flag given any number of times.
+type stringsFlag []string
+
+func (f *stringsFlag) String() string     { return strings.Join(*f, ",") }
+func (f *stringsFlag) Set(v string) error { *f = append(*f, v); return nil }
+
+func snapshotBuild(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("snapshot-build", flag.ExitOnError)
+	o := snapimage.BuildOptions{ServiceAccount: true}
+	var env, volumes stringsFlag
+	fs.StringVar(&o.Address, "address", "/run/containerd/containerd.sock", "containerd's socket")
+	fs.StringVar(&o.Namespace, "n", "gcr-build", "the containerd namespace to run it in")
+	ready := fs.String("ready", "", "a shell command run in the container until it exits 0; the snapshot is taken then")
+	fs.DurationVar(&o.Timeout, "timeout", 10*time.Minute, "how long -ready may take")
+	fs.DurationVar(&o.Settle, "wait", 0, "how long to wait before the snapshot (after -ready)")
+	fs.Var(&env, "env", "KEY=VALUE added to the image's environment (repeatable)")
+	fs.Var(&volumes, "volume", "a path the pod mounts a volume at (repeatable): the snapshot must be taken with the pod's mounts")
+	noSA := fs.Bool("no-service-account", false, "the pod sets automountServiceAccountToken: false")
+	user := fs.String("user", "", "UID[:GID] to run as (the pod's runAsUser, runAsGroup)")
+	fs.BoolVar(&o.NoNewPrivileges, "no-new-privileges", false, "the pod sets allowPrivilegeEscalation: false")
+	plainHTTP := fs.Bool("plain-http", false, "speak HTTP to registries")
+	_ = fs.Parse(args)
+	if fs.NArg() < 2 {
+		fmt.Fprintln(os.Stderr, "usage: gcr snapshot-build [flags] IMAGE REF [-- COMMAND...]")
+		fs.PrintDefaults()
+		os.Exit(2)
+	}
+	o.Image, o.Env, o.Volumes, o.ServiceAccount, o.PlainHTTP = fs.Arg(0), env, volumes, !*noSA, *plainHTTP
+	if o.Args = fs.Args()[2:]; len(o.Args) > 0 && o.Args[0] == "--" {
+		o.Args = o.Args[1:]
+	}
+	if *ready != "" {
+		o.Ready = []string{"/bin/sh", "-c", *ready}
+	}
+	o.UID, o.GID = -1, 0
+	if *user != "" {
+		u, g, _ := strings.Cut(*user, ":")
+		var err error
+		if o.UID, err = strconv.Atoi(u); err != nil {
+			return fmt.Errorf("-user %q: %w", *user, err)
+		}
+		if g != "" {
+			if o.GID, err = strconv.Atoi(g); err != nil {
+				return fmt.Errorf("-user %q: %w", *user, err)
+			}
+		}
+	}
+	o.ID = fmt.Sprintf("build-%d", time.Now().UnixNano())
+	o.Log = os.Stderr
+	o.Say = func(format string, args ...any) { fmt.Fprintf(os.Stderr, "gcr: "+format+"\n", args...) }
+	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	stop, err := snapimage.Build(ctx, o)
+	if err != nil {
+		return err
+	}
+	defer stop()
+	o.Say("snapshotting it into %s", fs.Arg(1))
+	ref, err := snapshotImage(ctx, o.Namespace, o.ID, fs.Arg(1), *plainHTTP)
+	if err != nil {
+		return err
+	}
+	fmt.Println(ref)
+	return nil
 }
