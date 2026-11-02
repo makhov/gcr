@@ -17,6 +17,19 @@ exclude_docs: |
   README.md
   requirements.txt
 
+plugins:
+  - search
+  # Versions come from hack/mkdocs_macros.py, so that no page carries one
+  # to keep up to date: {{{ gcr_version }}} is the release the site
+  # documents. The delimiters are {{{ }}} to leave the braces in Go
+  # templates and shell expansions alone, and an unknown variable fails
+  # the build rather than rendering as nothing.
+  - macros:
+      module_name: hack/mkdocs_macros
+      j2_variable_start_string: "{{{"
+      j2_variable_end_string: "}}}"
+      on_undefined: strict
+
 theme:
   name: material
   features:

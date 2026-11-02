@@ -1,3 +1,9 @@
+---
+# The variables this page explains are left as they are written
+# (mkdocs.yml's macros plugin).
+render_macros: false
+---
+
 # Development
 
 ## A development VM
@@ -91,6 +97,21 @@ make docs                  # builds site/ as CI does: broken links fail it; need
 `DOCS_DEV_PORT=8001` serves it on another port. `make docs` needs
 mkdocs on your machine (`pip install -r docs/requirements.txt`).
 
+No page names a release. The version a page shows comes from the latest
+release tag, through two variables (mkdocs.yml's macros plugin and
+`hack/mkdocs_macros.py`):
+
+| | |
+| --- | --- |
+| `{{{ gcr_version }}}` | the release, `v1.2.3` |
+| `{{{ gcr_image }}}` | its installer image, `ghcr.io/makhov/gcr:v1.2.3` |
+
+Use them wherever a version would otherwise be written in, output
+pasted into a page included. `GCR_VERSION=v0.2.0 make docs` builds the
+site for another one, and `hack/docs-no-version.sh` (which CI runs) fails
+when a page names the current release instead of the variable. Publishing
+a release rebuilds the site, so the pages follow it.
+
 ## Releases
 
 `make release` (`hack/release.sh`) builds, for linux/amd64 and
@@ -120,13 +141,42 @@ and gcr's CRIU with its CUDA plugin. All are stamped with the version;
   (on an amd64 host, `gcc-aarch64-linux-gnu`, `libc6-dev-arm64-cross` and
   `libseccomp-dev:arm64`).
 
-It needs no CI. To cut one:
+A release is cut by a tag; CI does the rest
+(`.github/workflows/release.yml`):
 
 ```sh
-git tag v0.1.0 && git push origin v0.1.0
+git tag -s v0.1.0 -m v0.1.0 && git push origin v0.1.0
+```
+
+What the tag starts, in order:
+
+1. **CI has to pass on the tagged commit.** The tag may arrive before
+   that run finishes: the release waits for it, and stops if it fails.
+2. **Each architecture builds on a runner of its own**, amd64 and arm64,
+   so nothing cross-compiles and CRIU is built natively.
+3. **The installer image** `ghcr.io/makhov/gcr:vX.Y.Z` is pushed for both
+   architectures and signed (cosign, keyless).
+4. **A draft release** gets the files, and notes generated from the merged
+   pull requests.
+5. **Publishing that draft** is the one step left by hand, and the rest
+   follows from it: `install.sh` installs the new release, the
+   documentation site is rebuilt for it, and the version goes into the
+   chart's `appVersion` and the manifests generated from it
+   (`hack/stamp-version.sh`), as a commit on main.
+
+A tag with a `-` in it (`v0.2.0-rc1`) is marked a pre-release, and is not
+stamped into the chart: a clone keeps installing the last full release.
+Nothing else in the repository names a version, so there is nothing to
+bump before or after a release.
+
+`make release VERSION=vX.Y.Z` builds the same files on a machine of your
+own, for a release CI cannot build, and `make release-publish
+VERSION=vX.Y.Z` uploads them to a draft release. That is what the dev VM
+is for:
+
+```sh
 make vm T='release VERSION=v0.1.0 DOCKER="sudo docker"'
-make release-publish VERSION=v0.1.0   # a draft GitHub release, to look over and publish
-make vm T='image VERSION=v0.1.0 DOCKER="sudo docker" PUSH=1'   # the installer image, both architectures
+make vm T='image VERSION=v0.1.0 DOCKER="sudo docker" PUSH=1'
 ```
 
 `make image` builds the installer image (`deploy/Dockerfile`: busybox and
@@ -138,8 +188,9 @@ on a one-node k0da cluster (`hack/e2e-install.sh`).
 **The Helm chart** has releases of its own. A tag `chart/vX.Y.Z`
 publishes `charts/gcr` to `oci://ghcr.io/makhov/charts/gcr` as version
 `X.Y.Z` (`.github/workflows/chart-release.yml`), installing the latest
-release's image (its `appVersion` is the latest `vX.Y.Z` tag). After a
-release, tag a chart release too, so the chart installs it:
+release's image (its `appVersion` is the latest `vX.Y.Z` tag, stamped at
+publish time). After a release, tag a chart release too, so that the
+published chart carries the new resources as well as the new image:
 
 ```sh
 git tag chart/v0.2.0 && git push origin chart/v0.2.0
