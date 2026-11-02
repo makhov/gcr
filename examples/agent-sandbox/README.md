@@ -1,5 +1,8 @@
 # Agent sandboxes: undo and branching
 
+Walked through, with what it costs, in the documentation:
+[Agent sandboxes](../../docs/examples/agent-sandbox.md).
+
 `sandbox.py` runs an agent's sandbox as a Docker container under gcr, and
 gives it two things a container does not have elsewhere:
 
@@ -51,9 +54,10 @@ could.
 
 ## Running it
 
-On a Linux node with Docker using gcr as a runtime ([Docker](../../docs/docker.md);
-`hack/docker-setup.sh` sets one up), as root (gcr's control sockets are
-root's):
+On a Linux node with Docker using gcr as a runtime (`sudo gcr setup
+-docker`, or `hack/docker-setup.sh` where Docker is not installed yet:
+[quickstart](../../docs/getting-started.md)), as root, since gcr's
+control sockets are root's:
 
 ```sh
 sudo python3 examples/agent-sandbox/demo.py

@@ -1,5 +1,7 @@
 # vLLM from a snapshot
 
+In the documentation: [Warm starts](../../docs/examples/warm-starts.md).
+
 `demo.sh` starts vLLM's OpenAI server twice:
 - **from scratch:** weights read from disk onto the GPU, the model compiled, kernels autotuned, CUDA graphs captured;
 - **from a gcr snapshot** of the warm server: its processes and their memory, GPU memory included.
@@ -19,7 +21,7 @@ The restored server carries on from the snapshot: the same model on the GPU, the
 ## Running it
 
 On a node with:
-- containerd, with gcr registered (`gcr setup`, or the DaemonSet: [getting started](../../docs/getting-started.md));
+- containerd, with gcr registered (`gcr setup`, or the DaemonSet: [installation](../../docs/install.md));
 - the NVIDIA driver;
 - its CDI spec: `nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`, from the NVIDIA Container Toolkit.
 

@@ -1,5 +1,11 @@
 # Hardening
 
+This page is the inventory of what gcr blocks and why. If a program of
+yours is failing with `EPERM` or `ENOSYS`, go to
+[what the hardening breaks](compatibility.md) instead, which lists the
+symptoms and the way around each; to change any of it, see
+[configuration](configuration.md#recipes).
+
 Whatever seccomp profile a workload brings (or none, as Kubernetes pods
 default to), gcr refuses calls behind most container escapes and kernel
 exploits reachable from containers:

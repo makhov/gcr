@@ -7,6 +7,10 @@ snapshots, forks and time travel work on the containers Docker runs.
 
 ## Setting it up
 
+`sudo gcr setup -docker` does all of this: it registers the runtime with
+containerd and with Docker, and restarts both. The rest of this section
+is what it writes, for when you would rather do it yourself.
+
 dockerd has to use the host's containerd, the one gcr is installed for
 (Docker's static binaries bring a containerd of their own; packages use
 the system's). Register the runtime in `/etc/docker/daemon.json` and
@@ -55,6 +59,10 @@ gcr -n moby rewind $id 3
 A fork is created from the same image as its snapshot's container (the
 command is not run: the snapshot's processes are). Annotations are the
 ones in [configuration](configuration.md#annotations).
+
+[Agent sandboxes](examples/agent-sandbox.md) is a worked example of all
+of this: a Python wrapper around `docker` and `gcr` that gives a sandbox
+undo and branching.
 
 ## Networking
 
