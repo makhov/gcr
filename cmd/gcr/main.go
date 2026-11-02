@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -35,6 +36,7 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/v2/version"
+	"github.com/containerd/errdefs"
 
 	"github.com/makhov/gcr/internal/control"
 	"github.com/makhov/gcr/internal/kube"
@@ -42,6 +44,7 @@ import (
 	"github.com/makhov/gcr/internal/nodeshutdown"
 	"github.com/makhov/gcr/internal/payload"
 	"github.com/makhov/gcr/internal/setup"
+	"github.com/makhov/gcr/internal/snapimage"
 	"github.com/makhov/gcr/internal/snapshot"
 	"github.com/makhov/gcr/internal/snapshot/registry"
 )
@@ -62,6 +65,7 @@ func main() {
 			"       gcr [-n namespace] info ID\n"+
 			"       gcr snapshot-users DIR\n"+
 			"       gcr snapshot-rm DIR...\n"+
+			"       gcr [-n namespace] snapshot-image [-plain-http] ID REF\n"+
 			"       gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF\n"+
 			"       gcr snapshot-pull [-plain-http] [-store DIR] [-lazy] REF DIR\n"+
 			"       gcr [-n namespace] migrate [-token TOKEN] [-post-copy] ID TARGET-URL\n"+
@@ -86,7 +90,13 @@ func run(ctx context.Context, ns string, args []string) error {
 		fs.StringVar(&o.ContainerdUnit, "containerd-unit", "containerd", "the systemd unit running containerd, restarted to apply the configuration")
 		fs.BoolVar(&o.Docker, "docker", false, "register gcr with dockerd too, as runtime gcr")
 		fs.BoolVar(&o.NoRestart, "no-restart", false, "do not restart containerd (or dockerd); the configuration applies on their next start")
+		snapshotImages := fs.String("snapshot-images", "", "comma-separated images made of snapshots (gcr snapshot-image) the gcr handler restores: references, prefixes ending in *, or * for any")
 		_ = fs.Parse(args[1:])
+		for _, img := range strings.Split(*snapshotImages, ",") {
+			if img = strings.TrimSpace(img); img != "" {
+				o.SnapshotImages = append(o.SnapshotImages, img)
+			}
+		}
 		if err := setup.Run(o); err != nil {
 			return err
 		}
@@ -191,6 +201,23 @@ func run(ctx context.Context, ns string, args []string) error {
 			errs = append(errs, snapshot.Remove(dir))
 		}
 		return errors.Join(errs...)
+	case len(args) >= 1 && args[0] == "snapshot-image":
+		// A snapshot of a running container, pushed to REF as an image
+		// that runs as any other, restoring the container's processes
+		// (internal/snapimage). The container keeps running.
+		fs := flag.NewFlagSet(args[0], flag.ExitOnError)
+		plainHTTP := fs.Bool("plain-http", false, "speak HTTP, not HTTPS, to the registry (always for loopback)")
+		_ = fs.Parse(args[1:])
+		if fs.NArg() != 2 {
+			flag.Usage()
+			os.Exit(2)
+		}
+		ref, err := snapshotImage(ctx, ns, fs.Arg(0), fs.Arg(1), *plainHTTP)
+		if err != nil {
+			return err
+		}
+		fmt.Println(ref)
+		return nil
 	case len(args) >= 1 && (args[0] == "snapshot-push" || args[0] == "snapshot-pull"):
 		// Through an OCI registry: REF is like registry.example.com/snapshots/warm:v1.
 		fs := flag.NewFlagSet(args[0], flag.ExitOnError)
@@ -359,4 +386,54 @@ func quoteAll(ss []string) string {
 		q[i] = strconv.Quote(s)
 	}
 	return strings.Join(q, ", ")
+}
+
+// snapshotRoot is where gcr snapshot-image takes its snapshots, removed
+// once pushed.
+const snapshotRoot = "/var/lib/gcr/snapshots"
+
+// snapshotImage snapshots container id and pushes it to ref as an image
+// (snapimage), returning the image's reference by digest.
+func snapshotImage(ctx context.Context, ns, id, ref string, plainHTTP bool) (string, error) {
+	c := control.NewClient(ns, id)
+	info, err := c.Info(ctx)
+	if err != nil {
+		return "", err
+	}
+	if info.IDBase != 0 {
+		return "", fmt.Errorf("%s runs in gcr's user namespace (gcr.dev/host-users), which an image made of "+
+			"a snapshot cannot carry yet: %w", id, errdefs.ErrNotImplemented)
+	}
+	if info.Containerd == "" {
+		return "", fmt.Errorf("%s's shim does not say where containerd is: it predates gcr snapshot-image", id)
+	}
+	repo, err := registry.Repository(ref, plainHTTP)
+	if err != nil {
+		return "", err
+	}
+	tag := repo.Reference.Reference
+	if tag == "" {
+		tag = "latest"
+	}
+	base, closeBase, err := snapimage.FromContainerd(ctx, info.Containerd, ns, id)
+	if err != nil {
+		return "", err
+	}
+	defer closeBase()
+
+	dir := filepath.Join(snapshotRoot, fmt.Sprintf(".image-%s-%d", id, time.Now().UnixNano()))
+	if err := c.Snapshot(ctx, dir); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", err
+	}
+	defer func() {
+		if err := snapshot.Remove(dir); err != nil {
+			fmt.Fprintf(os.Stderr, "gcr: %v (remove it with gcr snapshot-rm)\n", err)
+		}
+	}()
+	desc, err := snapimage.Push(ctx, dir, base, repo, tag)
+	if err != nil {
+		return "", err
+	}
+	return repo.Reference.Registry + "/" + repo.Reference.Repository + "@" + desc.Digest.String(), nil
 }

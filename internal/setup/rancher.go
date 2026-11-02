@@ -56,7 +56,7 @@ func (d *distro) dropInDir() (string, int, error) {
 	if m := importsLine.FindSubmatch(b); m == nil || !strings.Contains(string(m[1]), dir) {
 		return "", 0, fmt.Errorf("%s does not import %s: %s releases from v1.36.0 (v1.33 and v1.34 since 2026-03) do, "+
 			"unless a custom config-v3.toml.tmpl replaces the base template. Upgrade, or add this to that template:\n%s",
-			config, dir, d.Name, containerdDropIn(version, "/usr/local/bin/containerd-shim-gcr-v2"))
+			config, dir, d.Name, containerdDropIn(version, handler{shim: "/usr/local/bin/containerd-shim-gcr-v2"}))
 	}
 	return dir, version, nil
 }
@@ -75,7 +75,7 @@ func (d *distro) unit() (string, error) {
 // restarts d, which restarts its containerd (running containers carry
 // on: its units kill only the main process). If d does not come back
 // with it, the drop-in goes and d restarts again.
-func registerDistro(d *distro, shim string, noRestart bool, say func(string, ...any)) error {
+func registerDistro(d *distro, h handler, noRestart bool, say func(string, ...any)) error {
 	dir, version, err := d.dropInDir()
 	if err != nil {
 		return err
@@ -84,7 +84,7 @@ func registerDistro(d *distro, shim string, noRestart bool, say func(string, ...
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	changed, err := writeIfChanged(dropIn, []byte(containerdDropIn(version, shim)), 0o644)
+	changed, err := writeIfChanged(dropIn, []byte(containerdDropIn(version, h)), 0o644)
 	if err != nil || !changed {
 		return err
 	}

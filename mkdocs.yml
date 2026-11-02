@@ -80,6 +80,7 @@ nav:
   - Features:
       - Fork: fork.md
       - Moving snapshots between hosts: snapshot-registry.md
+      - Snapshots as images: snapshot-images.md
       - Time travel: time-travel.md
       - Live migration: migration.md
       - GPUs: gpus.md

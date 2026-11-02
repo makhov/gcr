@@ -65,6 +65,13 @@ type Config struct {
 	// (gcr.dev/fork-from), with every layer beneath them: required for
 	// pods to fork at all, and checked for any container if set.
 	SnapshotRoots []string `toml:"SnapshotRoots"`
+	// SnapshotImages are the images made of snapshots (gcr
+	// snapshot-image) containers may be restored from: references, or
+	// prefixes ending in "*" ("registry.example.com/snapshots/*"), or "*"
+	// for any. None by default: CRIU takes a snapshot's processes'
+	// state, privileges and all, as given, as root on the node, so an
+	// image made up to look like one could reach the node.
+	SnapshotImages []string `toml:"SnapshotImages"`
 	// TimeTravel limits what a container's annotations may ask of time
 	// travel: every point is a dump of its memory, kept on the node.
 	TimeTravel TimeTravelLimits `toml:"TimeTravel"`

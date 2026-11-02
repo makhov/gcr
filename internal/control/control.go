@@ -61,6 +61,9 @@ type Info struct {
 	IDBase uint32 `json:"idBase"`
 	// Layers are the read-only layers beneath its writable one.
 	Layers []string `json:"layers,omitempty"`
+	// Containerd is the address of the containerd that runs it, whose
+	// content store has its image (gcr snapshot-image).
+	Containerd string `json:"containerd,omitempty"`
 }
 
 type pointRequest struct {
