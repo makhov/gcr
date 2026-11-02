@@ -17,8 +17,8 @@ picks another.
 
 Its cluster-wide objects have fixed names (the RuntimeClasses `gcr` and
 `gcr-migrate`, the `gcr-migrate` admission policy, `gcr-operator`'s
-webhooks): install it once per cluster. Install it in `gcr-system`, where
-`kubectl gcr` looks for it by default.
+webhooks, the `gcr.dev` CRDs): install it once per cluster, in
+`gcr-system`.
 
 ## Values
 

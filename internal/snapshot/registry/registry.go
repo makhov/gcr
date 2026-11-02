@@ -17,6 +17,7 @@ package registry
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -102,7 +104,7 @@ func newClient(responseHeaderTimeout time.Duration) *http.Client {
 }
 
 // Repository opens the repository ref names, with the credentials in
-// Docker's config (docker login). Registries on loopback are spoken to
+// Docker's config (docker login), or in $GCR_REGISTRY_AUTH (AuthEnv). Registries on loopback are spoken to
 // over plain HTTP, as Docker does; plainHTTP forces it for others.
 func Repository(ref string, plainHTTP bool) (*remote.Repository, error) {
 	repo, err := remote.NewRepository(ref)
@@ -114,7 +116,7 @@ func Repository(ref string, plainHTTP bool) (*remote.Repository, error) {
 		host = h
 	}
 	repo.PlainHTTP = plainHTTP || host == "localhost" || net.ParseIP(host).IsLoopback()
-	creds, err := credentials.NewStoreFromDocker(credentials.StoreOptions{})
+	creds, err := credentialStore()
 	if err != nil {
 		return nil, err
 	}
@@ -705,4 +707,66 @@ func owners(layers []string) ([]string, error) {
 		dirs[i] = d
 	}
 	return dirs, nil
+}
+
+// AuthEnv, when set, holds a Docker config (config.json, or a
+// dockerconfigjson Secret's) whose credentials Repository uses in place
+// of Docker's: gcr-operator hands a Snapshot's push Secret to gcr on the
+// node this way.
+const AuthEnv = "GCR_REGISTRY_AUTH"
+
+func credentialStore() (credentials.Store, error) {
+	cfg, ok := os.LookupEnv(AuthEnv)
+	if !ok {
+		return credentials.NewStoreFromDocker(credentials.StoreOptions{})
+	}
+	return parseAuth([]byte(cfg))
+}
+
+// parseAuth reads a Docker config's credentials into a store: each
+// registry's auth (base64 user:password), username and password, or
+// identity token.
+func parseAuth(cfg []byte) (credentials.Store, error) {
+	var c struct {
+		Auths map[string]struct {
+			Auth          string `json:"auth"`
+			Username      string `json:"username"`
+			Password      string `json:"password"`
+			IdentityToken string `json:"identitytoken"`
+		} `json:"auths"`
+	}
+	if err := json.Unmarshal(cfg, &c); err != nil {
+		return nil, fmt.Errorf("$%s: %w", AuthEnv, err)
+	}
+	store := credentials.NewMemoryStore()
+	for key, a := range c.Auths {
+		cred := auth.Credential{Username: a.Username, Password: a.Password, RefreshToken: a.IdentityToken}
+		if a.Auth != "" {
+			b, err := base64.StdEncoding.DecodeString(a.Auth)
+			if err != nil {
+				return nil, fmt.Errorf("$%s: %s's auth: %w", AuthEnv, key, err)
+			}
+			user, pass, ok := strings.Cut(string(b), ":")
+			if !ok {
+				return nil, fmt.Errorf("$%s: %s's auth is not user:password", AuthEnv, key)
+			}
+			cred.Username, cred.Password = user, pass
+		}
+		// Keys are registries' hosts, or URLs (Docker Hub's is
+		// https://index.docker.io/v1/).
+		host := key
+		if u, err := url.Parse(key); err == nil && u.Host != "" {
+			host = u.Host
+		}
+		hosts := []string{host}
+		if host == "index.docker.io" || host == "docker.io" {
+			hosts = []string{"docker.io", "registry-1.docker.io", "index.docker.io"}
+		}
+		for _, h := range hosts {
+			if err := store.Put(context.Background(), h, cred); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return store, nil
 }

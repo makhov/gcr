@@ -1,5 +1,6 @@
 {{- if .Values.operator.enabled }}
-# gcr-operator: evictions of pods that opt in (gcr.dev/migrate-on-evict:
+# gcr-operator: carries out gcr.dev's operations on pods (operations.yaml);
+# evictions of pods that opt in (gcr.dev/migrate-on-evict:
 # "true") become migrations to another node; with a registry, StatefulSets'
 # pods move through checkpoints there, and pods on nodes that shut down are
 # restored from it (docs/operator.md). Needs the runtime (runtime.enabled,
@@ -45,6 +46,17 @@ rules:
   - apiGroups: [""]
     resources: [nodes]
     verbs: [get, list, watch]
+  # gcr.dev's operations, which it carries out and reports on; and the
+  # push Secrets Snapshots name.
+  - apiGroups: [gcr.dev]
+    resources: [snapshots, migrations, timepoints, rewinds]
+    verbs: [get, list, watch]
+  - apiGroups: [gcr.dev]
+    resources: [snapshots/status, migrations/status, timepoints/status, rewinds/status]
+    verbs: [update]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get]
   # Its own certificate's CA, in its webhooks' configurations.
   - apiGroups: [admissionregistration.k8s.io]
     resources: [validatingwebhookconfigurations, mutatingwebhookconfigurations]

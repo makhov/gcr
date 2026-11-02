@@ -146,7 +146,11 @@ func run(ctx context.Context, ns string, args []string) error {
 		if err != nil {
 			return fmt.Errorf("bad point %q", args[2])
 		}
-		return control.NewClient(ns, args[1]).Rewind(ctx, point)
+		if err := control.NewClient(ns, args[1]).Rewind(ctx, point); err != nil {
+			return err
+		}
+		fmt.Printf("rewound to #%d\n", point)
+		return nil
 	case (len(args) == 2 || len(args) == 3) && args[0] == "point":
 		// Taken now, with the container frozen; needs time travel on
 		// (gcr.dev/time-travel=manual takes points only this way).

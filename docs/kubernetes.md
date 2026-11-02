@@ -85,26 +85,28 @@ sudo gcr -n k8s.io snapshot $id /var/lib/gcr/snapshots/warm
 
 `kubectl gcr migrate` ([install](install.md#the-kubectl-plugin)) moves a
 running pod to another node: its processes carry on there, memory and
-all, after a pause well under a second.
+all, after a pause well under a second. It creates a
+[Migration](operations.md#migration), which [gcr-operator](operator.md)
+carries out.
 
 ```console
 $ kubectl gcr migrate pod/counter
-asking km-worker-0 for counter's user namespace
-target counter-b853d1 created; waiting for it to be scheduled
-migrating counter from km-worker-0 to km-worker-1 (http://172.20.0.4:17394)
-deleting counter
+migration/counter-tp8vv created; waiting for gcr-operator
 pod/counter moved to km-worker-1 as pod/counter-b853d1 (downtime 331ms)
 ```
 
 - `--to NODE` picks the node; by default the scheduler does, not the
   pod's own node.
-- `-registry REPO` moves it through a checkpoint in a registry instead:
-  seconds of downtime, but nothing is needed from the source once it is
-  pushed. A StatefulSet's pod moves only this way.
+- `--through-registry` moves it through a checkpoint in gcr-operator's
+  registry instead: seconds of downtime, but nothing is needed from the
+  source once it is pushed. A StatefulSet's pod moves only this way.
 - The pod gets a new name and IP (a StatefulSet's keeps its name), and
   its TCP connections reset. Services select it by its labels, which it
   keeps.
 
 [Live migration](migration.md#between-kubernetes-nodes) says how it works
-and what can move. To move pods when nodes are drained, or shut down,
-run [gcr-operator](operator.md).
+and what can move. gcr-operator also moves pods that opt in when their
+nodes are drained, or shut down.
+
+Snapshots, points on a timeline and rewinds are resources too:
+[operations as resources](operations.md).

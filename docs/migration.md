@@ -103,18 +103,21 @@ What it costs:
 
 ## Between Kubernetes nodes
 
-`kubectl gcr migrate`, gcr's kubectl plugin (`cmd/kubectl-gcr`), moves a running pod to another node:
+A [Migration](operations.md#migration) moves a running pod to another node; [gcr-operator](operator.md) carries it out. `kubectl gcr migrate`, gcr's kubectl plugin (`cmd/kubectl-gcr`), creates one and waits:
 
 ```console
 $ kubectl gcr migrate pod/counter
-asking km-worker-0 for counter's user namespace
-target counter-b853d1 created; waiting for it to be scheduled
-migrating counter from km-worker-0 to km-worker-1 (http://172.20.0.4:17394)
-deleting counter
+migration/counter-tp8vv created; waiting for gcr-operator
 pod/counter moved to km-worker-1 as pod/counter-b853d1 (downtime 331ms)
 ```
 
-That run was on a three-node k0da cluster (k0s v1.37, arm64), where a pod counting in memory carried on counting on the other node. The command took 15 s, most of it two Jobs starting; the pod's processes paused for 331 ms.
+```console
+$ kubectl get migrations
+NAME            POD       FROM          TO            DOWNTIME   PHASE       AGE
+counter-tp8vv   counter   km-worker-0   km-worker-1   331ms      Succeeded   15s
+```
+
+That run was on a three-node k0da cluster (k0s v1.37, arm64), where a pod counting in memory carried on counting on the other node. The migration took 15 s, most of it two Jobs starting; the pod's processes paused for 331 ms.
 
 How it works:
 1. **A Job on the pod's node** runs `gcr info` for its user namespace range.
@@ -122,7 +125,7 @@ How it works:
 3. **A second Job on the pod's node** runs `gcr migrate` into it. The token reaches the Job through a Secret, not its spec.
 4. **On success, the pod is deleted** and the target carries on. On failure, the target is deleted and the pod carries on.
 
-The Jobs run gcr's installer image, privileged, in the node's namespaces; the plugin finds the image from the installer's DaemonSet, or takes `-image`. Running the plugin needs a cluster admin: only `system:masters` and gcr's operator may create pods on `gcr-migrate` (`gcr.yaml`'s `ValidatingAdmissionPolicy`), since its pods make a node's shim listen for a migration.
+The Jobs run gcr's installer image, privileged, in the node's namespaces. gcr-operator creates the target: only it and `system:masters` may create pods on `gcr-migrate` (`gcr.yaml`'s `ValidatingAdmissionPolicy`), since its pods make a node's shim listen for a migration. Creating a Migration needs the `gcr-operations` role in the pod's namespace ([who may do what](operations.md#who-may-do-what)).
 
 What can move, for now:
 - **Bare pods, a ReplicaSet's (a Deployment's) and a Job's:** the target is handed over to its controller once it is Ready ([gcr-operator](operator.md#deployments-and-jobs)). Pods of other controllers are refused, since those would replace the pod with a cold one. StatefulSets' pods move [through a registry](#through-a-registry) instead.
@@ -136,10 +139,10 @@ The pod gets a new name and IP, and its TCP connections reset. Services select i
 
 ### Through a registry
 
-`-registry` moves a pod through a checkpoint in a registry instead of from node to node:
+`throughRegistry` moves a pod through a checkpoint in gcr-operator's registry (its `-registry`, chart `operator.registry`) instead of from node to node:
 
 ```sh
-kubectl gcr migrate -registry registry.example:5000/gcr-checkpoints pod/web
+kubectl gcr migrate --through-registry pod/web
 ```
 
 1. A replacement pod is created and placed by the scheduler. Its container is to start from the checkpoint (`gcr.dev/fork-from`), and its node's shim waits up to 100 s for it to arrive (`gcr.dev/fork-wait`).
@@ -147,14 +150,14 @@ kubectl gcr migrate -registry registry.example:5000/gcr-checkpoints pod/web
 3. On the replacement's node, `gcr snapshot-pull` fetches it into `/var/lib/gcr/checkpoints`, and the container starts from it, carrying on where the source stopped.
 4. The source pod is deleted.
 
-A StatefulSet's pod can't have a replacement made first, since the replacement has the same name. It is checkpointed and stopped, then deleted, and its StatefulSet creates it again. gcr-operator, started with the same `-registry` ([StatefulSets](operator.md#statefulsets)), steers that new pod to restore from the checkpoint. The scheduler places it, and the checkpoint is pulled to its node.
+A StatefulSet's pod can't have a replacement made first, since the replacement has the same name. It is checkpointed and stopped, then deleted, and its StatefulSet creates it again. gcr-operator ([StatefulSets](operator.md#statefulsets)) steers that new pod to restore from the checkpoint. The scheduler places it, and the checkpoint is pulled to its node.
 
 The downtime is seconds rather than a fraction of one: 5.5 to 6.6 s on a three-node k0da cluster (arm64, a small process, a registry on the cluster's network), about half of it the two Jobs starting. But nothing on the source node is needed once the checkpoint is pushed. That's what a node about to go away needs, and a pod that can't run a twin next to itself, such as a StatefulSet's ([gcr-operator](operator.md#statefulsets)).
 
 - **The nodes must reach the registry,** with the credentials in root's Docker config on each (`gcr snapshot-push`). `-plain-http` talks to it without TLS.
 - **Bare pods and StatefulSets' pods,** and no `emptyDir` volumes: a checkpoint holds the writable layer, not volumes.
 - **A StatefulSet's PersistentVolumeClaims follow the pod,** reattached by Kubernetes on the new node, unless their volumes are tied to a node (`local`, `hostPath`, or a node affinity on `kubernetes.io/hostname`, as local-path's have), which is refused. A bare pod's claims are refused: its replacement waits next to it, and couldn't attach a ReadWriteOnce volume the source holds.
-- **No way back once the source has stopped.** If the snapshot fails, the source runs on and the replacement is deleted. After the stop, a bare pod's replacement is left waiting for the checkpoint, and `kubectl gcr` says where it is. A StatefulSet's pod is deleted again, so that its StatefulSet starts it cold, as without gcr.
+- **No way back once the source has stopped.** If the snapshot fails, the source runs on and the replacement is deleted. After the stop, a bare pod's replacement is left waiting for the checkpoint, and the Migration's message says where it is. A StatefulSet's pod is deleted again, so that its StatefulSet starts it cold, as without gcr.
 - **The checkpoint stays in the registry,** and on the replacement's node, where the container's writable layer sits on it for as long as it runs.
 
 ## Draining nodes, and node shutdowns

@@ -188,8 +188,12 @@ kubectl run demo --image=busybox --restart=Never \
 ## The kubectl plugin
 
 `kubectl gcr migrate` moves a running pod to another node, by hand
-([Kubernetes](kubernetes.md#moving-a-pod)). Install it on your PATH, where
-kubectl finds plugins:
+([Kubernetes](kubernetes.md#moving-a-pod)); `kubectl gcr snapshot`
+pushes a running pod's container to a registry as an image that pods run
+([snapshots as images](snapshot-images.md)); `kubectl gcr point` and
+`kubectl gcr rewind` take a container back in time
+([time travel](time-travel.md#in-kubernetes)). Install it on your PATH,
+where kubectl finds plugins:
 
 ```sh
 v=$(curl -fsSLo /dev/null -w '%{url_effective}' https://github.com/makhov/gcr/releases/latest | sed 's#.*/##')
@@ -199,7 +203,10 @@ chmod +x kubectl-gcr && sudo mv kubectl-gcr /usr/local/bin/
 kubectl gcr migrate -h
 ```
 
-It needs a cluster admin's credentials: it creates pods on `gcr-migrate`.
+Each command creates one of gcr's [operations](operations.md), which
+[gcr-operator](#gcr-operator) carries out: install it too. Running the
+plugin needs the `gcr-operations` role in the pod's namespace
+([who may do what](operations.md#who-may-do-what)).
 
 ## gcr-operator
 

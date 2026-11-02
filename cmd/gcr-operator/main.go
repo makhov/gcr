@@ -15,6 +15,9 @@
 // And pods on a node shutting down, which the node's gcr shutdown-guard
 // checkpoints to the registry, are restored elsewhere: a StatefulSet's in
 // the pod it creates again, a bare pod in a replacement.
+//
+// And it carries out gcr.dev's operations on pods: Snapshots, Migrations,
+// TimePoints and Rewinds (api/v1alpha1, docs/operations.md).
 package main
 
 import (
@@ -45,6 +48,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -105,7 +109,7 @@ func main() {
 	}
 
 	op := &operator{cs: cs, opts: kubemigrate.Options{Namespace: *namespace, Image: *image, GCR: *gcrPath}, moving: map[string]bool{}, replaced: map[string]time.Time{}, restoring: map[types.UID]*kubemigrate.Restore{}, last: map[string]lastPod{},
-		owned: map[types.UID]map[types.UID]lastPod{}, nodesDown: map[string]bool{},
+		owned: map[types.UID]map[types.UID]lastPod{}, nodesDown: map[string]bool{}, operating: map[types.UID]bool{},
 		self: metav1.ObjectMeta{Namespace: *namespace, Name: os.Getenv("POD_NAME")}, node: os.Getenv("NODE_NAME")}
 	if *registry != "" {
 		if owned, err := restoresReady(ctx, cs, *webhook); err != nil {
@@ -122,6 +126,11 @@ func main() {
 			go op.watchShutdowns(ctx)
 		}
 	}
+	dyn, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	go op.watchOperations(ctx, dyn)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /evict", review(op.decide))
 	mux.HandleFunc("POST /restore", review(op.steer))
@@ -175,6 +184,8 @@ type operator struct {
 	execRun   kubemigrate.Runner
 	nodesDown map[string]bool
 	stopping  bool // on its way out: it starts no migration
+	// operating is the gcr.dev operations it carries out, by UID.
+	operating map[types.UID]bool
 	moves     sync.WaitGroup
 	// start moves a pod in the background: move, but for tests; and
 	// startRestore restores one: restore.
@@ -326,25 +337,33 @@ func (o *operator) move(pod *corev1.Pod) {
 		o.moves.Done()
 	}()
 	ctx := context.Background()
-	opts := o.opts
-	opts.Log = func(format string, args ...any) { log.Printf(key+": "+format, args...) }
-	var res kubemigrate.Result
-	var err error
-	if o.throughRegistry(pod) {
-		begin := time.Now()
-		res, err = kubemigrate.MigrateViaRegistry(ctx, o.cs, pod.Namespace, pod.Name, opts, o.registry)
-		o.mu.Lock()
-		o.replaced[key] = begin
-		o.mu.Unlock()
-	} else {
-		res, err = kubemigrate.Migrate(ctx, o.cs, pod.Namespace, pod.Name, opts)
-	}
+	res, err := o.migrate(ctx, pod, "", o.throughRegistry(pod))
 	if err != nil {
 		log.Printf("%s: migration failed, letting its eviction through: %v", key, err)
 		o.mark(ctx, pod, "failed: "+firstLine(err.Error()))
 		return
 	}
 	log.Printf("%s moved to %s as %s (downtime %s)", key, res.Node, res.Target, res.Downtime)
+}
+
+// migrate moves pod to node (or one the scheduler picks), node to node or
+// through the registry.
+func (o *operator) migrate(ctx context.Context, pod *corev1.Pod, node string, viaRegistry bool) (kubemigrate.Result, error) {
+	key := pod.Namespace + "/" + pod.Name
+	opts := o.opts
+	opts.Node = node
+	opts.Log = func(format string, args ...any) { log.Printf(key+": "+format, args...) }
+	if !viaRegistry {
+		return kubemigrate.Migrate(ctx, o.cs, pod.Namespace, pod.Name, opts)
+	}
+	begin := time.Now()
+	res, err := kubemigrate.MigrateViaRegistry(ctx, o.cs, pod.Namespace, pod.Name, opts, o.registry)
+	if o.throughRegistry(pod) {
+		o.mu.Lock()
+		o.replaced[key] = begin
+		o.mu.Unlock()
+	}
+	return res, err
 }
 
 // waitingOnNode counts the pods on the operator's own node that would
