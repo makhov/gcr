@@ -77,6 +77,37 @@ StatefulSets' pods move through registry.example.com/gcr/checkpoints, and pods o
   cluster's `gcr.yaml` is older than the operator: apply the release's
   `gcr.yaml` again.
 
+### A registry for snapshots
+
+Snapshots of pods ([below](#asking-for-an-operation)) become ordinary
+container images, in whatever registry a cluster keeps them in. Configure
+it once on the operator and a Snapshot needs nothing but a pod's name:
+`--set operator.snapshotRegistry=registry.example.com/snapshots` (and
+`--set operator.snapshotPlainHTTP=true` for a registry without TLS);
+without the chart:
+
+```sh
+kubectl -n gcr-system patch deployment gcr-operator --type=json -p '[
+  {"op": "add", "path": "/spec/template/spec/containers/0/args",
+   "value": ["-snapshot-registry", "registry.example.com/snapshots"]}]'
+kubectl -n gcr-system logs deployment/gcr-operator | grep Snapshots
+```
+
+```
+Snapshots that name no image go to registry.example.com/snapshots, as NAMESPACE/POD tagged with the Snapshot's name
+```
+
+- **It is not `-registry`.** Checkpoints there are the operator's own
+  business, written and read by it; snapshot images are something people
+  run on purpose. Keep them in separate repositories, or separate
+  registries, and give each the credentials it needs.
+- **The nodes push,** as they do for checkpoints, with the credentials in
+  root's Docker config there — unless the Snapshot names a `pushSecret`
+  of its own, which is how a tenant pushes to its own repository
+  ([credentials](operations.md#snapshot)).
+- **A Snapshot can still say where it goes:** `spec.registry` for
+  another repository, `spec.image` to name the image outright.
+
 ### Where it runs
 
 The operator moves pods off the node it runs on too, and holds its own
@@ -320,6 +351,72 @@ spec:
 
 An Indexed Job's pod is restored in the new pod of the same index.
 
+## Asking for an operation
+
+A drain and a node shutdown move pods by themselves. The same operations
+can also be asked for: `Snapshot`, `Migration`, `TimePoint` and `Rewind`
+are resources in the `gcr.dev/v1alpha1` API, whose CRDs come with the
+operator, and it carries each one out and reports on it in its status.
+
+| Kind | What it does |
+| --- | --- |
+| `Snapshot` | Pushes a pod's container to a registry as an image that pods run, carrying on from where it was ([snapshots as images](snapshot-images.md)). |
+| `Migration` | Moves a pod to another node, its processes running on. |
+| `TimePoint` | Takes a point on a container's timeline ([time travel](time-travel.md)). |
+| `Rewind` | Takes a container back to a point on its timeline. |
+
+With a registry configured for snapshots
+([above](#a-registry-for-snapshots)), a Snapshot is a pod's name and
+nothing else:
+
+```yaml
+apiVersion: gcr.dev/v1alpha1
+kind: Snapshot
+metadata:
+  name: counter-v1
+  namespace: team-a
+spec:
+  pod: counter
+```
+
+```console
+$ kubectl apply -f snapshot.yaml
+snapshot.gcr.dev/counter-v1 created
+$ kubectl wait --for=jsonpath='{.status.phase}'=Succeeded snapshot/counter-v1
+snapshot.gcr.dev/counter-v1 condition met
+$ kubectl get snapshot counter-v1 -o jsonpath='{.status.image}{"\n"}'
+registry.example.com/snapshots/team-a/counter@sha256:5131e882dfe8c88d17f895ef8dc5b693f0e30f28e4cc9e0936943c2322c86d61
+```
+
+That digest is the image to run: put it in a Deployment on the `gcr`
+RuntimeClass and every replica starts from where the snapshotted
+container was. The pod that was snapshotted keeps running.
+
+Each operation is carried out once: it has no phase until the operator
+picks it up, then `Running`, then `Succeeded` or `Failed` with
+`status.message` saying why. Changing its spec afterwards does nothing —
+create another. `kubectl get gcr` lists all four kinds.
+
+`kubectl gcr` creates them and waits, which is the short way to the same
+thing:
+
+```console
+$ kubectl gcr snapshot -n team-a pod/counter
+snapshot/counter-mz7qd created; waiting for gcr-operator
+registry.example.com/snapshots/team-a/counter@sha256:5131e882dfe8c88d17f895ef8dc5b693f0e30f28e4cc9e0936943c2322c86d61
+```
+
+The plugin lets the API server name the Snapshot (`counter-mz7qd`), so
+the tag it pushes is that name: fine when the digest is what you use, and
+not if you want to find the image by tag later. For a tag you choose,
+write the resource with a `metadata.name` of your own, as above.
+
+[Operations as resources](operations.md) is the reference: every field of
+all four kinds, what each status says, and
+[who may create them](operations.md#who-may-do-what) — creating one needs
+the `gcr-operations` role in the pod's namespace, so this is not a
+cluster-admin's job.
+
 ## Watching it
 
 The operator marks the pod it is moving with the annotation
@@ -399,6 +496,8 @@ Set in the Deployment's `args`:
 | --- | --- | --- |
 | `-registry REPO` | | Registry repository (`host[:port]/path`) for StatefulSets and node shutdowns. Without it, StatefulSets' pods are evicted. |
 | `-plain-http` | off | Talk to the registry without TLS. |
+| `-snapshot-registry REPO` | | Registry repository for Snapshots that name no image ([above](#a-registry-for-snapshots)). Without it, such a Snapshot fails. |
+| `-snapshot-plain-http` | off | Talk to that registry without TLS. |
 | `-image IMAGE` | the installer's image, or `busybox:1.37` | The image the moves' Jobs run: anything with `nsenter`. |
 | `-gcr PATH` | `/usr/local/bin/gcr` | gcr on the nodes. |
 | `-namespace NS` | its own | Where the Jobs run, and the Service. |

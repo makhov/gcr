@@ -7,10 +7,12 @@
 // moves a running pod to another node: its processes carry on there,
 // memory and all, after a pause of well under a second (a Migration).
 //
-//	kubectl gcr snapshot [-n NAMESPACE] [-c CONTAINER] [--push-secret SECRET] pod/NAME IMAGE
+//	kubectl gcr snapshot [-n NAMESPACE] [-c CONTAINER] [--registry REPO] [--push-secret SECRET] pod/NAME [IMAGE]
 //
 // pushes a snapshot of a running pod's container as an image: a pod
 // that runs it carries on from where the container was (a Snapshot).
+// Without an IMAGE, it goes to the registry gcr-operator keeps snapshots
+// in; either way the image pushed is printed, by digest.
 //
 //	kubectl gcr point [-n NAMESPACE] [-c CONTAINER] pod/NAME [LABEL]
 //	kubectl gcr rewind [-n NAMESPACE] [-c CONTAINER] pod/NAME POINT
@@ -40,7 +42,7 @@ import (
 )
 
 const usage = `usage: kubectl gcr migrate [-n NAMESPACE] [--to NODE] [--through-registry] pod/NAME
-       kubectl gcr snapshot [-n NAMESPACE] [-c CONTAINER] [--push-secret SECRET] [--plain-http] pod/NAME IMAGE
+       kubectl gcr snapshot [-n NAMESPACE] [-c CONTAINER] [--registry REPO] [--push-secret SECRET] [--plain-http] pod/NAME [IMAGE]
        kubectl gcr point [-n NAMESPACE] [-c CONTAINER] pod/NAME [LABEL]
        kubectl gcr rewind [-n NAMESPACE] [-c CONTAINER] pod/NAME POINT`
 
@@ -50,7 +52,7 @@ var commands = map[string]struct {
 	min, max int
 }{
 	"migrate":  {"Migration", 1, 1},
-	"snapshot": {"Snapshot", 2, 2},
+	"snapshot": {"Snapshot", 1, 2},
 	"point":    {"TimePoint", 1, 2},
 	"rewind":   {"Rewind", 2, 2},
 }
@@ -71,6 +73,7 @@ func main() {
 	to := fs.String("to", "", "migrate: the node to move it to (default: one the scheduler picks, not its own)")
 	viaRegistry := fs.Bool("through-registry", false, "migrate: move it through a checkpoint in gcr-operator's registry, rather than node to node: seconds of downtime, but nothing needed from the source once pushed (a StatefulSet's pod always moves this way)")
 	container := fs.String("c", "", "snapshot, point, rewind: the container (default: the pod's only one)")
+	registry := fs.String("registry", "", "snapshot: put the image in this registry repository (host[:port]/path) when no IMAGE is given (default: gcr-operator's -snapshot-registry)")
 	pushSecret := fs.String("push-secret", "", "snapshot: a dockerconfigjson Secret in the pod's namespace with credentials for IMAGE's registry (default: the node's)")
 	plainHTTP := fs.Bool("plain-http", false, "snapshot: talk to the registry without TLS")
 	timeout := fs.Duration("timeout", 10*time.Minute, "how long to wait for it")
@@ -110,7 +113,7 @@ func main() {
 	case "migrate":
 		obj = &v1alpha1.Migration{ObjectMeta: meta, Spec: v1alpha1.MigrationSpec{Pod: name, Node: *to, ThroughRegistry: *viaRegistry}}
 	case "snapshot":
-		obj = &v1alpha1.Snapshot{ObjectMeta: meta, Spec: v1alpha1.SnapshotSpec{Target: target, Image: fs.Arg(1), PushSecret: *pushSecret, PlainHTTP: *plainHTTP}}
+		obj = &v1alpha1.Snapshot{ObjectMeta: meta, Spec: v1alpha1.SnapshotSpec{Target: target, Image: fs.Arg(1), Registry: *registry, PushSecret: *pushSecret, PlainHTTP: *plainHTTP}}
 	case "point":
 		obj = &v1alpha1.TimePoint{ObjectMeta: meta, Spec: v1alpha1.TimePointSpec{Target: target, Label: fs.Arg(1)}}
 	case "rewind":

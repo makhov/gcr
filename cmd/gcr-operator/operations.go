@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"regexp"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -188,12 +190,43 @@ func (o *operator) logFor(u *unstructured.Unstructured) kubemigrate.Options {
 	return opts
 }
 
+// imageTag is what a Snapshot's name has to look like to be the tag of
+// the image it pushes: the registries' own rule.
+var imageTag = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$`)
+
+// snapshotRef is the image s pushes to, and whether that is the registry
+// gcr-operator keeps snapshots in (its -snapshot-registry, usual) rather
+// than one s names itself. A Snapshot that gives no image goes to the
+// repository it names (spec.registry) or else to that one, as
+// NAMESPACE/POD tagged with the Snapshot's own name.
+func snapshotRef(s *v1alpha1.Snapshot, usual string) (ref string, ours bool, err error) {
+	if s.Spec.Image != "" {
+		return s.Spec.Image, false, nil
+	}
+	repo, ours := s.Spec.Registry, false
+	if repo == "" {
+		repo, ours = usual, true
+	}
+	if repo == "" {
+		return "", false, errors.New("no image, and gcr-operator keeps snapshots in no registry: give spec.image or spec.registry, or run the operator with -snapshot-registry")
+	}
+	if !imageTag.MatchString(s.Name) {
+		return "", false, fmt.Errorf("the name %q cannot be an image tag: give spec.image", s.Name)
+	}
+	return fmt.Sprintf("%s/%s/%s:%s", strings.TrimSuffix(repo, "/"), s.Namespace, s.Spec.Pod, s.Name), ours, nil
+}
+
 func (o *operator) snapshot(ctx context.Context, u *unstructured.Unstructured, pod *corev1.Pod) (map[string]any, error) {
 	var s v1alpha1.Snapshot
 	if err := v1alpha1.FromUnstructured(u, &s); err != nil {
 		return nil, err
 	}
-	r := kubemigrate.SnapshotRequest{Container: s.Spec.Container, Ref: s.Spec.Image, PlainHTTP: s.Spec.PlainHTTP}
+	ref, ours, err := snapshotRef(&s, o.snapshotRegistry.Repository)
+	if err != nil {
+		return nil, err
+	}
+	r := kubemigrate.SnapshotRequest{Container: s.Spec.Container, Ref: ref,
+		PlainHTTP: s.Spec.PlainHTTP || (ours && o.snapshotRegistry.PlainHTTP)}
 	if s.Spec.PushSecret != "" {
 		sec, err := o.cs.CoreV1().Secrets(s.Namespace).Get(ctx, s.Spec.PushSecret, metav1.GetOptions{})
 		if err != nil {

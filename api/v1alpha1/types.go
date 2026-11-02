@@ -84,8 +84,14 @@ type Snapshot struct {
 
 type SnapshotSpec struct {
 	Target `json:",inline"`
-	// Image is the reference to push to.
-	Image string `json:"image"`
+	// Image is the reference to push to. Without it, the image goes to
+	// Registry, or else to the registry gcr-operator keeps Snapshots in
+	// (-snapshot-registry), as NAMESPACE/POD tagged with the Snapshot's
+	// name. Status.Image is what was pushed, by digest, either way.
+	Image string `json:"image,omitempty"`
+	// Registry is the repository (host[:port]/path) to put the image in
+	// when Image is not given, instead of gcr-operator's own.
+	Registry string `json:"registry,omitempty"`
 	// PushSecret names a Secret of type kubernetes.io/dockerconfigjson,
 	// in the Snapshot's namespace, with credentials for Image's registry.
 	// Without it, the node's own are used (root's docker login there).

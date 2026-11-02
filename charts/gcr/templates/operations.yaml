@@ -51,7 +51,6 @@ spec:
               type: object
               required:
                 - pod
-                - image
               properties:
                 pod:
                   type: string
@@ -62,7 +61,11 @@ spec:
                   description: "The pod's container; may be left out in a pod with one."
                 image:
                   type: string
-                  description: The image reference to push to.
+                  description: "The image reference to push to. Without it, the image goes to this Snapshot's registry, or else to the one gcr-operator keeps snapshots in (-snapshot-registry), as NAMESPACE/POD tagged with this Snapshot's name. status.image is what was pushed, by digest, either way."
+                  minLength: 1
+                registry:
+                  type: string
+                  description: "The repository (host[:port]/path) to put the image in when no image is given, instead of gcr-operator's own."
                   minLength: 1
                 pushSecret:
                   type: string

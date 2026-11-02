@@ -54,6 +54,28 @@ kubectl wait --for=jsonpath='{.status.phase}'=Succeeded snapshot/counter-v1
 kubectl get snapshot counter-v1 -o jsonpath='{.status.image}'   # the image, by digest
 ```
 
+**Or let the cluster decide where snapshots go.** Configured with a
+registry for them
+([a registry for snapshots](operator.md#a-registry-for-snapshots)),
+gcr-operator names the image itself — `REGISTRY/NAMESPACE/POD`, tagged
+with the Snapshot's name — and a Snapshot is a pod's name and nothing
+else:
+
+```yaml
+apiVersion: gcr.dev/v1alpha1
+kind: Snapshot
+metadata:
+  name: counter-v1
+spec:
+  pod: counter
+```
+
+`kubectl gcr snapshot pod/counter` does the same without the file, with
+the API server naming the Snapshot, and so the tag: write the resource
+yourself for a tag you choose. Read `status.image` for what was pushed,
+by digest, whichever way you name it; that digest is what a pod should
+run.
+
 ## Building one in CI
 
 `gcr snapshot-build` makes the same image on any host with containerd
