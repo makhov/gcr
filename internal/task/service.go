@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	goruntime "runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -48,6 +49,7 @@ import (
 	"github.com/makhov/gcr/internal/netpolicy"
 	"github.com/makhov/gcr/internal/nodeshutdown"
 	"github.com/makhov/gcr/internal/ocispec"
+	"github.com/makhov/gcr/internal/snapimage"
 	"github.com/makhov/gcr/internal/snapshot"
 	"github.com/makhov/gcr/internal/supervisor"
 	"github.com/makhov/gcr/internal/timetravel"
@@ -220,6 +222,17 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		if err != nil {
 			return prep, err
 		}
+		// An image made of a snapshot (gcr snapshot-image) restores its
+		// processes, as a fork of the snapshot its top layer holds.
+		var fromImage bool
+		if forkFrom == "" && r.Checkpoint == "" && !ocispec.Sandbox(spec) {
+			if forkFrom, err = imageSnapshot(spec, rootfs, cfg.SnapshotImages); err != nil {
+				return prep, err
+			}
+			if fromImage = forkFrom != ""; fromImage {
+				prep.HideInRootfs = snapimage.Dir
+			}
+		}
 		prep.ForkFrom = forkFrom
 		if v, ok := spec.Annotations[container.AnnotationForkSignal]; ok {
 			if forkFrom == "" {
@@ -231,6 +244,8 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			}
 		}
 		switch {
+		case fromImage:
+			// Its layers are the image's.
 		case forkFrom != "":
 			prep.Layers, err = container.ForkLayers(forkFrom)
 		case r.Checkpoint != "":
@@ -264,6 +279,10 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		ok, why, err := userns.Decide(spec, cfg.UserNamespaces)
 		if err != nil {
 			return prep, err
+		}
+		if ok && fromImage {
+			return prep, fmt.Errorf("an image made of a snapshot restores outside gcr's user namespaces, "+
+				"and this container would run in one (%s): %w", why, errdefs.ErrNotImplemented)
 		}
 		if ok && forkKey != "" {
 			// The snapshot's writable layer, which the fork keeps
@@ -499,7 +518,8 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 
 	h := control.Handlers{
 		Info: func() control.Info {
-			return control.Info{IDBase: c.IDBase(), Layers: c.Layers()}
+			return control.Info{IDBase: c.IDBase(), Layers: c.Layers(),
+				Containerd: strings.TrimSuffix(os.Getenv("TTRPC_ADDRESS"), ".ttrpc")}
 		},
 		Migrate: func(ctx context.Context, target, token string, opts migrate.Options) (migrate.Result, error) {
 			return s.migrateOut(ctx, c, ex, target, token, opts)
@@ -1106,6 +1126,35 @@ var workloadAnnotations = []string{
 	container.AnnotationLazyRestore, container.AnnotationMemoryMerge,
 	migrate.AnnotationIn, migrate.AnnotationToken,
 	timetravel.AnnotationTrigger, timetravel.AnnotationInterval, timetravel.AnnotationKeep,
+}
+
+// imageSnapshot returns the state directory of the snapshot the image
+// in rootfs carries (snapimage), "" if it carries none. The handler must
+// allow restoring the image (SnapshotImages): CRIU takes what a snapshot
+// says as given, as root, on the node.
+func imageSnapshot(spec *specs.Spec, rootfs []mount.Mount, allowed []string) (string, error) {
+	dir := snapimage.Find(rootfs)
+	if dir == "" {
+		return "", nil
+	}
+	image := spec.Annotations[snapimage.AnnotationImageName]
+	if !snapimage.Allowed(image, allowed) {
+		name := image
+		if name == "" {
+			name = "the container's image"
+		}
+		return "", fmt.Errorf("%s is a snapshot (gcr snapshot-image), and this runtime handler restores "+
+			"only images that match its SnapshotImages %q: %w", name, allowed, errdefs.ErrPermissionDenied)
+	}
+	info, err := snapimage.ReadInfo(dir)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", image, err)
+	}
+	if info.Arch != goruntime.GOARCH {
+		return "", fmt.Errorf("%s is a snapshot of %s processes, and this node is %s: %w",
+			image, info.Arch, goruntime.GOARCH, errdefs.ErrFailedPrecondition)
+	}
+	return dir, nil
 }
 
 // waitForkSource is forkSource, tried again for as long as

@@ -18,6 +18,12 @@ runtime:
   # the installer labels gcr.dev/runtime=ready. false where gcr is on every
   # node, put there otherwise (k0da).
   readyNodesOnly: true
+  # Images made of snapshots (kubectl gcr snapshot) that pods on gcr may
+  # run, restoring the processes they hold: references, prefixes ending
+  # in * ("registry.example.com/snapshots/*"), or "*" for any. None by
+  # default: a snapshot's state is restored as root on the node, as
+  # given, so only images from where your snapshots go should be.
+  snapshotImages: []
   installer:
     # A DaemonSet that runs `gcr setup` on every node and labels it
     # gcr.dev/runtime=ready. Off where something else puts gcr on the nodes

@@ -60,7 +60,7 @@ func TestRegisterContainerd(t *testing.T) {
 				}
 			}
 			for i := range 2 { // a second run changes nothing
-				changed, _, err := registerContainerd(config, "/x/shim", tc.major, quiet)
+				changed, _, err := registerContainerd(config, handler{shim: "/x/shim"}, tc.major, quiet)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -108,7 +108,7 @@ func TestRegisterContainerdUndo(t *testing.T) {
 	if err := os.WriteFile(config, []byte(old), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	changed, undo, err := registerContainerd(config, "/x/shim", 2, quiet)
+	changed, undo, err := registerContainerd(config, handler{shim: "/x/shim"}, 2, quiet)
 	if err != nil || !changed {
 		t.Fatalf("%v, %v", changed, err)
 	}
@@ -128,7 +128,7 @@ func TestRegisterK0s(t *testing.T) {
 	if err := os.WriteFile(k0sConfig, []byte("# k0s_managed=true\nversion = 3\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if changed, err := registerK0s("/x/shim", quiet); err != nil || !changed {
+	if changed, err := registerK0s(handler{shim: "/x/shim"}, quiet); err != nil || !changed {
 		t.Fatalf("%v, %v", changed, err)
 	}
 	if got := read(t, filepath.Join(dir, "containerd.d", "gcr.toml")); !strings.Contains(got, "version = 3") ||
@@ -142,7 +142,7 @@ func TestRegisterK0s(t *testing.T) {
 	if err := os.WriteFile(k0sConfig, []byte("version = 3\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registerK0s("/x/shim", quiet); err == nil || !strings.Contains(err.Error(), "not managed by k0s") {
+	if _, err := registerK0s(handler{shim: "/x/shim"}, quiet); err == nil || !strings.Contains(err.Error(), "not managed by k0s") {
 		t.Fatalf("unmanaged: %v", err)
 	}
 }
@@ -223,7 +223,7 @@ func TestRegisterK0sContainerd17(t *testing.T) {
 	if err := os.WriteFile(k0sContainerd, []byte(fake), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registerK0s("/x/shim", quiet); err != nil {
+	if _, err := registerK0s(handler{shim: "/x/shim"}, quiet); err != nil {
 		t.Fatal(err)
 	}
 	if got := read(t, filepath.Join(dir, "containerd.d", "gcr.toml")); !strings.Contains(got, "version = 2") ||
@@ -251,7 +251,7 @@ func TestContainerdMajor(t *testing.T) {
 
 func TestDropInMigrateHandler(t *testing.T) {
 	for _, version := range []int{2, 3} {
-		d := containerdDropIn(version, "/x/shim")
+		d := containerdDropIn(version, handler{shim: "/x/shim"})
 		for _, want := range []string{"runtimes.gcr]", "runtimes.gcr-migrate]", "runtimes.gcr-migrate.options]", "'gcr.dev/migrate-in', 'gcr.dev/migrate-token'", "'gcr.dev/fork-from', 'gcr.dev/fork-wait'",
 			"SnapshotRoots = ['/var/lib/gcr/checkpoints', '/var/lib/gcr/layers']"} {
 			if !strings.Contains(d, want) {
@@ -260,6 +260,13 @@ func TestDropInMigrateHandler(t *testing.T) {
 		}
 		if strings.Count(d, "PodAnnotations = ") != 1 {
 			t.Errorf("version %d: PodAnnotations on more than gcr-migrate:\n%s", version, d)
+		}
+		if strings.Contains(d, "SnapshotImages") {
+			t.Errorf("version %d: SnapshotImages without any asked for:\n%s", version, d)
+		}
+		d = containerdDropIn(version, handler{shim: "/x/shim", snapshotImages: []string{"reg.example.com/snaps/*", "other/app"}})
+		if want := "runtimes.gcr.options]\n  SnapshotImages = [\"reg.example.com/snaps/*\", \"other/app\"]\n"; !strings.Contains(d, want) {
+			t.Errorf("version %d drop-in has no %q:\n%s", version, want, d)
 		}
 	}
 }

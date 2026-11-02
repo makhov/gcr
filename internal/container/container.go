@@ -152,6 +152,10 @@ type Prepared struct {
 	// ForkSignal, if not 0, is sent to a fork's init once it is restored
 	// (AnnotationForkSignal).
 	ForkSignal unix.Signal
+	// HideInRootfs, if set, is a path in the rootfs removed from the
+	// container's view before it starts: the snapshot an image made of
+	// one carries (snapimage), which the fork restores from the layer.
+	HideInRootfs string
 	// Layers are read-only layers mounted between the writable layer and
 	// the image's, top first (ForkLayers, or a checkpoint's ReadLayers).
 	Layers []string
@@ -408,6 +412,12 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 			}
 		}()
 	}
+	if prep.HideInRootfs != "" {
+		// Removed through the overlay: whiteouts in the writable layer.
+		if err := os.RemoveAll(filepath.Join(rootfs, prep.HideInRootfs)); err != nil {
+			return nil, fmt.Errorf("hide %s: %w", prep.HideInRootfs, err)
+		}
+	}
 	if !filepath.IsAbs(spec.Root.Path) {
 		spec.Root.Path = filepath.Join(o.Bundle, spec.Root.Path)
 	}
@@ -618,6 +628,18 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 	if err := userns.CheckImages(images, idExtents(c.cfg.UIDMappings), idExtents(c.cfg.GIDMappings)); err != nil {
 		return fmt.Errorf("restore: %w", err)
 	}
+	if images == c.forkImages {
+		// A fork's images come from a snapshot, which may come from
+		// anywhere (an image made of one): its threads' privileges must
+		// be what this container's spec allows.
+		var uid uint32
+		if c.spec != nil && c.spec.Process != nil {
+			uid = c.spec.Process.User.UID
+		}
+		if err := checkCreds(images, c.cfg, uid); err != nil {
+			return fmt.Errorf("restore: %w", err)
+		}
+	}
 	saved, err := gpu.Load(images)
 	if err != nil {
 		return err
@@ -658,6 +680,14 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 		c.lazyDaemon.stop()
 		c.lazyDaemon, keepWork = d, onDemand
 	}
+	// CRIU sets the hostname the snapshot's UTS namespace had, in the
+	// one the container joins: a fork is another pod, which keeps its own.
+	var hostname string
+	if uts := c.cfg.Namespaces.PathOf(configs.NEWUTS); uts != "" && images == c.forkImages {
+		if hostname, err = hostnameOf(uts); err != nil {
+			return fmt.Errorf("restore: hostname: %w", err)
+		}
+	}
 	opts := &libcontainer.CriuOpts{
 		ImagesDirectory: images,
 		WorkDirectory:   work,
@@ -684,6 +714,15 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 	}
 	if !keepWork {
 		_ = os.RemoveAll(work)
+	}
+	if hostname != "" {
+		pid, err := proc.Pid()
+		if err == nil {
+			err = setHostname(pid, hostname)
+		}
+		if err != nil {
+			return fmt.Errorf("restore: hostname: %w", err)
+		}
 	}
 	// libcontainer leaves a restored container in a state that refuses
 	// pause and checkpoint; loading it from disk gives the running state,

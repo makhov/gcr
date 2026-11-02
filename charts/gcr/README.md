@@ -30,6 +30,7 @@ webhooks): install it once per cluster. Install it in `gcr-system`, where
 | `imagePullSecrets` | `[]` | |
 | `runtime.enabled` | `true` | The RuntimeClasses, the admission policy guarding `gcr-migrate`, and the installer. |
 | `runtime.readyNodesOnly` | `true` | The RuntimeClasses schedule pods only onto nodes labelled `gcr.dev/runtime=ready`, which the installer labels. `false` where gcr is on every node, put there otherwise. |
+| `runtime.snapshotImages` | `[]` | Images made of snapshots (`kubectl gcr snapshot`) that pods may run, restoring their processes: references, prefixes ending in `*`, or `*` for any ([snapshots as images](../../docs/snapshot-images.md)). |
 | `runtime.installer.enabled` | `true` | The DaemonSet that runs `gcr setup` on every node. Off where nodes get gcr otherwise (k0da), labelled `gcr.dev/runtime=ready`. |
 | `runtime.installer.setupArgs` | `""` | Options for `gcr setup`: `-containerd-config FILE -containerd-unit UNIT` for k3s and RKE2. |
 | `runtime.installer.nodeSelector` | `{}` | Nodes to install gcr on. |

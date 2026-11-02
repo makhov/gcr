@@ -79,9 +79,14 @@ spec:
                 fieldRef: {fieldPath: spec.nodeName}
             # Passed on to gcr setup: -containerd-config and
             # -containerd-unit for distributions that run containerd their
-            # own way (k3s, RKE2), -docker, -no-restart.
+            # own way (k3s, RKE2), -docker, -no-restart; and
+            # runtime.snapshotImages.
+            {{- $args := .Values.runtime.installer.setupArgs }}
+            {{- with .Values.runtime.snapshotImages }}
+            {{- $args = printf "%s -snapshot-images=%s" $args (join "," .) | trim }}
+            {{- end }}
             - name: GCR_SETUP_ARGS
-              value: {{ .Values.runtime.installer.setupArgs | quote }}
+              value: {{ $args | quote }}
           volumeMounts:
             - {name: host, mountPath: /host}
           {{- with .Values.runtime.installer.resources }}

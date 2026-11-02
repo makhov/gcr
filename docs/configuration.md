@@ -71,6 +71,7 @@ error that names the setting and the values it accepts.
 | `MigrationTLS` | a table: `Cert`, `Key`, `CA` (file paths) | unset: plain HTTP |
 | `PodAnnotations` | restricted annotations pods may use | none |
 | `SnapshotRoots` | directories snapshots may be forked from | none |
+| `SnapshotImages` | images made of snapshots that containers may be restored from | none |
 | `TimeTravel` | a table: `MinInterval` (duration), `MaxKeep` (number) | `100ms`, `50` |
 
 ### `UserNamespaces`
@@ -265,6 +266,20 @@ writable by no one else from the root down: whoever could write a
 snapshot could choose what CRIU restores and what a fork mounts. Pods
 may fork only where this is set. Include the store `gcr snapshot-pull`
 puts layers in (`/var/lib/gcr/layers` by default).
+
+### `SnapshotImages`
+
+The images made of snapshots ([snapshots as images](snapshot-images.md))
+that containers may be restored from: image references, prefixes ending
+in `*` (`'registry.example.com/snapshots/*'`), or `'*'` for any. An
+image is matched by the name the pod gives it. A container whose image
+holds a snapshot and matches none fails to start; with none set, every
+such container does. `gcr setup -snapshot-images` and the Helm chart's
+`runtime.snapshotImages` set it on the `gcr` handler.
+
+CRIU restores a snapshot's processes as root on the node, from state it
+takes as given, so the list should name only registries that just those
+you trust can push to.
 
 ### `TimeTravel`
 

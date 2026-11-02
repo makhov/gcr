@@ -66,7 +66,17 @@ type Options struct {
 	// NoRestart leaves containerd (and dockerd) running as they are: the
 	// configuration takes effect on their next start.
 	NoRestart bool
-	Out       io.Writer
+	// SnapshotImages are the images made of snapshots the gcr handler
+	// restores (config.Config's SnapshotImages): none if empty.
+	SnapshotImages []string
+	Out            io.Writer
+}
+
+// handler is what gcr's containerd runtime handlers are registered with.
+type handler struct {
+	// shim is the shim's path.
+	shim           string
+	snapshotImages []string
 }
 
 // Run installs what this gcr carries (payload) and registers the runtime
@@ -155,15 +165,16 @@ func Run(o Options) error {
 		}
 	}
 
+	h := handler{shim: shim, snapshotImages: o.SnapshotImages}
 	if _, err := os.Stat(k0sConfig); err == nil {
-		if _, err := registerK0s(shim, say); err != nil {
+		if _, err := registerK0s(h, say); err != nil {
 			return fmt.Errorf("k0s: %w", err)
 		}
 	} else if d := detectDistro(); d != nil {
-		if err := registerDistro(d, shim, o.NoRestart, say); err != nil {
+		if err := registerDistro(d, h, o.NoRestart, say); err != nil {
 			return fmt.Errorf("%s: %w", d.Name, err)
 		}
-	} else if err := setupContainerd(o, shim, say); err != nil {
+	} else if err := setupContainerd(o, h, say); err != nil {
 		return fmt.Errorf("containerd: %w", err)
 	}
 	if o.Docker {
@@ -184,8 +195,8 @@ func Run(o Options) error {
 // setupContainerd registers gcr with containerd and restarts it, having
 // checked containerd loads the new configuration; if it would not, or
 // does not start with it, the configuration is put back as it was.
-func setupContainerd(o Options, shim string, say func(string, ...any)) error {
-	changed, undo, err := registerContainerd(o.ContainerdConfig, shim, containerdMajor("containerd"), say)
+func setupContainerd(o Options, h handler, say func(string, ...any)) error {
+	changed, undo, err := registerContainerd(o.ContainerdConfig, h, containerdMajor("containerd"), say)
 	if err != nil {
 		if undo != nil {
 			undo()
@@ -220,12 +231,21 @@ func setupContainerd(o Options, shim string, say func(string, ...any)) error {
 //
 // It names the shim by its path: containerd would look for it on its own
 // PATH, which k0s's, for one, sets for itself.
-func containerdDropIn(version int, shim string) string {
+func containerdDropIn(version int, h handler) string {
 	table := `[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.gcr]`
 	if version < 3 {
 		table = `[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gcr]`
 	} else {
 		version = 3
+	}
+	options := ""
+	if len(h.snapshotImages) > 0 {
+		// Images made of snapshots it restores (gcr snapshot-image).
+		quoted := make([]string, len(h.snapshotImages))
+		for i, img := range h.snapshotImages {
+			quoted[i] = strconv.Quote(img)
+		}
+		options = fmt.Sprintf("%s\n  SnapshotImages = [%s]\n", strings.Replace(table, ".gcr]", ".gcr.options]", 1), strings.Join(quoted, ", "))
 	}
 	return fmt.Sprintf(`# Written by gcr setup.
 version = %d
@@ -235,7 +255,7 @@ version = %d
   # gcr's pod annotations; the handler's PodAnnotations says which a pod
   # may use (docs/configuration.md).
   pod_annotations = ['gcr.dev/*']
-
+%s
 # The same runtime for the targets of migrations between nodes (kubectl gcr
 # migrate): its pods may make the shim listen for one, or restore from a
 # checkpoint pulled to the node. gcr.yaml's admission policy lets only
@@ -247,8 +267,8 @@ version = %d
 %s
   PodAnnotations = ['gcr.dev/migrate-in', 'gcr.dev/migrate-token', 'gcr.dev/userns-base', 'gcr.dev/fork-from', 'gcr.dev/fork-wait']
   SnapshotRoots = ['%s', '%s']
-`, version, table, RuntimeType, shim,
-		strings.Replace(table, ".gcr]", ".gcr-migrate]", 1), RuntimeType, shim,
+`, version, table, RuntimeType, h.shim, options,
+		strings.Replace(table, ".gcr]", ".gcr-migrate]", 1), RuntimeType, h.shim,
 		strings.Replace(table, ".gcr]", ".gcr-migrate.options]", 1), CheckpointDir, registry.DefaultStore)
 }
 
@@ -294,7 +314,7 @@ func rootVersion(b []byte, major int) int {
 // makes config import conf.d if it does not: containerd imports it by
 // default, but not once there is a config file without it. It says
 // whether anything changed, and undo puts things back as they were.
-func registerContainerd(config, shim string, major int, say func(string, ...any)) (changed bool, undo func(), err error) {
+func registerContainerd(config string, h handler, major int, say func(string, ...any)) (changed bool, undo func(), err error) {
 	confd := filepath.Join(filepath.Dir(config), "conf.d")
 	dropIn := filepath.Join(confd, "gcr.toml")
 	pattern := filepath.Join(confd, "*.toml")
@@ -320,7 +340,7 @@ func registerContainerd(config, shim string, major int, say func(string, ...any)
 			undos[i]()
 		}
 	}
-	changed, err = writeIfChanged(dropIn, []byte(containerdDropIn(version, shim)), 0o644)
+	changed, err = writeIfChanged(dropIn, []byte(containerdDropIn(version, h)), 0o644)
 	if err != nil {
 		return false, undo, err
 	}
@@ -404,7 +424,7 @@ var k0sContainerd = "/var/lib/k0s/bin/containerd"
 // registerK0s writes gcr's drop-in into k0s's containerd.d, which k0s
 // imports and applies without a restart while it manages the
 // configuration (its first line says so).
-func registerK0s(shim string, say func(string, ...any)) (bool, error) {
+func registerK0s(h handler, say func(string, ...any)) (bool, error) {
 	b, err := os.ReadFile(k0sConfig)
 	if err != nil {
 		return false, err
@@ -418,7 +438,7 @@ func registerK0s(shim string, say func(string, ...any)) (bool, error) {
 	if containerdMajor(k0sContainerd) == 1 {
 		version = 2
 	}
-	changed, err := writeIfChanged(dropIn, []byte(containerdDropIn(version, shim)), 0o644)
+	changed, err := writeIfChanged(dropIn, []byte(containerdDropIn(version, h)), 0o644)
 	if err != nil {
 		return false, err
 	}

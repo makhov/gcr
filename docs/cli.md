@@ -17,6 +17,7 @@ gcr [-n namespace] point ID [LABEL]
 gcr [-n namespace] snapshot [-stop] ID DIR
 gcr snapshot-users DIR
 gcr snapshot-rm DIR...
+gcr [-n NS] snapshot-image [-plain-http] ID REF
 gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF
 gcr snapshot-pull [-plain-http] [-store DIR] [-lazy] REF DIR
 gcr [-n namespace] migrate [-token TOKEN] [-post-copy] ID TARGET-URL
@@ -120,6 +121,14 @@ snapshots taken of those.
 Removes snapshots, and lets go of the user namespace ranges they held.
 Refuses a snapshot something still uses, and a directory that does not
 look like a snapshot.
+
+### `gcr snapshot-image [-plain-http] ID REF`
+
+Snapshots container ID, which keeps running, and pushes it to REF as an
+image that runs as any other: a container created from it is restored
+from the snapshot ([snapshots as images](snapshot-images.md)). The
+container's own image comes from containerd's content store. Prints the
+image by digest. `kubectl gcr snapshot` runs it on a pod's node.
 
 ### `gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF`
 
