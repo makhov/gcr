@@ -639,6 +639,9 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 		if err := checkCreds(images, c.cfg, uid); err != nil {
 			return fmt.Errorf("restore: %w", err)
 		}
+		if err := checkMounts(images, c.cfg); err != nil {
+			return fmt.Errorf("restore: %w", err)
+		}
 	}
 	saved, err := gpu.Load(images)
 	if err != nil {
@@ -714,6 +717,9 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 	}
 	if !keepWork {
 		_ = os.RemoveAll(work)
+	}
+	if err := c.checkRestoredNetwork(proc); err != nil {
+		return fmt.Errorf("restore: %w", err)
 	}
 	if hostname != "" {
 		pid, err := proc.Pid()

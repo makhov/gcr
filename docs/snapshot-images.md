@@ -33,6 +33,83 @@ the files they had written. The pod that was snapshotted keeps running:
 it is paused for as long as the dump takes (a few seconds for a small
 process).
 
+## Building one in CI
+
+`gcr snapshot-build` makes the same image on any host with containerd
+and gcr, outside Kubernetes: it runs the image as a pod's container
+would run, waits until it is ready, snapshots it and pushes it.
+
+```sh
+sudo gcr snapshot-build -ready 'wget -qO- localhost:8000/health' \
+  registry.example.com/app:v1 registry.example.com/snapshots/app:v1
+```
+
+Pods then run `registry.example.com/snapshots/app:v1` like any image,
+and start warm.
+
+- **`-ready CMD`** runs in the container, through `/bin/sh -c`, every
+  second until it exits 0 (`-timeout`, 10 minutes by default). `-wait`
+  waits longer after that. Without either, the snapshot is taken as soon
+  as it starts.
+- **`-- COMMAND...`** after the two references replaces the image's
+  command, as a pod's `command` does.
+- **The container is set up like a pod's,** so that it restores into
+  one: its network, IPC and hostname belong to a sandbox it joins, and
+  `/etc/hosts`, `/etc/hostname`, `/etc/resolv.conf`, `/dev/shm`,
+  `/dev/termination-log` and a service account's token are mounted from
+  outside, as the kubelet mounts them. The restored processes get their
+  pod's.
+- **It has no network but its loopback** while it warms up: download
+  what it needs into the image beforehand. (Not the host's: CRIU would
+  take that for its own and leave a restored pod in the node's network.
+  A restore refuses a snapshot taken in the host's network.)
+- **It must be run with the pod's mounts.** A restore compares the
+  snapshot's bind mounts with the pod's and refuses a mismatch, naming
+  them:
+
+  ```
+  restore: this container mounts /data, and the snapshot's did not: a snapshot restores only into a container with the same mounts
+  ```
+
+  So say what the pod mounts: `-volume PATH` for each volume mount,
+  `-no-service-account` for `automountServiceAccountToken: false`. A
+  volume starts empty, in the build as in the pod.
+- **And with its privileges:** `-user UID[:GID]` for `runAsUser`, and
+  `-no-new-privileges` for `allowPrivilegeEscalation: false`, which a
+  restore checks ([allowing it](#allowing-it)).
+- `-env KEY=VALUE` adds to the image's environment; the restored
+  processes keep the environment they had, not the pod's.
+- `-address` is containerd's socket (`/run/containerd/containerd.sock`).
+  Credentials, to pull the image and push the snapshot, are root's
+  Docker config's; `-plain-http` for registries without TLS.
+
+The host needs what gcr needs (Linux 6.12 or later, cgroup v2), which
+GitHub's hosted Ubuntu runners do not have yet: use a self-hosted
+runner, or a VM, with a newer kernel. And the nodes that run the image
+need a CPU with the features the processes used on the CI host (CRIU
+checks): build on the same kind of machine the pods run on.
+
+In a GitHub Actions workflow, on such a runner:
+
+```yaml
+jobs:
+  warm-image:
+    runs-on: [self-hosted, linux, x64]
+    steps:
+      - name: Install gcr
+        run: |
+          v=$(curl -fsSLo /dev/null -w '%{url_effective}' https://github.com/makhov/gcr/releases/latest | sed 's#.*/##')
+          curl -fLo gcr "https://github.com/makhov/gcr/releases/download/$v/gcr-$v-linux-amd64"
+          chmod +x gcr && sudo ./gcr setup
+      - name: Log in
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Snapshot
+        run: |
+          sudo gcr snapshot-build -ready 'wget -qO- localhost:8000/health' \
+            ghcr.io/${{ github.repository }}:${{ github.sha }} \
+            ghcr.io/${{ github.repository }}/warm:${{ github.sha }}
+```
+
 ## Allowing it
 
 The nodes restore only images that match a list in gcr's configuration,
