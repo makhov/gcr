@@ -62,14 +62,14 @@ Whatever the list, gcr checks each restored thread against the pod's
 spec before it runs: no capability outside the container's bounding set,
 `no_new_privs` where the spec sets it (`allowPrivilegeEscalation:
 false`), no root IDs for a container running as another user that may
-not change its IDs, and a seccomp filter where the spec has one. A pod
-that drops capabilities the snapshot's processes had is refused:
+not change its IDs. A pod that drops capabilities the snapshot's
+processes had is refused:
 
 ```
 restore: core-1.img: a thread's effective capabilities hold CAP_CHOWN, ... which the container's bounding set does not
 ```
 
-What a seccomp filter allows is not compared with the pod's profile.
+Seccomp filters are not checked: the snapshot's own are restored.
 
 ## What the image is
 

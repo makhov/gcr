@@ -16,6 +16,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// taskDead is CRIU's state of a task that has exited (TASK_DEAD).
+const taskDead = 2
+
 // checkCreds refuses CRIU images in dir whose threads hold more than the
 // container may: CRIU restores each thread's IDs, capabilities and
 // seccomp mode as the images say, whatever the container's spec, so
@@ -25,10 +28,10 @@ import (
 //
 // It checks that no capability set holds one the container's bounding
 // set lacks; that threads keep no_new_privs where the container sets
-// it; that, where the container runs as a user other than root and may
-// not change it (no CAP_SETUID, or CAP_SETGID), no thread is root; and
-// that threads are under a seccomp filter where the container has one.
-// What the filter allows is not checked.
+// it; and that, where the container runs as a user other than root and
+// may not change it (no CAP_SETUID, or CAP_SETGID), no thread is root.
+// Seccomp filters are not checked: the images do not say reliably which
+// a thread is under (gcr's CRIU hands supervised filters over itself).
 func checkCreds(dir string, cfg *configs.Config, uid uint32) error {
 	allowed, err := capMask(cfg)
 	if err != nil {
@@ -52,6 +55,11 @@ func checkCreds(dir string, cfg *configs.Config, uid uint32) error {
 			core, ok := e.Message.(*criucore.CoreEntry)
 			if !ok {
 				return fmt.Errorf("%s: entry is %T", filepath.Base(path), e.Message)
+			}
+			if core.GetTc().GetTaskState() == taskDead {
+				// A zombie: restored only to be reaped, it runs nothing,
+				// and CRIU records neither its seccomp mode nor its flags.
+				continue
 			}
 			if err := checkThread(core.GetThreadCore(), cfg, allowed, uid); err != nil {
 				return fmt.Errorf("%s: %w: %w", filepath.Base(path), err, errdefs.ErrPermissionDenied)
@@ -97,9 +105,6 @@ func checkThread(t *criucore.ThreadCoreEntry, cfg *configs.Config, allowed []uin
 				return fmt.Errorf("a thread runs in group root, and the container as uid %d, without CAP_SETGID", uid)
 			}
 		}
-	}
-	if cfg.Seccomp != nil && t.GetSeccompMode() != criucore.SeccompMode_filter {
-		return fmt.Errorf("a thread without a seccomp filter, and the container has one")
 	}
 	return nil
 }
