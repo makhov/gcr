@@ -77,6 +77,7 @@ nav:
       - Docker: docker.md
       - Kubernetes: kubernetes.md
       - gcr-operator: operator.md
+      - Operations as resources: operations.md
   - Features:
       - Fork: fork.md
       - Moving snapshots between hosts: snapshot-registry.md

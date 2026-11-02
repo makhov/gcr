@@ -18,6 +18,10 @@ Pods opt in with one annotation, and then:
 A pod that can't move is evicted, as it would be without gcr: a drain is
 never held up by the operator.
 
+It also carries out gcr's [operations as resources](operations.md):
+Snapshots, Migrations, TimePoints and Rewinds, which `kubectl gcr`
+creates. Their CRDs come with it.
+
 ## Install
 
 It needs gcr on the cluster ([installed](install.md#on-kubernetes)), and

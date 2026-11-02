@@ -33,6 +33,27 @@ the files they had written. The pod that was snapshotted keeps running:
 it is paused for as long as the dump takes (a few seconds for a small
 process).
 
+`kubectl gcr snapshot` creates a [Snapshot](operations.md#snapshot),
+which [gcr-operator](operator.md) carries out. Without the plugin, create
+it yourself, from a pipeline for instance:
+
+```yaml
+apiVersion: gcr.dev/v1alpha1
+kind: Snapshot
+metadata:
+  name: counter-v1
+spec:
+  pod: counter
+  image: registry.example.com/snapshots/counter:v1
+  pushSecret: registry-push   # a docker-registry Secret; without, the node's credentials
+```
+
+```sh
+kubectl apply -f snapshot.yaml
+kubectl wait --for=jsonpath='{.status.phase}'=Succeeded snapshot/counter-v1
+kubectl get snapshot counter-v1 -o jsonpath='{.status.image}'   # the image, by digest
+```
+
 ## Building one in CI
 
 `gcr snapshot-build` makes the same image on any host with containerd
@@ -178,10 +199,12 @@ has a layer is not sent it again.
 
 - The node restoring it needs the same architecture (checked), and a CPU
   with the features the processes used (CRIU checks).
-- The snapshot is taken on the pod's node by a Job in `gcr-system`, which
-  pushes with the node's credentials: root's Docker config there (`sudo
-  docker login`). Pods pull it with their usual `imagePullSecrets`.
-- `--plain-http` for a registry without TLS.
+- gcr-operator takes the snapshot on the pod's node, in a Job in
+  `gcr-system`. It pushes with the Snapshot's `pushSecret`
+  (`--push-secret`), or else the node's credentials: root's Docker config
+  there (`sudo docker login`). Pods pull it with their usual
+  `imagePullSecrets`.
+- `plainHTTP` (`--plain-http`) for a registry without TLS.
 - **Not yet:** pods in gcr's own user namespace
   (`gcr.dev/host-users: "false"`); a container with a terminal; CRI-O
   and Docker (they mount the image themselves); lazy pulls.

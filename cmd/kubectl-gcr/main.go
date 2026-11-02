@@ -1,14 +1,22 @@
-// kubectl-gcr is gcr's kubectl plugin:
+// kubectl-gcr is gcr's kubectl plugin. Each command creates one of gcr's
+// operations (gcr.dev/v1alpha1, docs/operations.md), which gcr-operator
+// carries out, and waits for it:
 //
-//	kubectl gcr migrate [-n NAMESPACE] [--to NODE] pod/NAME
+//	kubectl gcr migrate [-n NAMESPACE] [--to NODE] [--through-registry] pod/NAME
 //
 // moves a running pod to another node: its processes carry on there,
-// memory and all, after a pause of well under a second (docs/design/gcr-operator.md).
+// memory and all, after a pause of well under a second (a Migration).
 //
-//	kubectl gcr snapshot [-n NAMESPACE] [-c CONTAINER] pod/NAME IMAGE
+//	kubectl gcr snapshot [-n NAMESPACE] [-c CONTAINER] [--push-secret SECRET] pod/NAME IMAGE
 //
 // pushes a snapshot of a running pod's container as an image: a pod
-// that runs it carries on from where the container was (docs/snapshot-images.md).
+// that runs it carries on from where the container was (a Snapshot).
+//
+//	kubectl gcr point [-n NAMESPACE] [-c CONTAINER] pod/NAME [LABEL]
+//	kubectl gcr rewind [-n NAMESPACE] [-c CONTAINER] pod/NAME POINT
+//
+// take a point on a container's timeline, and take it back to one (a
+// TimePoint, a Rewind).
 package main
 
 import (
@@ -17,37 +25,58 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
 
-	"k8s.io/client-go/kubernetes"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/clientcmd"
 
-	"github.com/makhov/gcr/internal/kubemigrate"
+	"github.com/makhov/gcr/api/v1alpha1"
 )
 
-const usage = `usage: kubectl gcr migrate [-n NAMESPACE] [--to NODE] pod/NAME
-       kubectl gcr snapshot [-n NAMESPACE] [-c CONTAINER] pod/NAME IMAGE`
+const usage = `usage: kubectl gcr migrate [-n NAMESPACE] [--to NODE] [--through-registry] pod/NAME
+       kubectl gcr snapshot [-n NAMESPACE] [-c CONTAINER] [--push-secret SECRET] [--plain-http] pod/NAME IMAGE
+       kubectl gcr point [-n NAMESPACE] [-c CONTAINER] pod/NAME [LABEL]
+       kubectl gcr rewind [-n NAMESPACE] [-c CONTAINER] pod/NAME POINT`
+
+// commands: each one's operation's kind, and how many arguments it takes.
+var commands = map[string]struct {
+	kind     string
+	min, max int
+}{
+	"migrate":  {"Migration", 1, 1},
+	"snapshot": {"Snapshot", 2, 2},
+	"point":    {"TimePoint", 1, 2},
+	"rewind":   {"Rewind", 2, 2},
+}
 
 func main() {
-	if len(os.Args) < 2 || os.Args[1] != "migrate" && os.Args[1] != "snapshot" {
+	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
 	cmd := os.Args[1]
+	c, ok := commands[cmd]
+	if !ok {
+		fmt.Fprintln(os.Stderr, usage)
+		os.Exit(2)
+	}
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	ns := fs.String("n", "", "the pod's namespace (default: the kubeconfig context's)")
 	to := fs.String("to", "", "migrate: the node to move it to (default: one the scheduler picks, not its own)")
-	container := fs.String("c", "", "snapshot: the container (default: the pod's only one)")
-	system := fs.String("gcr-namespace", "gcr-system", "gcr's namespace, where the Jobs run")
-	image := fs.String("image", "", "the image the Jobs run (default: gcr's installer's, from its DaemonSet, or busybox without one)")
-	gcrPath := fs.String("gcr", "/usr/local/bin/gcr", "gcr's path on the nodes")
-	timeout := fs.Duration("timeout", 5*time.Minute, "how long each step may take")
+	viaRegistry := fs.Bool("through-registry", false, "migrate: move it through a checkpoint in gcr-operator's registry, rather than node to node: seconds of downtime, but nothing needed from the source once pushed (a StatefulSet's pod always moves this way)")
+	container := fs.String("c", "", "snapshot, point, rewind: the container (default: the pod's only one)")
+	pushSecret := fs.String("push-secret", "", "snapshot: a dockerconfigjson Secret in the pod's namespace with credentials for IMAGE's registry (default: the node's)")
+	plainHTTP := fs.Bool("plain-http", false, "snapshot: talk to the registry without TLS")
+	timeout := fs.Duration("timeout", 10*time.Minute, "how long to wait for it")
 	kubeconfig := fs.String("kubeconfig", "", "kubeconfig file (default: $KUBECONFIG, ~/.kube/config)")
-	registryRepo := fs.String("registry", "", "migrate: move it through a checkpoint in this registry repository (host[:port]/path), which the nodes reach, rather than node to node: seconds of downtime, but nothing needed from the source once pushed; a StatefulSet's pod moves this way only, with gcr-operator started with the same -registry")
-	plainHTTP := fs.Bool("plain-http", false, "talk to the registry without TLS")
 	_ = fs.Parse(os.Args[2:])
-	if want := map[string]int{"migrate": 1, "snapshot": 2}[cmd]; fs.NArg() != want {
+	if fs.NArg() < c.min || fs.NArg() > c.max {
 		fmt.Fprintln(os.Stderr, usage)
 		fs.PrintDefaults()
 		os.Exit(2)
@@ -67,39 +96,72 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	cs, err := kubernetes.NewForConfig(rest)
+	dyn, err := dynamic.NewForConfig(rest)
 	if err != nil {
 		fail(err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	if *image == "" {
-		if *image, err = kubemigrate.JobImage(ctx, cs, *system); err != nil {
-			fail(fmt.Errorf("%w (or pass -image)", err))
-		}
-	}
-	o := kubemigrate.Options{
-		Node: *to, Namespace: *system, Image: *image, GCR: *gcrPath, Timeout: *timeout,
-		Log: func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
-	}
-	if cmd == "snapshot" {
-		ref, err := kubemigrate.SnapshotImage(ctx, cs, *ns, name, *container, fs.Arg(1), *plainHTTP, o)
+
+	target := v1alpha1.Target{Pod: name, Container: *container}
+	meta := metav1.ObjectMeta{GenerateName: name + "-", Namespace: *ns}
+	var obj any
+	switch cmd {
+	case "migrate":
+		obj = &v1alpha1.Migration{ObjectMeta: meta, Spec: v1alpha1.MigrationSpec{Pod: name, Node: *to, ThroughRegistry: *viaRegistry}}
+	case "snapshot":
+		obj = &v1alpha1.Snapshot{ObjectMeta: meta, Spec: v1alpha1.SnapshotSpec{Target: target, Image: fs.Arg(1), PushSecret: *pushSecret, PlainHTTP: *plainHTTP}}
+	case "point":
+		obj = &v1alpha1.TimePoint{ObjectMeta: meta, Spec: v1alpha1.TimePointSpec{Target: target, Label: fs.Arg(1)}}
+	case "rewind":
+		point, err := strconv.Atoi(strings.TrimPrefix(fs.Arg(1), "#"))
 		if err != nil {
-			fail(err)
+			fail(fmt.Errorf("bad point %q", fs.Arg(1)))
 		}
-		fmt.Println(ref)
-		return
+		obj = &v1alpha1.Rewind{ObjectMeta: meta, Spec: v1alpha1.RewindSpec{Target: target, Point: point}}
 	}
-	var res kubemigrate.Result
-	if *registryRepo != "" {
-		res, err = kubemigrate.MigrateViaRegistry(ctx, cs, *ns, name, o, kubemigrate.RegistryOptions{Repository: *registryRepo, PlainHTTP: *plainHTTP})
-	} else {
-		res, err = kubemigrate.Migrate(ctx, cs, *ns, name, o)
-	}
+	u, err := v1alpha1.ToUnstructured(obj)
 	if err != nil {
 		fail(err)
 	}
-	fmt.Printf("pod/%s moved to %s as pod/%s (downtime %s)\n", name, res.Node, res.Target, res.Downtime)
+	u.SetAPIVersion(v1alpha1.Group + "/" + v1alpha1.Version)
+	u.SetKind(c.kind)
+	gvr := v1alpha1.Resource(c.kind)
+	r := dyn.Resource(gvr).Namespace(*ns)
+	if u, err = r.Create(ctx, u, metav1.CreateOptions{}); err != nil {
+		if apierrors.IsNotFound(err) {
+			err = fmt.Errorf("%w: gcr.dev's resources are not installed: install gcr-operator (docs/operator.md)", err)
+		}
+		fail(err)
+	}
+	ref := strings.ToLower(c.kind) + "/" + u.GetName()
+	fmt.Fprintf(os.Stderr, "%s created; waiting for gcr-operator\n", ref)
+
+	var status map[string]any
+	if err := wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, *timeout, true, func(ctx context.Context) (bool, error) {
+		cur, err := r.Get(ctx, u.GetName(), metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		status, _, _ = unstructured.NestedMap(cur.Object, "status")
+		phase, _ := status["phase"].(string)
+		return v1alpha1.Phase(phase).Done(), nil
+	}); err != nil {
+		fail(fmt.Errorf("%s: %w (it goes on: kubectl get %s)", ref, err, ref))
+	}
+	if status["phase"] == string(v1alpha1.Failed) {
+		fail(fmt.Errorf("%s failed: %v", ref, status["message"]))
+	}
+	switch cmd {
+	case "migrate":
+		fmt.Printf("pod/%s moved to %v as pod/%v (downtime %v)\n", name, status["targetNode"], status["target"], status["downtime"])
+	case "snapshot":
+		fmt.Println(status["image"])
+	case "point":
+		fmt.Printf("#%v\n", status["point"])
+	case "rewind":
+		fmt.Printf("pod/%s rewound to #%s\n", name, strings.TrimPrefix(fs.Arg(1), "#"))
+	}
 }
 
 func fail(err error) {

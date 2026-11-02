@@ -54,3 +54,38 @@ a few hundred KiB, against 257 MiB for a full one.
 
 It needs gcr's CRIU (`--seccomp-notify-socket`), which a release's
 `gcr setup` installs ([install](install.md#on-a-host)).
+
+## In Kubernetes
+
+A pod's container gets time travel from the same annotation, on the
+`gcr` RuntimeClass. Points and rewinds are [TimePoints and
+Rewinds](operations.md#timepoint), which [gcr-operator](operator.md)
+carries out; `kubectl gcr` creates them:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sandbox
+  annotations:
+    gcr.dev/time-travel: manual
+spec:
+  runtimeClassName: gcr
+  containers:
+    - name: c
+      image: busybox:1.37
+      command: [sleep, infinity]
+```
+
+```console
+$ kubectl gcr point pod/sandbox "rm -rf /work"
+timepoint/sandbox-zc5qh created; waiting for gcr-operator
+#1
+$ kubectl exec sandbox -- rm -rf /work
+$ kubectl gcr rewind pod/sandbox 1
+rewind/sandbox-lftpr created; waiting for gcr-operator
+pod/sandbox rewound to #1
+```
+
+Each takes a few seconds, mostly a Job starting on the pod's node; the
+point and the rewind themselves take milliseconds there.

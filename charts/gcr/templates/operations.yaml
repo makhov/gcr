@@ -1,0 +1,409 @@
+{{- if .Values.operator.enabled }}
+# gcr's operations on running pods (gcr.dev/v1alpha1, docs/operations.md):
+# each is carried out once by gcr-operator, which reports in its status.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: snapshots.gcr.dev
+spec:
+  group: gcr.dev
+  scope: Namespaced
+  names:
+    kind: Snapshot
+    plural: snapshots
+    singular: snapshot
+    listKind: SnapshotList
+    categories:
+      - gcr
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Pod
+          type: string
+          jsonPath: .spec.pod
+        - name: Image
+          type: string
+          jsonPath: .status.image
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: "Pushes a running pod's container to a registry as an image that pods run, restoring its processes. The pod keeps running."
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - pod
+                - image
+              properties:
+                pod:
+                  type: string
+                  description: "The pod, in this namespace."
+                  minLength: 1
+                container:
+                  type: string
+                  description: "The pod's container; may be left out in a pod with one."
+                image:
+                  type: string
+                  description: The image reference to push to.
+                  minLength: 1
+                pushSecret:
+                  type: string
+                  description: "A kubernetes.io/dockerconfigjson Secret in this namespace with credentials for the image's registry. Without, the node's own are used."
+                plainHTTP:
+                  type: boolean
+                  description: Talk to the registry without TLS.
+              x-kubernetes-validations:
+                - rule: "self == oldSelf"
+                  message: "an operation's spec cannot change: create another"
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: "Running from when gcr-operator picks it up, then Succeeded or Failed."
+                  enum:
+                    - Running
+                    - Succeeded
+                    - Failed
+                node:
+                  type: string
+                  description: "The pod's node when it started."
+                message:
+                  type: string
+                  description: Why it failed.
+                startTime:
+                  type: string
+                  format: date-time
+                completionTime:
+                  type: string
+                  format: date-time
+                image:
+                  type: string
+                  description: "The image pushed, by digest."
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: migrations.gcr.dev
+spec:
+  group: gcr.dev
+  scope: Namespaced
+  names:
+    kind: Migration
+    plural: migrations
+    singular: migration
+    listKind: MigrationList
+    categories:
+      - gcr
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Pod
+          type: string
+          jsonPath: .spec.pod
+        - name: From
+          type: string
+          jsonPath: .status.node
+        - name: To
+          type: string
+          jsonPath: .status.targetNode
+        - name: Downtime
+          type: string
+          jsonPath: .status.downtime
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: "Moves a running pod to another node, its processes carrying on there."
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - pod
+              properties:
+                pod:
+                  type: string
+                  description: "The pod, in this namespace."
+                  minLength: 1
+                node:
+                  type: string
+                  description: "The node to move it to. Without, the scheduler picks one other than its own."
+                throughRegistry:
+                  type: boolean
+                  description: "Move it through a checkpoint in gcr-operator's registry rather than node to node. A StatefulSet's pod always moves this way."
+              x-kubernetes-validations:
+                - rule: "self == oldSelf"
+                  message: "an operation's spec cannot change: create another"
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: "Running from when gcr-operator picks it up, then Succeeded or Failed."
+                  enum:
+                    - Running
+                    - Succeeded
+                    - Failed
+                node:
+                  type: string
+                  description: "The pod's node when it started."
+                message:
+                  type: string
+                  description: Why it failed.
+                startTime:
+                  type: string
+                  format: date-time
+                completionTime:
+                  type: string
+                  format: date-time
+                targetNode:
+                  type: string
+                  description: Where it moved to.
+                target:
+                  type: string
+                  description: The pod that runs it there.
+                downtime:
+                  type: string
+                  description: How long its processes were stopped.
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: timepoints.gcr.dev
+spec:
+  group: gcr.dev
+  scope: Namespaced
+  names:
+    kind: TimePoint
+    plural: timepoints
+    singular: timepoint
+    listKind: TimePointList
+    categories:
+      - gcr
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Pod
+          type: string
+          jsonPath: .spec.pod
+        - name: Point
+          type: integer
+          jsonPath: .status.point
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: "Takes a point on the timeline of a container with time travel on (gcr.dev/time-travel), to rewind it to."
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - pod
+              properties:
+                pod:
+                  type: string
+                  description: "The pod, in this namespace."
+                  minLength: 1
+                container:
+                  type: string
+                  description: "The pod's container; may be left out in a pod with one."
+                label:
+                  type: string
+                  description: Shown on the timeline beside the point.
+              x-kubernetes-validations:
+                - rule: "self == oldSelf"
+                  message: "an operation's spec cannot change: create another"
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: "Running from when gcr-operator picks it up, then Succeeded or Failed."
+                  enum:
+                    - Running
+                    - Succeeded
+                    - Failed
+                node:
+                  type: string
+                  description: "The pod's node when it started."
+                message:
+                  type: string
+                  description: Why it failed.
+                startTime:
+                  type: string
+                  format: date-time
+                completionTime:
+                  type: string
+                  format: date-time
+                point:
+                  type: integer
+                  description: "The point's number on the timeline, which a Rewind names."
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: rewinds.gcr.dev
+spec:
+  group: gcr.dev
+  scope: Namespaced
+  names:
+    kind: Rewind
+    plural: rewinds
+    singular: rewind
+    listKind: RewindList
+    categories:
+      - gcr
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Pod
+          type: string
+          jsonPath: .spec.pod
+        - name: Point
+          type: integer
+          jsonPath: .spec.point
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: "Takes a container back to a point on its timeline: its processes and files are as they were then."
+          required:
+            - spec
+          properties:
+            apiVersion:
+              type: string
+            kind:
+              type: string
+            metadata:
+              type: object
+            spec:
+              type: object
+              required:
+                - pod
+                - point
+              properties:
+                pod:
+                  type: string
+                  description: "The pod, in this namespace."
+                  minLength: 1
+                container:
+                  type: string
+                  description: "The pod's container; may be left out in a pod with one."
+                point:
+                  type: integer
+                  description: "The point's number: a TimePoint's status.point, or one gcr took itself."
+                  minimum: 0
+              x-kubernetes-validations:
+                - rule: "self == oldSelf"
+                  message: "an operation's spec cannot change: create another"
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: "Running from when gcr-operator picks it up, then Succeeded or Failed."
+                  enum:
+                    - Running
+                    - Succeeded
+                    - Failed
+                node:
+                  type: string
+                  description: "The pod's node when it started."
+                message:
+                  type: string
+                  description: Why it failed.
+                startTime:
+                  type: string
+                  format: date-time
+                completionTime:
+                  type: string
+                  format: date-time
+---
+# Who may carry out operations on the pods in a namespace: bind it there
+# (RoleBinding). A Snapshot without a pushSecret pushes with the nodes'
+# credentials, to whatever image it names; a Migration or a Rewind
+# replaces a pod's processes.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gcr-operations
+rules:
+  - apiGroups: [gcr.dev]
+    resources: [snapshots, migrations, timepoints, rewinds]
+    verbs: [get, list, watch, create, delete]
+---
+# Reading them, for those who may read a namespace (view, edit, admin).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gcr-operations-view
+  labels:
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+rules:
+  - apiGroups: [gcr.dev]
+    resources: [snapshots, migrations, timepoints, rewinds]
+    verbs: [get, list, watch]
+{{- end }}
