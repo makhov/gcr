@@ -1,108 +1,126 @@
 ---
 hide:
   - navigation
+  - toc
 ---
 
-# gcr
+<div class="gcr-hero" markdown>
 
-A containerd runtime (`io.containerd.gcr.v2`) that treats a running
-container's processes as something a platform can work with: snapshot it
-without stopping it, fork it any number of times, rewind it to an earlier
-point, move it to another host. It runs containers in-process through
-libcontainer, with no runc binary, and hardens them by default beyond
-what runc does.
+# Containers you can rewind, copy and move
+
+gcr is a container runtime for Docker, containerd and Kubernetes. Your
+containers run as they always do. And while they run, you can save one,
+start copies of it, take it back to an earlier moment, or move it to
+another machine, without restarting it.
 
 ```sh
-gcr snapshot warm /var/lib/gcr/snapshots/warm          # the parent keeps running
-ctr run -d --runtime io.containerd.gcr.v2 \
-  --annotation gcr.dev/fork-from=/var/lib/gcr/snapshots/warm IMAGE fork-1 CMD
+curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | sh
+sudo gcr setup -docker
 ```
 
 [Get started](getting-started.md){ .md-button .md-button--primary }
-[Install](install.md){ .md-button }
-[GitHub](https://github.com/makhov/gcr){ .md-button }
-
-## What you can do with it
-
-<div class="grid cards" markdown>
-
--   :material-undo-variant: **Give an agent undo**
-
-    ---
-
-    Run each command in a sandbox after a point on its timeline, and take
-    any of them back: files, processes and their memory. A dropped
-    database comes back with its rows.
-
-    [:octicons-arrow-right-24: Time travel](time-travel.md)
-
--   :material-source-branch: **Let an agent branch**
-
-    ---
-
-    Fork its sandbox, running services and all, try several approaches at
-    once, keep the one that worked. A fork holds only the memory it
-    touches.
-
-    [:octicons-arrow-right-24: Fork](fork.md)
-
--   :material-fire: **Start warm**
-
-    ---
-
-    Fork new containers from a snapshot of one that has already loaded
-    its model or interpreter, on this node or, through a registry, on any
-    other, reading only what each touches.
-
-    [:octicons-arrow-right-24: Moving snapshots](snapshot-registry.md)
-
--   :material-truck-fast: **Move what cannot restart**
-
-    ---
-
-    Migrate a running container to another node with a downtime that does
-    not grow with its memory. In Kubernetes, drains and node shutdowns
-    move pods instead of restarting them.
-
-    [:octicons-arrow-right-24: gcr-operator](operator.md)
+[See examples](examples/index.md){ .md-button }
 
 </div>
 
-## What it does
+## How to use it
 
-- **Fork.** Start new containers from a snapshot of a running one, with
-  its memory (an interpreter up, a model loaded) and its files. Forks
-  share the snapshot's files without copying them, and, opt-in, its
-  memory.
-- **Snapshots between hosts** through any OCI registry, including ones
-  backed by S3.
-- **Time travel.** A point on the container's timeline at every `exec`,
-  or on request, incremental where the kernel tracks dirty pages, and a
-  rewind to any of them in place.
-- **Live migration** to another host, pre-copy where the kernel tracks
-  dirty memory, or post-copy, optionally over mutual TLS. In Kubernetes,
-  gcr-operator turns evictions into migrations, and moves StatefulSets'
-  pods and pods on nodes that shut down through checkpoints in a
-  registry.
-- **GPUs.** NVIDIA GPUs through CDI, with CUDA state in checkpoints and
-  forks.
-- **Hardening.** User namespaces by default, a denied set of system calls
-  on top of any seccomp profile, supervised mounts, a netlink policy in
-  the kernel (BPF LSM), and Landlock confining each container to its
-  root. Docker-in-Docker runs unprivileged.
-- **A drop-in runtime** for containerd 1.7 to 2.4 and Kubernetes: the
-  whole task API, CRI conformance. CRI-O runs it too, with snapshots and
-  forks but without time travel or migration, and so does Docker
-  (`docker run --runtime gcr`).
+<div class="grid cards" markdown>
 
-## Requirements
+-   **1. Install it**
 
-- Linux 6.12+ with cgroup v2, run as root
-- containerd 1.7 or later, or CRI-O with some features missing
-- libseccomp
-- for checkpoints, forks, time travel and migration: CRIU, the fork at
-  [makhov/criu](https://github.com/makhov/criu) for time travel and for
-  Landlock across restores
+    ---
 
-[Installation](install.md) sets it up on a host or a cluster, and
-[Getting started](getting-started.md) runs a first fork.
+    Two commands on a Linux host, or a Helm chart on a Kubernetes
+    cluster. [Install](install.md)
+
+-   **2. Run containers as usual**
+
+    ---
+
+    Choose gcr as the runtime: `docker run --runtime gcr`, or
+    `runtimeClassName: gcr` in a pod. Your images and commands stay
+    the same.
+
+-   **3. Work with them while they run**
+
+    ---
+
+    Snapshot, copy, rewind or move a running container with one
+    command, and its processes carry on from where they were.
+
+</div>
+
+```sh
+kubectl gcr snapshot pod/app registry.example.com/app:warm   # an image that starts warm
+kubectl gcr point pod/app "before the migration"             # mark this moment: #1
+kubectl gcr rewind pod/app 1                                 # and go back to it
+kubectl gcr migrate pod/app                                  # move it to another node
+```
+
+## Why gcr
+
+<div class="grid cards" markdown>
+
+-   :material-fire: **Start in seconds, not minutes**
+
+    ---
+
+    Save a container once it has loaded its model or warmed its cache,
+    and start new ones from that moment. A vLLM server answers in 9
+    seconds instead of 136.
+
+-   :material-undo-variant: **Undo anything**
+
+    ---
+
+    Take a sandbox back to before a bad command: files, processes and
+    what they held in memory. A dropped database comes back with its
+    rows.
+
+-   :material-source-branch: **Try many things at once**
+
+    ---
+
+    Copy a running environment, services and all, and try several
+    approaches side by side. Copies share memory, so ten cost far less
+    than ten fresh containers.
+
+-   :material-truck-fast: **Maintenance without restarts**
+
+    ---
+
+    Drain a node and its pods move to another, memory and all, with a
+    pause of a few hundred milliseconds. Long jobs and in-memory state
+    survive.
+
+-   :material-puzzle-check: **Nothing new to learn**
+
+    ---
+
+    A drop-in replacement for runc under containerd, Docker and
+    Kubernetes. Same images, same tools, and containers start faster.
+
+-   :material-shield-check: **Safer by default**
+
+    ---
+
+    Stricter isolation than runc out of the box, with user namespaces on.
+    Even Docker-in-Docker runs without privileges.
+
+</div>
+
+<div class="gcr-cta" markdown>
+
+## Try it in ten minutes
+
+The quickstart installs gcr, starts a container, copies it and rewinds
+it, on one Linux machine or a VM on your laptop.
+
+[Start the quickstart](getting-started.md){ .md-button .md-button--primary }
+[GitHub](https://github.com/makhov/gcr){ .md-button }
+
+</div>
+
+gcr shares the host's kernel, as runc does. For untrusted code from many
+tenants, run it inside VMs. [What it is good for, and where it falls short](tradeoffs.md).

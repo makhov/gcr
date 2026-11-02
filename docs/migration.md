@@ -1,5 +1,16 @@
 # Live migration
 
+Moving a running container to another host, without restarting it. The
+downtime is a few hundred milliseconds, and on x86 it does not grow much
+with the container's memory, because gcr pre-copies while the container
+keeps running.
+
+Use it for work that cannot restart: a long computation, a session with
+state, a server holding caches it would take minutes to rebuild. In
+Kubernetes, gcr-operator does this for you whenever a node is drained
+([node maintenance](examples/node-maintenance.md)); what follows is the
+mechanism underneath, and how to drive it by hand.
+
 The target is an ordinary gcr container with the same image and command,
 created with `gcr.dev/migrate-in` (address to listen on) and
 `gcr.dev/migrate-token`. It does not start its process; its `Start` waits for

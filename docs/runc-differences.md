@@ -29,10 +29,10 @@ container asks for them with an annotation.
   --log-uri`, nerdctl's log drivers) works for containers without one.
 - **About 6 MiB of memory per pod** for the shim, against about 4 MiB
   for runc's. Start and stop are faster (no binary per operation):
-  [the README](https://github.com/makhov/gcr#compared-with-runc) has the numbers.
+  [the numbers](tradeoffs.md#compared-with-runc).
 - **Under CRI-O**: no port forwarding, no gcr user namespaces, no time
   travel, no migration into a CRI-O container, and no CRI checkpoints.
-  Snapshots and forks work ([getting started](getting-started.md#with-cri-o)).
+  Snapshots and forks work ([CRI-O](crio.md)).
 - **Under Docker**: no `docker checkpoint`, and no rewind on a bridge
   network ([Docker](docker.md#networking)).
 

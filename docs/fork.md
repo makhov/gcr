@@ -1,7 +1,7 @@
 # Fork
 
 A snapshot of a running container is a starting point for any number of
-new ones. The parent keeps running:
+new ones. The original keeps running.
 
 ```sh
 gcr snapshot my-container /var/lib/gcr/snapshots/warm
@@ -10,45 +10,63 @@ ctr run -d --runtime io.containerd.gcr.v2 \
   docker.io/library/python:3.13 fork-1 python3 -c 'pass'
 ```
 
-Each fork restores the snapshot's processes, so it starts with whatever
-the parent had in memory (an interpreter up, a model loaded) instead of
-from its image's entrypoint, and gets the snapshot's files with its own
-writable layer on top: what one fork writes, no other fork and not the
-snapshot ever sees. The image the container is created with supplies the
-lower layers and must be the one the snapshot was taken from.
+Used for [warm starts](examples/warm-starts.md) and for
+[letting an agent branch](examples/agent-sandbox.md).
 
-Forks resume with identical memory, so whatever a program seeded or
-generated before the snapshot (random number generators, IDs, tokens) is
-the same in each. A fork can tell that it is one, and which:
-`/.gcr/fork.json` holds its container ID, the snapshot and when it was
-created, and with `gcr.dev/fork-signal=SIGUSR2` (or another signal) gcr
-signals its init once it is restored, with the file in place, which is
-the moment to re-seed. The signal is opt-in: a process that does not
-handle SIGUSR2 dies of it.
+## What a fork gets
 
-In Kubernetes, `gcr.dev/fork-from` is for handlers that allow it: a pod
-author could otherwise point it at any host directory. The handler lists
-it in `PodAnnotations`, and its `SnapshotRoots` say where snapshots may be
-([configuration](configuration.md#podannotations)); `gcr.dev/migrate-in` is restricted the same way.
+- **The snapshot's processes**, restored, so it starts with whatever the
+  parent had in memory (an interpreter up, a model loaded) instead of
+  from the image's entrypoint. The command you pass is never run.
+- **The snapshot's files**, with its own writable layer on top: what one
+  fork writes, no other fork and not the snapshot ever sees.
+- **Nothing copied.** The snapshot's writable layer is mounted read-only
+  beneath each fork's own empty one, so a fork costs the same whether the
+  snapshot changed one file or a gigabyte.
 
-Forks share the parent's user namespace range, because the snapshot's
-files carry host IDs from it: they are isolated from other containers,
-not from each other at the host-ID level, which suits fanning one
-workload out and not running two tenants.
+The container must be created from the image the snapshot was taken from:
+that image supplies the layers underneath.
 
-Nothing is copied: the snapshot's writable layer is mounted read-only
-underneath each fork's own, empty one, so a fork costs the same whether
-the snapshot changed a file or a gigabyte. gcr assembles that overlay
-itself, idmapping the image's layers and leaving the snapshot's alone (its
-files already carry the range's IDs); containerd's idmapped overlay would
-map it twice. A snapshot of a fork holds only what the fork changed, and
-records the snapshots beneath it (`gcr-layers`), so forks of forks stack
-layers rather than copy them. The price is that a snapshot must outlive
-the forks of it, and the snapshots taken of those (Snapshot lifetime,
-below). Checkpoints of a fork
-record the same layers, and a fork migrates only to a fork of the same
-snapshot (shared storage at the same path); the target refuses anything
-else before the first page is sent.
+## What to watch out for
+
+**Forks are identical, including what should be unique.** They resume
+with the same memory, so anything a program seeded or generated before
+the snapshot (random number generators, IDs, tokens) is the same in every
+fork. A fork can tell that it is one: `/.gcr/fork.json` holds its
+container ID, the snapshot, and when it was created. With
+`gcr.dev/fork-signal=SIGUSR2` (or another signal) gcr signals its init
+once it is restored and that file is in place, which is the moment to
+re-seed. The signal is opt-in, because a process that does not handle
+SIGUSR2 dies of it.
+
+**Forks are not separate tenants.** They share the parent's user
+namespace range, because the snapshot's files carry host IDs from it.
+They are isolated from other containers, not from each other at the
+host-ID level, which suits fanning one workload out and not running two
+customers.
+
+**A snapshot must outlive its forks**, and the snapshots taken of them
+([below](#snapshot-lifetime)).
+
+**On Kubernetes, forking is a privilege.** `gcr.dev/fork-from` names a
+path on the node, so a pod author who could set it freely would get more
+than their own container. The handler has to list the annotation in
+`PodAnnotations`, and its `SnapshotRoots` say where snapshots may live
+([configuration](configuration.md#podannotations)); `gcr.dev/migrate-in`
+is restricted the same way.
+
+## How the layers stack
+
+gcr assembles the fork's overlay itself, idmapping the image's layers and
+leaving the snapshot's alone, since its files already carry the range's
+IDs; containerd's idmapped overlay would map them twice.
+
+A snapshot of a fork holds only what that fork changed, and records the
+snapshots beneath it (`gcr-layers`), so forks of forks stack layers
+rather than copy them. The price is the lifetime rule above. Checkpoints
+of a fork record the same layers, and a fork migrates only to a fork of
+the same snapshot (shared storage, same path); the target refuses
+anything else before the first page is sent.
 
 ## Snapshot lifetime
 

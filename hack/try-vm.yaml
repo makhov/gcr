@@ -1,0 +1,35 @@
+# A VM for trying gcr on a Mac or any machine without a spare Linux box:
+# Ubuntu 25.10 (Linux 6.17), containerd and Docker from its packages, so
+# dockerd runs on the system containerd that gcr registers itself with.
+#
+#   limactl start --name=gcr hack/try-vm.yaml
+#   limactl shell gcr
+#
+# Then docs/getting-started.md from "Install gcr" on, with sudo in front
+# of docker and gcr (gcr's control sockets are root's). For building gcr
+# itself, hack/lima.yaml is the development VM instead.
+base: template:ubuntu-25.10
+cpus: 4
+memory: 8GiB
+disk: 40GiB
+# Lima's own containerd is not needed: Ubuntu's comes with Docker.
+containerd:
+  system: false
+  user: false
+provision:
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      # docker.io runs dockerd on the system containerd, which is the one
+      # `gcr setup -docker` registers the runtime with.
+      apt-get install -y docker.io containerd
+      systemctl enable --now containerd docker
+probes:
+  - description: docker to be running
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      timeout 120 bash -c "until sudo docker version >/dev/null 2>&1; do sleep 2; done"
