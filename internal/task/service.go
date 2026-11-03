@@ -427,10 +427,18 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		var restoreOpts []string
 		if minors := gpu.Minors(spec); len(minors) > 0 {
 			prep.GPU, prep.GPUError = gpu.Probe("/", minors)
+			if prep.GPUError == nil {
+				prep.GPUError = gpu.Supported(prep.GPU.Driver)
+			}
 			if prep.GPUError != nil {
-				log.G(ctx).WithError(prep.GPUError).Warn("GPUs not described: checkpoints refused")
+				log.G(ctx).WithError(prep.GPUError).Warn("checkpoints of this container's GPUs refused")
 			} else {
 				restoreOpts = gpu.RestoreCRIUOptions
+				if lib := gpu.LibCUDA(spec); lib != "" {
+					if err := gpu.UseLibCUDA(filepath.Join(container.StateRoot, "cuda"), lib); err != nil {
+						log.G(ctx).WithError(err).Warn("CRIU's CUDA plugin gets the host's own libcuda")
+					}
+				}
 			}
 		}
 		policy, err := timetravel.ParsePolicy(spec.Annotations)

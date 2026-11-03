@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/makhov/gcr/internal/container"
+	"github.com/makhov/gcr/internal/gpu"
 	"github.com/makhov/gcr/internal/landlock"
 	"github.com/makhov/gcr/internal/netpolicy"
 	"github.com/makhov/gcr/internal/nydus"
@@ -185,10 +186,20 @@ func Doctor() []Check {
 		add("nydus", Optional, "no nydus-image or nydusd: snapshots in the tar format only", "install nydus 2.4 (github.com/dragonflyoss/nydus)")
 	}
 	if _, err := os.Stat("/dev/nvidia0"); err == nil {
-		if _, err := os.Stat(filepath.Join(pluginDir(), payload.CUDAPlugin)); err == nil {
-			add("GPUs", OK, "CRIU's CUDA plugin installed", "")
-		} else {
+		driver, err := gpu.Driver("/")
+		_, noPlugin := os.Stat(filepath.Join(pluginDir(), payload.CUDAPlugin))
+		// Without the driver r580 asks for, GPU containers still run: only
+		// their checkpoints are refused, so the node stays usable.
+		switch {
+		case err != nil:
+			add("GPUs", Optional, err.Error()+": no checkpoints of GPU containers", "")
+		case gpu.Supported(driver) != nil:
+			add("GPUs", Optional, fmt.Sprintf("NVIDIA driver %s: no checkpoints of GPU containers, which need r%d or newer", driver, gpu.MinDriver),
+				fmt.Sprintf("upgrade the NVIDIA driver to r%d or newer (docs/gpus.md)", gpu.MinDriver))
+		case noPlugin != nil:
 			add("GPUs", Missing, "NVIDIA GPUs, but no CRIU CUDA plugin: no checkpoints of GPU containers", "a release's gcr setup installs it; or make criu")
+		default:
+			add("GPUs", OK, "NVIDIA driver "+driver+", CRIU's CUDA plugin installed", "")
 		}
 	}
 	return cs

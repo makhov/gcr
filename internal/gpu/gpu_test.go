@@ -119,3 +119,67 @@ func TestCompatible(t *testing.T) {
 		t.Errorf("CPU checkpoint into a GPU container: %v", err)
 	}
 }
+
+func TestSupported(t *testing.T) {
+	for driver, ok := range map[string]bool{
+		"580.65.06":  true,
+		"595.91.07":  true,
+		"1000.1":     true,
+		"570.86.15":  false,
+		"550.144.03": false,
+		"":           false,
+	} {
+		err := Supported(driver)
+		if (err == nil) != ok {
+			t.Errorf("%q: %v", driver, err)
+		}
+		if err != nil && driver != "" && !errors.Is(err, errdefs.ErrNotImplemented) {
+			t.Errorf("%q: %v is not ErrNotImplemented", driver, err)
+		}
+	}
+}
+
+func TestDriver(t *testing.T) {
+	root := fakeDriver(t, "580.65.06", nil)
+	if v, err := Driver(root); v != "580.65.06" || err != nil {
+		t.Fatalf("%q, %v", v, err)
+	}
+	if _, err := Driver(t.TempDir()); err == nil {
+		t.Fatal("no driver, no error")
+	}
+}
+
+func TestLibCUDA(t *testing.T) {
+	spec := &specs.Spec{Mounts: []specs.Mount{
+		{Destination: "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.580.65.06", Source: "/run/nvidia/driver/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.580.65.06"},
+		{Destination: "/usr/lib/x86_64-linux-gnu/libcuda.so.580.65.06", Source: "/run/nvidia/driver/usr/lib/x86_64-linux-gnu/libcuda.so.580.65.06"},
+	}}
+	if got := LibCUDA(spec); got != "/run/nvidia/driver/usr/lib/x86_64-linux-gnu/libcuda.so.580.65.06" {
+		t.Fatalf("got %q", got)
+	}
+	if got := LibCUDA(&specs.Spec{}); got != "" {
+		t.Fatalf("got %q without mounts", got)
+	}
+}
+
+func TestUseLibCUDA(t *testing.T) {
+	t.Setenv("LD_LIBRARY_PATH", "/opt/lib")
+	dir := t.TempDir()
+	lib := filepath.Join(t.TempDir(), "libcuda.so.580.65.06")
+	for range 2 { // twice: the second changes nothing
+		if err := UseLibCUDA(dir, lib); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path := filepath.SplitList(os.Getenv("LD_LIBRARY_PATH"))
+	if len(path) != 2 || path[1] != "/opt/lib" {
+		t.Fatalf("LD_LIBRARY_PATH %v", path)
+	}
+	if got, err := os.Readlink(filepath.Join(path[0], "libcuda.so.1")); got != lib || err != nil {
+		t.Fatalf("libcuda.so.1 -> %q, %v", got, err)
+	}
+	entries, _ := os.ReadDir(path[0])
+	if len(entries) != 1 {
+		t.Fatalf("%d entries beside libcuda.so.1", len(entries)-1)
+	}
+}

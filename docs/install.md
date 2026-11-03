@@ -197,6 +197,9 @@ Distribution notes:
 - **k0s** applies its drop-in itself, with no containerd restart.
 - **Nodes without glibc** (Alpine, k0s's image) get the static CRIU:
   everything but GPU checkpoints.
+- **GPU nodes** need NVIDIA driver r580 or newer for checkpoints, and the
+  device plugin in CDI mode so that GPUs reach pods on the `gcr`
+  RuntimeClass ([GPUs in Kubernetes](gpus.md#in-kubernetes)).
 - **k0da** installs gcr itself ([above](#a-throwaway-cluster)), so set
   `runtime.installer.enabled=false` if you add the chart by hand.
 
