@@ -44,11 +44,24 @@ carries on where the warm one's stopped.
 
 What to know before trying it on your own model:
 
-- **The snapshot is as large as the GPU memory the process reserved**,
-  and the node needs that much host memory free while it is taken, because
-  CRIU's CUDA plugin stages GPU memory through host memory
-  ([GPUs](../gpus.md)). vLLM reserves 90% of the GPU by default, most of
-  it an empty KV cache; the demo sets `--gpu-memory-utilization 0.3`.
+- **The snapshot costs what the model wrote, not what it reserved.** A
+  server reserves the GPU's memory up front — vLLM takes 90% of it by
+  default — and most of that is an empty KV cache it has not filled.
+  Those pages are zeroes, and a checkpoint compresses them to almost
+  nothing ([`Compression`](../configuration.md#compression)). On one RTX
+  PRO 6000 Blackwell, a container holding 20 GiB of GPU memory with 2 GiB
+  of it written:
+
+  | | snapshot | taken in | restored in |
+  | --- | --- | --- | --- |
+  | compressed | 2.1 GB | 6.5 s | 5.3 s |
+  | uncompressed | 21 GB | 10.4 s | |
+
+  So `--gpu-memory-utilization` can stay where serving wants it. The
+  node does still need host memory free for the whole reservation while
+  the snapshot is taken, because CRIU's CUDA plugin stages GPU memory
+  through host memory ([GPUs](../gpus.md)) — it is the *stored* size that
+  follows what was written.
 - The demo drives containerd with `ctr` and takes the GPU through CDI, so
   it needs neither Kubernetes nor the device plugin. It needs the NVIDIA
   driver and a CDI spec (`nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`).

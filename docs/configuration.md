@@ -427,13 +427,17 @@ Whether a checkpoint's memory pages are compressed as they are written
 - `off`: every page is written whole.
 
 A page of zeroes costs almost nothing to store, and a process that has
-reserved memory it has not filled is mostly those: a model server that
-reserves a GPU's memory for a KV cache it has barely used, for instance.
-On 768 MiB of such pages next to 128 MiB that does not compress, a
-snapshot goes from 901 MB to 131 MB, and is written and read back in
-proportion. Memory that does not compress costs about a fifth more CPU
-to dump and saves nothing, so `off` is there for a handler whose
-containers are all of that kind.
+reserved memory it has not filled is mostly those. A model server is the
+case this is worth most for: it reserves a GPU's memory up front for a
+KV cache it has barely used, and CRIU's CUDA plugin stages all of that
+through host memory. On one RTX PRO 6000 Blackwell, a container holding
+20 GiB of GPU memory with 2 GiB of it written went from a 21 GB snapshot
+to 2.1 GB, taken in 6.5 s rather than 10.4 s, and restored — the GPU's
+memory back, byte for byte — in 5.3 s.
+
+Memory that does not compress costs about a fifth more CPU to dump and
+saves nothing, so `off` is there for a handler whose containers are all
+of that kind.
 
 Restores need no setting: an image says whether it holds compressed
 pages, so snapshots taken before this and snapshots taken with `off`
