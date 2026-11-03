@@ -69,15 +69,18 @@ type Info struct {
 var minorPath = regexp.MustCompile(`^/dev/nvidia([0-9]+)$`)
 
 // Minors are the GPU device minors in spec's devices (/dev/nvidia<minor>,
-// as CDI puts them), sorted; none for a container without GPUs.
+// as CDI puts them), sorted; none for a container without GPUs. The name
+// says which devices are GPUs, the device numbers which GPU each one is:
+// they agree as CDI writes them, and a restore may have to present a GPU
+// at the name the checkpoint recorded instead of its own.
 func Minors(spec *specs.Spec) []int {
 	if spec.Linux == nil {
 		return nil
 	}
 	var minors []int
 	for _, d := range spec.Linux.Devices {
-		if m := minorPath.FindStringSubmatch(d.Path); m != nil {
-			n, _ := strconv.Atoi(m[1])
+		if minorPath.MatchString(d.Path) {
+			n := int(d.Minor)
 			if !slices.Contains(minors, n) {
 				minors = append(minors, n)
 			}
