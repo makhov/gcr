@@ -8,8 +8,9 @@
 // nvidia-ctk's generated spec): containerd puts the device nodes, driver
 // libraries and hooks in the OCI spec, so they are part of what a restore
 // rebuilds. CUDA state is moved to host memory before the dump and back
-// after the restore by CRIU's CUDA plugin (cuda-checkpoint), which must be
-// installed with CRIU.
+// after the restore by CRIU's CUDA plugin, which must be installed with
+// CRIU. It calls the driver's own checkpoint API (cuCheckpointProcess*,
+// r580 and newer), in the libcuda the container uses (UseLibCUDA).
 //
 // Restores need the same driver version (the restored processes have its
 // libraries mapped, by path and content) and the same GPU models. They also
@@ -22,6 +23,7 @@ package gpu
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,6 +40,12 @@ import (
 
 // File is where a checkpoint records its GPUs, next to CRIU's images.
 const File = "gcr-gpus.json"
+
+// MinDriver is the oldest NVIDIA driver branch gcr checkpoints GPU
+// containers on. From r580, CRIU's CUDA plugin checkpoints through the
+// driver's API. Before, the plugin falls back to NVIDIA's cuda-checkpoint
+// tool, which gcr neither installs nor is tested with.
+const MinDriver = 580
 
 // RestoreCRIUOptions are CRIU config lines for restoring a container with
 // GPUs: its GPUs may have other UUIDs than at the dump (another node).
@@ -82,15 +90,12 @@ func Minors(spec *specs.Spec) []int {
 // Probe describes the GPUs with the given minors from the driver's /proc
 // files under root ("/" on a host).
 func Probe(root string, minors []int) (*Info, error) {
-	proc := filepath.Join(root, "proc/driver/nvidia")
-	version, err := os.ReadFile(filepath.Join(proc, "version"))
+	driver, err := Driver(root)
 	if err != nil {
-		return nil, fmt.Errorf("NVIDIA driver: %w", err)
+		return nil, err
 	}
-	info := &Info{Driver: driverVersion(string(version))}
-	if info.Driver == "" {
-		return nil, fmt.Errorf("NVIDIA driver: no version in %s", filepath.Join(proc, "version"))
-	}
+	info := &Info{Driver: driver}
+	proc := filepath.Join(root, "proc/driver/nvidia")
 	dirs, err := filepath.Glob(filepath.Join(proc, "gpus/*/information"))
 	if err != nil {
 		return nil, err
@@ -112,6 +117,81 @@ func Probe(root string, minors []int) (*Info, error) {
 		info.GPUs = append(info.GPUs, g)
 	}
 	return info, nil
+}
+
+// Driver is the version of the NVIDIA driver loaded under root ("/" on a
+// host), such as 580.65.06.
+func Driver(root string) (string, error) {
+	path := filepath.Join(root, "proc/driver/nvidia/version")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("NVIDIA driver: %w", err)
+	}
+	v := driverVersion(string(b))
+	if v == "" {
+		return "", fmt.Errorf("NVIDIA driver: no version in %s", path)
+	}
+	return v, nil
+}
+
+// Supported says whether gcr can checkpoint GPU containers on driver.
+func Supported(driver string) error {
+	branch, _, _ := strings.Cut(driver, ".")
+	n, err := strconv.Atoi(branch)
+	if err != nil {
+		return fmt.Errorf("NVIDIA driver %q: not a version", driver)
+	}
+	if n < MinDriver {
+		return fmt.Errorf("NVIDIA driver %s: checkpoints of GPU containers need r%d or newer: %w", driver, MinDriver, errdefs.ErrNotImplemented)
+	}
+	return nil
+}
+
+// LibCUDA is the host's libcuda that spec mounts into the container, ""
+// without one. CDI mounts the driver's libraries from wherever the driver
+// is: the host's library directory, or a driver container's root such as
+// the GPU Operator's /run/nvidia/driver, which no host program finds.
+func LibCUDA(spec *specs.Spec) string {
+	for _, m := range spec.Mounts {
+		if strings.HasPrefix(filepath.Base(m.Destination), "libcuda.so.") && m.Source != "" {
+			return m.Source
+		}
+	}
+	return ""
+}
+
+// UseLibCUDA makes the CRIUs this process starts load lib as libcuda.so.1,
+// as CRIU's CUDA plugin does: the driver the container uses, wherever it
+// is installed. lib is linked from a directory of its own under dir, put
+// first on LD_LIBRARY_PATH; nothing else is there, so nothing else CRIU
+// loads changes.
+func UseLibCUDA(dir, lib string) error {
+	sum := sha256.Sum256([]byte(lib))
+	d := filepath.Join(dir, fmt.Sprintf("%x", sum[:8]))
+	if err := os.MkdirAll(d, 0o755); err != nil {
+		return err
+	}
+	link := filepath.Join(d, "libcuda.so.1")
+	if cur, err := os.Readlink(link); err != nil || cur != lib {
+		// Through a rename: another shim may be doing the same.
+		tmp := fmt.Sprintf("%s.%d", link, os.Getpid())
+		os.Remove(tmp)
+		if err := os.Symlink(lib, tmp); err != nil {
+			return err
+		}
+		if err := os.Rename(tmp, link); err != nil {
+			os.Remove(tmp)
+			return err
+		}
+	}
+	path := os.Getenv("LD_LIBRARY_PATH")
+	if slices.Contains(filepath.SplitList(path), d) {
+		return nil
+	}
+	if path != "" {
+		d += string(os.PathListSeparator) + path
+	}
+	return os.Setenv("LD_LIBRARY_PATH", d)
 }
 
 // driverVersion finds the version in /proc/driver/nvidia/version's first

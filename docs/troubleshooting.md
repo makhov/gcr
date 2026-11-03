@@ -69,6 +69,8 @@ has `Hardening = 'off'` and `Landlock = 'off'`.
 | `live migration into a container CRI-O runs` | CRI-O wants the process when it creates the container, before the source has sent one | make the target a containerd container |
 | `rewind of a container on a network its caller set up` | time travel under Docker on a bridge network | run it with `--network none` or `host` ([Docker](docker.md#networking)) |
 | `gcr's user namespaces need the rootfs as overlay mounts from containerd` | `gcr.dev/host-users=false` or `UserNamespaces = 'always'` under CRI-O | use `hostUsers: false` (CRI-O's user namespaces) |
+| `NVIDIA driver ...: checkpoints of GPU containers need r580 or newer` | checkpoints go through the driver's checkpoint API, which r580 brought | upgrade the node's driver ([GPUs](gpus.md#what-a-node-needs)) |
+| `NVIDIA driver: ... no such file or directory` on a checkpoint | the container has GPU devices but the node has no NVIDIA driver loaded | load the driver; gcr will not checkpoint GPUs it cannot describe |
 | `time travel for containers with GPUs` | CRIU's CUDA plugin cannot pre-dump, so every point would copy GPU memory | none yet |
 | `time travel needs a container without a terminal` | | run without `-t` |
 | `time travel is off (start the container with gcr.dev/time-travel)` | `gcr timeline` or `rewind` on a container without it | recreate it with the annotation |
