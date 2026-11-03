@@ -40,9 +40,19 @@ Whole use cases, each one something you can run.
 
     *One host to build it, a registry, any number of hosts.*
 
+-   :material-chip: **[Serving many models on few GPUs](model-serving.md)**
+
+    ---
+
+    Give the GPU back while a model is idle and start it again from a
+    snapshot when a request arrives. What it costs, and what a restore
+    checks.
+
+    *An NVIDIA GPU; the recipe is for a cluster.*
+
 </div>
 
-All four assume gcr is installed ([Installation](../install.md)). The
+All five assume gcr is installed ([Installation](../install.md)). The
 `gcr` command itself always runs as root, because its control sockets are
 root's. If you have not run a container on gcr yet,
 [the quickstart](../getting-started.md) is the shorter way in.
