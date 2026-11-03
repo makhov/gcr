@@ -47,15 +47,28 @@ func fakeDriver(t *testing.T, version string, models map[int]string) string {
 }
 
 func TestMinors(t *testing.T) {
+	// As CDI writes them: the name and the device numbers agree.
 	spec := &specs.Spec{Linux: &specs.Linux{Devices: []specs.LinuxDevice{
-		{Path: "/dev/nvidiactl"}, {Path: "/dev/nvidia3"}, {Path: "/dev/nvidia-uvm"},
-		{Path: "/dev/nvidia1"}, {Path: "/dev/nvidia-caps/nvidia-cap1"}, {Path: "/dev/null"},
+		{Path: "/dev/nvidiactl", Major: 195, Minor: 255},
+		{Path: "/dev/nvidia3", Major: 195, Minor: 3},
+		{Path: "/dev/nvidia-uvm", Major: 234, Minor: 0},
+		{Path: "/dev/nvidia1", Major: 195, Minor: 1},
+		{Path: "/dev/nvidia-caps/nvidia-cap1", Major: 237, Minor: 1},
+		{Path: "/dev/null", Major: 1, Minor: 3},
 	}}}
 	if got := Minors(spec); !slices.Equal(got, []int{1, 3}) {
 		t.Fatalf("Minors = %v, want [1 3]", got)
 	}
 	if got := Minors(&specs.Spec{}); got != nil {
 		t.Fatalf("Minors of a spec without devices = %v", got)
+	}
+	// A GPU presented at another GPU's name, as a restore onto another
+	// index has to: the numbers say which GPU it is, not the name.
+	aliased := &specs.Spec{Linux: &specs.Linux{Devices: []specs.LinuxDevice{
+		{Path: "/dev/nvidia3", Major: 195, Minor: 5},
+	}}}
+	if got := Minors(aliased); !slices.Equal(got, []int{5}) {
+		t.Fatalf("Minors of a GPU presented at another name = %v, want [5]", got)
 	}
 }
 
