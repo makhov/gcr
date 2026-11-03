@@ -193,6 +193,7 @@ Docker takes the same options through `runtimeType` entries in
 | `SnapshotRoots` | directories snapshots may be forked from | none |
 | `SnapshotImages` | images made of snapshots that containers may be restored from | none |
 | `TimeTravel` | a table: `MinInterval` (duration), `MaxKeep` (number) | `100ms`, `50` |
+| `Compression` | `auto`, `off` | `auto` |
 
 ### `UserNamespaces`
 
@@ -413,6 +414,37 @@ more than `MaxKeep` kept. A container asking for more fails to start.
     MinInterval = '1s'
     MaxKeep = 20
 ```
+
+### `Compression`
+
+Whether a checkpoint's memory pages are compressed as they are written
+(LZ4).
+
+- `auto`:
+  - On where the node's CRIU is built with LZ4, which gcr's is
+    (`gcr doctor` says when it is not).
+  - Without it, the shim logs once and writes every page whole.
+- `off`: every page is written whole.
+
+A page of zeroes costs almost nothing to store, and a process that has
+reserved memory it has not filled is mostly those. A model server is the
+case this is worth most for: it reserves a GPU's memory up front for a
+KV cache it has barely used, and CRIU's CUDA plugin stages all of that
+through host memory. On one RTX PRO 6000 Blackwell, a container holding
+20 GiB of GPU memory with 2 GiB of it written went from a 21 GB snapshot
+to 2.1 GB, taken in 6.5 s rather than 10.4 s, and restored — the GPU's
+memory back, byte for byte — in 5.3 s.
+
+Memory that does not compress costs about a fifth more CPU to dump and
+saves nothing, so `off` is there for a handler whose containers are all
+of that kind.
+
+Restores need no setting: an image says whether it holds compressed
+pages, so snapshots taken before this and snapshots taken with `off`
+restore either way. A snapshot with compressed pages does need a CRIU
+with LZ4 to restore, which matters for one moved to another node
+(`gcr snapshot-push`): it refuses with "LZ4 support is required for this
+image chain" rather than restoring something wrong.
 
 ## Annotations
 

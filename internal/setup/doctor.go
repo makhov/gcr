@@ -125,6 +125,7 @@ func Doctor() []Check {
 		for flag, what := range map[string]string{
 			"--seccomp-notify-socket": "time travel", "--landlock-fs": "Landlock across restores",
 			"--lazy-pages-on-demand": "forks holding only the memory they touch",
+			"--compress":             "compressed checkpoints (a reserved-but-unwritten page costs nothing)",
 		} {
 			if !bytes.Contains(help, []byte(flag)) {
 				lacks = append(lacks, what)
