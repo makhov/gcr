@@ -12,6 +12,7 @@ import (
 	"github.com/checkpoint-restore/go-criu/v8/crit"
 	"github.com/checkpoint-restore/go-criu/v8/crit/images/mnt"
 	"github.com/containerd/errdefs"
+	securejoin "github.com/cyphar/filepath-securejoin"
 	devices "github.com/opencontainers/cgroups/devices/config"
 	"github.com/opencontainers/runc/libcontainer/configs"
 	"golang.org/x/sys/unix"
@@ -55,13 +56,13 @@ func checkMounts(dir string, cfg *configs.Config) error {
 	has := map[string]bool{}
 	for _, m := range cfg.Mounts {
 		if m.IsBind() {
-			has[m.Destination] = true
+			has[inRootfs(cfg.Rootfs, m.Destination)] = true
 		}
 	}
 	for _, d := range cfg.Devices {
 		// Bound from the host where they cannot be created (in a user
 		// namespace).
-		has[d.Path] = true
+		has[inRootfs(cfg.Rootfs, d.Path)] = true
 	}
 	var missing, extra []string
 	for d := range had {
@@ -93,5 +94,25 @@ func checkMounts(dir string, cfg *configs.Config) error {
 // isDevice says whether path is one of the container's devices: created,
 // or bound where they cannot be, so either way is the container's own.
 func isDevice(cfg *configs.Config, path string) bool {
-	return slices.ContainsFunc(cfg.Devices, func(d *devices.Device) bool { return d.Path == path })
+	return slices.ContainsFunc(cfg.Devices, func(d *devices.Device) bool {
+		return inRootfs(cfg.Rootfs, d.Path) == path
+	})
+}
+
+// inRootfs is where a mount of the spec's dest ends up inside rootfs,
+// which is the name the images hold: libcontainer resolves a
+// destination through the symlinks in the container's root before it
+// mounts anything there, and keys the mount for CRIU by the result. The
+// two differ whenever the image links one directory at another - /lib ->
+// usr/lib in a Debian image, so a CDI mount of /lib/firmware/nvidia/...
+// is recorded as /usr/lib/firmware/nvidia/... Comparing the spec's
+// spelling against that found every such mount missing and the same
+// mount extra.
+func inRootfs(rootfs, dest string) string {
+	dest = strings.TrimPrefix(dest, rootfs)
+	full, err := securejoin.SecureJoin(rootfs, dest)
+	if err != nil {
+		return dest
+	}
+	return full[len(rootfs):]
 }

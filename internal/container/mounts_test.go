@@ -83,3 +83,35 @@ func TestCheckMounts(t *testing.T) {
 		})
 	}
 }
+
+// A mount lands where the image's own symlinks point: /lib -> usr/lib in
+// a Debian image, so libcontainer mounts, and CRIU records,
+// /usr/lib/firmware/... for a CDI mount the spec writes as /lib/firmware/...
+// Comparing the spec's spelling against the image found every such mount
+// missing and the same mount extra, which refused every fork of a GPU
+// container that took its devices through CDI.
+func TestCheckMountsThroughRootfsSymlinks(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "usr/lib/firmware/nvidia"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("usr/lib", filepath.Join(root, "lib")); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	// What the dump recorded: the resolved names.
+	writeMounts(t, dir, "/usr/lib/firmware/nvidia/gsp_ga10x.bin", "/etc/hosts")
+	cfg := &configs.Config{
+		Rootfs:  root,
+		Devices: []*devices.Device{{Path: "/dev/nvidia0"}},
+		Mounts: []*configs.Mount{
+			{Destination: "/proc", Device: "proc"},
+			// What the spec asks for: through the symlink.
+			{Destination: "/lib/firmware/nvidia/gsp_ga10x.bin", Device: "bind", Flags: unix.MS_BIND},
+			{Destination: "/etc/hosts", Device: "bind", Flags: unix.MS_BIND},
+		},
+	}
+	if err := checkMounts(dir, cfg); err != nil {
+		t.Fatalf("refused a fork whose mounts differ only by a symlink in the image: %v", err)
+	}
+}
