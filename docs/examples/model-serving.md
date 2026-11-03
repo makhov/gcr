@@ -124,9 +124,10 @@ between seconds and minutes.
 ## Name snapshots by what a restore checks
 
 A GPU snapshot does not restore just anywhere. It needs the same NVIDIA
-driver version, the same GPU model, and — for now — the same GPU index
-([GPUs](../gpus.md#in-kubernetes)). A restore refuses rather than
-restoring something wrong:
+driver version and the same GPU model
+([GPUs](../gpus.md#in-kubernetes)); which GPU of that model the node
+hands out does not matter. A restore refuses rather than restoring
+something wrong:
 
 ```
 restore: checkpoint was taken on NVIDIA driver 580.65.06, this node has 595.91.07: failed precondition
@@ -139,6 +140,8 @@ than the model's name. Put in the tag what a restore compares:
 registry.example.com/snapshots/qwen3-8b:vllm0.32.0-len8192-rtxpro6000-d595
 ```
 
+(The GPU model and the driver, not the index.)
+
 Then a node upgraded to a new driver simply misses, builds its own, and
 nothing tries to restore a snapshot it cannot take. The alternative —
 keying on the model alone — fails at activation, which is the worst time
@@ -148,10 +151,10 @@ to find out.
 
 ## What to watch
 
-- **One model per GPU index, today.** Restoring onto a different index
-  than the snapshot was taken on is refused, so a node with several GPUs
-  handing them out freely will fail restores. A node per GPU, or
-  index-pinned scheduling, works now.
+- **A node with several GPUs can run one server per card.** A snapshot
+  is not tied to the GPU it was taken on, so the device plugin may hand
+  out whichever card is free. What a restore does need is the same
+  driver version and GPU model, which is a property of the node pool.
 - **A snapshot has to outlive everything started from it.** gcr counts
   users and refuses to delete one in use (`gcr snapshot-users`,
   [snapshot lifetime](../fork.md#snapshot-lifetime)).
