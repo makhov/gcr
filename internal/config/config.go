@@ -75,11 +75,35 @@ type Config struct {
 	// TimeTravel limits what a container's annotations may ask of time
 	// travel: every point is a dump of its memory, kept on the node.
 	TimeTravel TimeTravelLimits `toml:"TimeTravel"`
+	// Compression is "auto" (default) or "off"; see CompressionMode.
+	Compression CompressionMode `toml:"Compression"`
 
 	// IOUID and IOGID own the container's stdio pipes. containerd sets
 	// them (in runc's options) for Kubernetes user namespace pods, so the
 	// container's root can reopen /dev/stdout.
 	IOUID, IOGID int `toml:"-"`
+}
+
+// CompressionMode says whether a checkpoint's memory pages are compressed
+// as they are written.
+type CompressionMode string
+
+const (
+	// CompressionAuto compresses them where the node's CRIU can (built
+	// with LZ4), and writes them whole where it cannot. A page of zeroes
+	// costs almost nothing to store, which is most of what a process that
+	// has reserved memory it has not filled holds.
+	CompressionAuto CompressionMode = "auto"
+	// CompressionOff writes every page whole.
+	CompressionOff CompressionMode = "off"
+)
+
+func (m CompressionMode) Validate() error {
+	switch m {
+	case CompressionAuto, CompressionOff:
+		return nil
+	}
+	return fmt.Errorf("Compression = %q, want auto or off: %w", m, errdefs.ErrInvalidArgument)
 }
 
 // TimeTravelLimits bound gcr.dev/time-travel-interval and -keep.
@@ -108,8 +132,8 @@ func (d *Duration) UnmarshalText(b []byte) error {
 func FromOptions(a *anypb.Any) (Config, error) {
 	c := Config{UserNamespaces: userns.Auto, Hardening: hardening.Standard,
 		NestedUserNamespaces: hardening.Guarded, Landlock: landlock.Standard,
-		NetlinkPolicy: netpolicy.Auto,
-		TimeTravel:    TimeTravelLimits{MinInterval: Duration(100 * time.Millisecond), MaxKeep: 50}}
+		NetlinkPolicy: netpolicy.Auto, Compression: CompressionAuto,
+		TimeTravel: TimeTravelLimits{MinInterval: Duration(100 * time.Millisecond), MaxKeep: 50}}
 	if a == nil || len(a.GetValue()) == 0 {
 		return c, nil
 	}
@@ -152,6 +176,9 @@ func FromOptions(a *anypb.Any) (Config, error) {
 		return c, err
 	}
 	if err := c.MigrationTLS.Validate(); err != nil {
+		return c, err
+	}
+	if err := c.Compression.Validate(); err != nil {
 		return c, err
 	}
 	for _, a := range c.PodAnnotations {

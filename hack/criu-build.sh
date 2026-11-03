@@ -15,7 +15,7 @@ HOST=$(dpkg --print-architecture)
 export DEBIAN_FRONTEND=noninteractive
 
 deps=(libprotobuf-c-dev libnl-3-dev libnet1-dev libcap-dev libbsd-dev libbpf-dev uuid-dev
-	libelf-dev zlib1g-dev libzstd-dev libmd-dev libprotobuf-dev libacl1-dev)
+	libelf-dev zlib1g-dev libzstd-dev liblz4-dev libmd-dev libprotobuf-dev libacl1-dev)
 cross=() tar_cross=()
 if [ "$ARCH" != "$HOST" ]; then
 	# Ubuntu serves amd64 from archive and arm64 from ports.

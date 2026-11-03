@@ -502,10 +502,25 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			// Restores hand the restored listeners back to this supervisor.
 			criuOpts = append(criuOpts, sup.CRIUOption())
 		}
+		// Compressing a checkpoint's pages costs a little CPU on memory
+		// that does not compress, and saves most of the writing (and the
+		// reading back) on memory that does: a reserved-but-unwritten
+		// region, which a model server's weights sit next to, is zeroes.
+		// A restore reads what the images say they hold, so this does not
+		// have to be set for one, and older snapshots still restore.
+		var dumpOpts []string
+		if cfg.Compression == config.CompressionAuto {
+			if container.PageCompression() {
+				dumpOpts = append(dumpOpts, "compress")
+			} else {
+				log.G(ctx).Debug("criu is not built with LZ4: checkpoints keep every page whole")
+			}
+		}
 		// Always, even empty: a migration adds options of its own.
 		prep.CRIU = container.CRIUConfig{
 			Path:           filepath.Join(ex.stateDir, "criu.conf"),
 			Options:        criuOpts,
+			DumpOptions:    dumpOpts,
 			RestoreOptions: restoreOpts,
 		}
 		return prep, nil

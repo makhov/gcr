@@ -80,8 +80,8 @@ type CRIUConfig struct {
 	// Path is the file; "" keeps libcontainer's defaults.
 	Path string
 	// Options are config lines for every checkpoint and restore,
-	// RestoreOptions for restores only.
-	Options, RestoreOptions []string
+	// DumpOptions for checkpoints only, RestoreOptions for restores only.
+	Options, DumpOptions, RestoreOptions []string
 }
 
 // write writes the configuration for a checkpoint, or a restore, with
@@ -93,6 +93,8 @@ func (cc CRIUConfig) write(restore bool, extra ...string) error {
 	lines := slices.Clone(cc.Options)
 	if restore {
 		lines = append(lines, cc.RestoreOptions...)
+	} else {
+		lines = append(lines, cc.DumpOptions...)
 	}
 	lines = append(lines, extra...)
 	if err := os.MkdirAll(filepath.Dir(cc.Path), 0o700); err != nil {
@@ -830,6 +832,13 @@ func (c *Container) Point(ctx context.Context, dir, parent string) error {
 // wrote (soft-dirty bits), which incremental dumps need; arm64 does not.
 var MemoryTracking = sync.OnceValue(func() bool {
 	return exec.Command("criu", "check", "--feature", "mem_dirty_track").Run() == nil
+})
+
+// PageCompression says whether this node's criu can compress the pages it
+// writes, which it has to be built with LZ4 for (CONFIG_LZ4). Without it,
+// asking would fail the checkpoint rather than write it whole.
+var PageCompression = sync.OnceValue(func() bool {
+	return exec.Command("criu", "check", "--feature", "compress").Run() == nil
 })
 
 func (c *Container) snapshot(ctx context.Context, dir, parent string, stop bool) (retErr error) {
