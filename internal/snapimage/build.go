@@ -18,6 +18,7 @@ import (
 	"github.com/containerd/containerd/v2/core/remotes/docker"
 	"github.com/containerd/containerd/v2/core/remotes/docker/config"
 	"github.com/containerd/containerd/v2/defaults"
+	"github.com/containerd/containerd/v2/pkg/cdi"
 	"github.com/containerd/containerd/v2/pkg/cio"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/oci"
@@ -52,6 +53,10 @@ type BuildOptions struct {
 	// Volumes are where the pod mounts volumes: each gets an empty
 	// directory.
 	Volumes []string
+	// Devices are CDI devices the pod is given (nvidia.com/gpu=0), as the
+	// device plugin gives them: a snapshot of a container using a GPU has
+	// to be taken with the GPU.
+	Devices []string
 	// ServiceAccount mounts a service account's token where Kubernetes
 	// does: false for pods with automountServiceAccountToken: false.
 	ServiceAccount bool
@@ -216,6 +221,12 @@ func Build(ctx context.Context, o BuildOptions) (stop func(), retErr error) {
 	}
 	if o.UID >= 0 {
 		specOpts = append(specOpts, oci.WithUIDGID(uint32(o.UID), uint32(o.GID)))
+	}
+	if len(o.Devices) > 0 {
+		// Last: injecting a device adds mounts, environment, hooks and
+		// device nodes, and no option after it may reset those fields.
+		// The mounts above do.
+		specOpts = append(specOpts, cdi.WithCDIDevices(o.Devices...))
 	}
 	o.Say("starting %s as %s", o.Image, o.ID)
 	c, err := client.NewContainer(ctx, o.ID,

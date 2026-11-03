@@ -459,7 +459,7 @@ func (f *stringsFlag) Set(v string) error { *f = append(*f, v); return nil }
 func snapshotBuild(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("snapshot-build", flag.ExitOnError)
 	o := snapimage.BuildOptions{ServiceAccount: true}
-	var env, volumes stringsFlag
+	var env, volumes, devices stringsFlag
 	fs.StringVar(&o.Address, "address", "/run/containerd/containerd.sock", "containerd's socket")
 	fs.StringVar(&o.Namespace, "n", "gcr-build", "the containerd namespace to run it in")
 	ready := fs.String("ready", "", "a shell command run in the container until it exits 0; the snapshot is taken then")
@@ -467,6 +467,7 @@ func snapshotBuild(ctx context.Context, args []string) error {
 	fs.DurationVar(&o.Settle, "wait", 0, "how long to wait before the snapshot (after -ready)")
 	fs.Var(&env, "env", "KEY=VALUE added to the image's environment (repeatable)")
 	fs.Var(&volumes, "volume", "a path the pod mounts a volume at (repeatable): the snapshot must be taken with the pod's mounts")
+	fs.Var(&devices, "device", "a CDI device the pod is given (nvidia.com/gpu=0), repeatable: a snapshot of a GPU container must be taken with the GPU")
 	noSA := fs.Bool("no-service-account", false, "the pod sets automountServiceAccountToken: false")
 	user := fs.String("user", "", "UID[:GID] to run as (the pod's runAsUser, runAsGroup)")
 	fs.BoolVar(&o.NoNewPrivileges, "no-new-privileges", false, "the pod sets allowPrivilegeEscalation: false")
@@ -477,7 +478,7 @@ func snapshotBuild(ctx context.Context, args []string) error {
 		fs.PrintDefaults()
 		os.Exit(2)
 	}
-	o.Image, o.Env, o.Volumes, o.ServiceAccount, o.PlainHTTP = fs.Arg(0), env, volumes, !*noSA, *plainHTTP
+	o.Image, o.Env, o.Volumes, o.Devices, o.ServiceAccount, o.PlainHTTP = fs.Arg(0), env, volumes, devices, !*noSA, *plainHTTP
 	if o.Args = fs.Args()[2:]; len(o.Args) > 0 && o.Args[0] == "--" {
 		o.Args = o.Args[1:]
 	}

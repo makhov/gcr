@@ -136,8 +136,9 @@ image by digest. `kubectl gcr snapshot` runs it on a pod's node.
 Runs IMAGE the way a Kubernetes pod's container runs, until `-ready`
 succeeds in it, and pushes a snapshot of it to REF as an image pods run
 warm (`snapshot-image`): for CI. Its flags say what the pod has
-(`-volume`, `-no-service-account`, `-user`, `-no-new-privileges`), which
-a restore checks ([building one in CI](snapshot-images.md#building-one-in-ci)).
+(`-volume`, `-device`, `-no-service-account`, `-user`,
+`-no-new-privileges`), which a restore checks
+([building one in CI](snapshot-images.md#building-one-in-ci)).
 
 ### `gcr snapshot-push [-plain-http] [-format tar|nydus] DIR REF`
 

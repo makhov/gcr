@@ -120,6 +120,12 @@ and start warm.
 - **And with its privileges:** `-user UID[:GID]` for `runAsUser`, and
   `-no-new-privileges` for `allowPrivilegeEscalation: false`, which a
   restore checks ([allowing it](#allowing-it)).
+- **`-device nvidia.com/gpu=0`** gives it a GPU through CDI, as the
+  device plugin gives a pod one: a snapshot of a container using a GPU
+  has to be taken with the GPU, and the host needs a CDI spec
+  (`nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`). Repeat it
+  for more than one. What the nodes restoring it need, and the index it
+  has to land on, are in [GPUs](gpus.md#in-kubernetes).
 - `-env KEY=VALUE` adds to the image's environment; the restored
   processes keep the environment they had, not the pod's.
 - `-address` is containerd's socket (`/run/containerd/containerd.sock`).
