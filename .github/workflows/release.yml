@@ -129,9 +129,11 @@ jobs:
             # shellcheck disable=SC2086
             gh release create "$TAG" $flags
           fi
-          gh release upload "$TAG" \
-            dist/gcr-* dist/kubectl-gcr-* dist/gcr.yaml dist/gcr-operator.yaml dist/SHA256SUMS \
-            --clobber
+          # Everything hack/release.sh built, which is all dist/ holds:
+          # naming the files again would list some of them twice (gcr-*
+          # already matches gcr-operator.yaml), and the second upload of
+          # a name fails whatever --clobber says.
+          gh release upload "$TAG" dist/* --clobber
 
   image:
     # The installer image the DaemonSet and the operator run, for both
@@ -167,6 +169,14 @@ jobs:
           push: true
           tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
           build-args: VERSION=${{ github.ref_name }}
+          # image.source is what links the package to this repository, and
+          # so what lets GITHUB_TOKEN push it at all: a package pushed by
+          # hand without it belongs to the owner and no repository, and an
+          # Actions push to it is denied (permission_denied: write_package).
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ github.sha }}
           provenance: true
           sbom: true
       - name: Sign the image
