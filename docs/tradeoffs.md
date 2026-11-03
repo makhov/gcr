@@ -271,12 +271,11 @@ off.
 - **A GPU fork copies device memory.** Unlike forks' host memory, which
   memory merging can share, each fork has its own copy of the
   snapshot's GPU memory, and the forks have to fit on the GPU together.
-- **A restore needs the same GPU index,** the same driver version, and
-  the same GPU models and count.
+- **A restore needs the same driver version** and the same GPU models
+  and count; any GPU index will do.
 - **GPU containers migrate stop-and-copy.** CRIU's CUDA plugin cannot
   pre-dump.
-- **Not yet built:** the NVIDIA ioctl proxy, and restoring onto another
-  GPU index.
+- **Not yet built:** the NVIDIA ioctl proxy.
 
 ### Platform and maturity
 

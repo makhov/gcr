@@ -13,12 +13,12 @@
 // r580 and newer), in the libcuda the container uses (UseLibCUDA).
 //
 // Restores need the same driver version (the restored processes have its
-// libraries mapped, by path and content) and the same GPU models. They also
-// need the same device minors: libcuda opens /dev/nvidia<minor> for the
-// minor the driver reports, and the container's /dev is a set of mounts CRIU
-// rebuilds exactly, so a container cannot move to another GPU index yet.
-// GPUs may change identity (UUID), as on another node: CRIU's CUDA plugin
-// maps them by ordinal.
+// libraries mapped, by path and content) and the same GPU models. They do
+// not need the same GPU index: the plugin's checkpoint hands the devices
+// back to the driver, so a dump holds no open /dev/nvidia<minor> and no
+// mount of one, and the restore binds whichever GPUs the container is
+// given. Their identity (UUID) may differ too, as on another node: CRIU's
+// CUDA plugin maps them by ordinal (RestoreCRIUOptions).
 package gpu
 
 import (
@@ -287,10 +287,6 @@ func Compatible(saved, now *Info) error {
 		n := now.GPUs[i]
 		if s.Model != n.Model {
 			return fmt.Errorf("checkpoint used a %s, the container has a %s: %w", s.Model, n.Model, errdefs.ErrFailedPrecondition)
-		}
-		if s.Minor != n.Minor {
-			return fmt.Errorf("checkpoint used GPU device minor %d, the container has %d; restoring onto another GPU index is not supported yet: %w",
-				s.Minor, n.Minor, errdefs.ErrNotImplemented)
 		}
 	}
 	return nil

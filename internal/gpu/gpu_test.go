@@ -121,7 +121,12 @@ func TestCompatible(t *testing.T) {
 		{"other model", &Info{Driver: "570.86.15", GPUs: []GPU{{Minor: 0, Model: "NVIDIA H100"}}}, errdefs.ErrFailedPrecondition},
 		{"two GPUs", &Info{Driver: "570.86.15", GPUs: []GPU{l4(0, "GPU-a"), l4(1, "GPU-c")}}, errdefs.ErrFailedPrecondition},
 		{"no GPU", nil, errdefs.ErrFailedPrecondition},
-		{"other index", &Info{Driver: "570.86.15", GPUs: []GPU{l4(2, "GPU-a")}}, errdefs.ErrNotImplemented},
+		// The index a GPU had is not what a restore binds to: the
+		// plugin's checkpoint gives the devices back to the driver, so a
+		// dump holds no /dev/nvidia<minor>, and the restored process
+		// takes whichever GPUs its container was given.
+		{"another index", &Info{Driver: "570.86.15", GPUs: []GPU{l4(2, "GPU-a")}}, nil},
+		{"another index and another card", &Info{Driver: "570.86.15", GPUs: []GPU{l4(5, "GPU-b")}}, nil},
 	} {
 		err := Compatible(saved, tc.now)
 		if (tc.want == nil) != (err == nil) || (tc.want != nil && !errors.Is(err, tc.want)) {

@@ -20,11 +20,11 @@ checkpoint and checks them before a restore:
 - **Same NVIDIA driver version.** The restored processes have its
   libraries mapped by path and content.
 - **Same GPU models and count.**
-- **Same GPU device minors, for now.** libcuda opens `/dev/nvidia<minor>`
-  for the minor the driver reports, and the container's `/dev` is part of
-  what CRIU rebuilds exactly, so a container cannot move to another GPU
-  index yet. Another GPU at the same index (another node) works: GPU UUIDs
-  are mapped by ordinal (`cuda_plugin.device-map=auto`, restores only).
+- **Any GPU index.** The plugin's checkpoint gives the devices back to
+  the driver, so a dump holds no open `/dev/nvidia<minor>`, and the
+  restored processes bind whichever GPUs their container is given. Their
+  identity (UUID) may differ too, as on another node: the plugin maps
+  them by ordinal (`cuda_plugin.device-map=auto`, restores only).
 
 A mismatch fails the restore with the reason. A container whose GPUs gcr
 cannot describe (no driver information) is refused checkpoints rather than
@@ -108,9 +108,9 @@ its node that gcr can checkpoint it: `gcr doctor`'s `GPUs` line, or the
 installer pod's log, which has the same report.
 
 Snapshots and migrations of GPU pods restore only onto nodes with the
-same driver version and GPU models, at the same GPU indexes (above). Keep
-GPU node pools on one driver version, and pin restored pods to those
-nodes with a `nodeSelector`.
+same driver version and GPU models (above); which GPU the node hands out
+does not matter. Keep GPU node pools on one driver version, and pin
+restored pods to those nodes with a `nodeSelector`.
 
 ## Tested
 
