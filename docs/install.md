@@ -41,11 +41,11 @@ sudo gcr setup              # add -docker to register with Docker too
 **The install script** picks the latest release for your machine's
 architecture, checks it against the release's `SHA256SUMS`, and puts it
 in `/usr/local/bin` (with `sudo` if it has to). It changes nothing else.
-`GCR_VERSION=v0.1.8` picks a release, and `GCR_BIN_DIR` another
+`GCR_VERSION={{{ gcr_version }}}` picks a release, and `GCR_BIN_DIR` another
 directory:
 
 ```sh
-curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | GCR_VERSION=v0.1.8 sh
+curl -sSfL https://raw.githubusercontent.com/makhov/gcr/main/install.sh | GCR_VERSION={{{ gcr_version }}} sh
 ```
 
 A release is one file per architecture that carries the shim, gcr's CRIU
@@ -209,7 +209,7 @@ reports what the host can do, and what to do about what it cannot:
 $ sudo gcr doctor
 ok   kernel          7.0.0-38-generic
 ok   cgroup v2       unified hierarchy
-ok   shim            /usr/local/bin/containerd-shim-gcr-v2 v0.1.8
+ok   shim            /usr/local/bin/containerd-shim-gcr-v2 {{{ gcr_version }}}
 ok   containerd      v2.4.2, runtime gcr registered
 ok   CRIU            /var/lib/gcr/bin/criu 4.2.1 (v4.2.1+gcr.1)
 ok   Landlock        ABI 8

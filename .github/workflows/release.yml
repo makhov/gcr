@@ -1,0 +1,207 @@
+# A release, from a tag: `git tag -s v0.1.9 -m v0.1.9 && git push origin
+# v0.1.9` (docs/development.md#releases). Nothing else is done by hand.
+#
+# It waits for CI to pass on the tagged commit, builds each architecture on
+# a runner of its own (hack/release.sh, CRIU included), uploads the files to
+# a draft release to look over and publish, pushes the installer image, and
+# commits the release's version into the chart and the manifests generated
+# from it. The Helm chart has releases of its own (chart-release.yml).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Publishing the draft release is what makes it the release: that is
+  # when the version goes into the chart and the manifests (the stamp job).
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  precheck:
+    # A release is only cut from a commit CI has passed, whether the tag
+    # arrives before the run finishes or long after it.
+    name: CI passed on the tagged commit
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - name: Wait for CI on ${{ github.sha }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          deadline=$((SECONDS + 5400))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            run=$(gh run list --workflow ci.yml --commit "$SHA" --limit 1 \
+              --json status,conclusion --jq '.[0] // empty')
+            status=$(printf '%s' "$run" | jq -r '.status // empty')
+            case $status in
+            completed)
+              conclusion=$(printf '%s' "$run" | jq -r .conclusion)
+              [ "$conclusion" = success ] && { echo "CI passed on $SHA"; exit 0; }
+              echo "CI $conclusion on $SHA: no release from it" >&2
+              exit 1
+              ;;
+            "") echo "no CI run for $SHA yet" ;;
+            *) echo "CI $status on $SHA" ;;
+            esac
+            sleep 30
+          done
+          echo "CI on $SHA did not finish in 90 minutes" >&2
+          exit 1
+
+  build:
+    # Each architecture on its own runner, so nothing cross-compiles: gcr
+    # and its shim need cgo, and CRIU is built in a container (ubuntu:22.04)
+    # for the runner's own architecture.
+    name: Build ${{ matrix.arch }}
+    if: github.event_name == 'push'
+    needs: precheck
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get update && sudo apt-get install -y libseccomp-dev zstd
+      - run: make release VERSION=${{ github.ref_name }} RELEASE_ARCHES=${{ matrix.arch }}
+      # The release is built for the runner's own architecture, so it runs
+      # here: this prints the version and the CRIU it carries.
+      - run: ./dist/gcr-${{ github.ref_name }}-linux-${{ matrix.arch }} version
+      # SHA256SUMS covers one architecture here; the release job writes the
+      # one that covers both.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-${{ matrix.arch }}
+          path: |
+            dist/
+            !dist/SHA256SUMS
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum gcr-* kubectl-gcr-* gcr.yaml gcr-operator.yaml | sort -u -k2 >SHA256SUMS
+          cat SHA256SUMS
+      - name: Attest what was built
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/gcr-*,dist/kubectl-gcr-*
+      - name: Draft the release and upload its files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists already; uploading to it"
+          else
+            flags="--draft --title $TAG --generate-notes"
+            case $TAG in *-*) flags="$flags --prerelease" ;; esac
+            # shellcheck disable=SC2086
+            gh release create "$TAG" $flags
+          fi
+          gh release upload "$TAG" \
+            dist/gcr-* dist/kubectl-gcr-* dist/gcr.yaml dist/gcr-operator.yaml dist/SHA256SUMS \
+            --clobber
+
+  image:
+    # The installer image the DaemonSet and the operator run, for both
+    # architectures, from the files the build jobs made.
+    name: Installer image
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: sigstore/cosign-installer@v3
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          build-args: VERSION=${{ github.ref_name }}
+          provenance: true
+          sbom: true
+      - name: Sign the image
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE"
+
+  stamp:
+    # What a fresh clone installs, once the release is published: the
+    # chart's appVersion and the image in the manifests generated from it.
+    # The documentation site takes its version from the release tag, so
+    # there is nothing else to bump. A pre-release is not what a clone
+    # should install, so it is left out.
+    name: The release in the chart and manifests
+    if: github.event_name == 'release' && !github.event.release.prerelease
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.22.1
+      - run: hack/stamp-version.sh "${{ github.event.release.tag_name }}"
+      - name: Commit it to main
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          if git diff --quiet; then
+            echo "main installs $TAG already"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -aqm "chart, deploy: install $TAG"
+          git push origin HEAD:main

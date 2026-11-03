@@ -115,9 +115,12 @@ docs:
 
 # Serves the site on http://localhost:$(DOCS_DEV_PORT)/gcr/, rebuilt as files
 # change, from a container with mkdocs (docs/Dockerfile): nothing to
-# install but Docker.
+# install but Docker. The container has no git, so the version the pages
+# show (hack/mkdocs_macros.py) is passed in.
 DOCKER ?= docker
 DOCS_DEV_PORT ?= 8000
+DOCS_VERSION ?= $(shell git tag --list 'v[0-9]*' --sort=-version:refname | head -1)
 docs-serve-dev:
 	$(DOCKER) build -q -t gcr-docs -f docs/Dockerfile docs
-	$(DOCKER) run --rm --init -v "$(CURDIR):/gcr:ro" -p '$(DOCS_DEV_PORT):8000' gcr-docs
+	$(DOCKER) run --rm --init -v "$(CURDIR):/gcr:ro" -e GCR_VERSION='$(DOCS_VERSION)' \
+		-p '$(DOCS_DEV_PORT):8000' gcr-docs
