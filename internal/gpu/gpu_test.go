@@ -203,3 +203,32 @@ func TestUseLibCUDA(t *testing.T) {
 		t.Fatalf("%d entries beside libcuda.so.1", len(entries)-1)
 	}
 }
+
+func TestComputeAppsMemory(t *testing.T) {
+	out := "267226, 4738\n1234, 100\n267300, 512\n"
+	got, err := computeAppsMemory(out, []int{267226, 267300, 9})
+	if err != nil || got != (4738+512)<<20 {
+		t.Fatalf("got %d, %v", got, err)
+	}
+	if got, err := computeAppsMemory("", []int{1}); err != nil || got != 0 {
+		t.Fatalf("no processes: %d, %v", got, err)
+	}
+	if _, err := computeAppsMemory("42, [N/A]\n", []int{42}); err == nil {
+		t.Fatal("[N/A] for one of ours was not an error")
+	}
+	if got, err := computeAppsMemory("42, [N/A]\n", []int{7}); err != nil || got != 0 {
+		t.Fatalf("[N/A] for another process: %d, %v", got, err)
+	}
+}
+
+func TestToolsOf(t *testing.T) {
+	spec := &specs.Spec{Mounts: []specs.Mount{
+		{Destination: "/usr/bin/nvidia-smi", Source: "/run/nvidia/driver/usr/bin/nvidia-smi"},
+		{Destination: "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.580.65.06", Source: "/run/nvidia/driver/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.580.65.06"},
+		{Destination: "/etc/hosts", Source: "/var/lib/hosts"},
+	}}
+	want := Tools{SMI: "/run/nvidia/driver/usr/bin/nvidia-smi", LibDir: "/run/nvidia/driver/usr/lib/x86_64-linux-gnu"}
+	if got := ToolsOf(spec); got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
