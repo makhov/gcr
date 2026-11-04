@@ -417,27 +417,41 @@ more than `MaxKeep` kept. A container asking for more fails to start.
 
 ### `Compression`
 
-Whether a checkpoint's memory pages are compressed as they are written
-(LZ4).
+Whether a checkpoint's memory is compressed as it is written: its
+memory pages (LZ4), and, with NVIDIA driver r615 or newer, the GPU
+memory it writes to an image of its own (zstd).
 
 - `auto`:
   - On where the node's CRIU is built with LZ4, which gcr's is
     (`gcr doctor` says when it is not).
   - Without it, the shim logs once and writes every page whole.
-- `off`: every page is written whole.
+  - GPU memory is compressed with the node's `libzstd.so.1`; without it,
+    only chunks of zeroes are left out.
+- `off`: every page, and all GPU memory, is written whole.
 
 A page of zeroes costs almost nothing to store, and a process that has
 reserved memory it has not filled is mostly those. A model server is the
 case this is worth most for: it reserves a GPU's memory up front for a
-KV cache it has barely used, and CRIU's CUDA plugin stages all of that
-through host memory. On one RTX PRO 6000 Blackwell, a container holding
-20 GiB of GPU memory with 2 GiB of it written went from a 21 GB snapshot
-to 2.1 GB, taken in 6.5 s rather than 10.4 s, and restored — the GPU's
-memory back, byte for byte — in 5.3 s.
+KV cache it has barely used. With custom storage (r615+), on an RTX PRO
+6000 Blackwell, a container holding a bf16 model's 2.9 GiB of weights
+and 16 GiB reserved as zeroes on the GPU snapshots, with `auto`, to a
+1.97 GiB image of its GPU memory, in 3.58 s on a local disk, and forks in
+0.99 s. With `off` the image is that memory whole, 19 GiB.
+
+The weights themselves shrink by about a third (3.41 to 2.24 GiB for that
+model alone), for about 0.3 s more on a snapshot and 0.1 s on a fork:
+LZ4 does not shrink them at all, which is why GPU memory uses zstd.
+
+Before r615 the GPU memory is staged through host memory and compressed
+with the pages. On the same GPU, a container holding 20 GiB of GPU memory
+with 2 GiB of it written went from a 21 GB snapshot to 2.1 GB, taken in
+6.5 s rather than 10.4 s, and restored, the GPU's memory back byte for
+byte, in 5.3 s.
 
 Memory that does not compress costs about a fifth more CPU to dump and
 saves nothing, so `off` is there for a handler whose containers are all
-of that kind.
+of that kind, or whose snapshots never leave a fast local disk and need
+every tenth of a second on a restore.
 
 Restores need no setting: an image says whether it holds compressed
 pages, so snapshots taken before this and snapshots taken with `off`

@@ -137,7 +137,9 @@ under a 4 GiB memory limit, with no swap, snapshots with its memory
 peaking at 0.4 GiB, and its fork, under the same limit, at 0.7 GiB.
 
 The image is compressed, like the rest of the checkpoint, with zstd from
-the node (`libzstd.so.1`; without it, it is stored as it is). Model
+the node (`libzstd.so.1`; without it, it is stored as it is), and memory
+that is all zeroes, such as a KV cache reserved and not yet written, is
+not stored at all ([`Compression`](configuration.md#compression)). Model
 weights barely shrink with the LZ4 CRIU uses for memory pages, but their
 high bytes, sign and exponent, do with zstd: a bf16 model (Qwen2.5-1.5B,
 2.9 GiB of weights) went from 3.41 GiB to 2.24 GiB, a third less to
