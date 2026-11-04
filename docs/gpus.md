@@ -143,11 +143,13 @@ There are two ways to make the room:
    memory plus the GPU memory it uses, on nodes with that much RAM free.
    Fastest, and the only way with no swap.
 2. **Swap.** The copy is ordinary memory, so it can go to swap, and a
-   node can snapshot more GPU memory than it has RAM. It is slow, and a
-   restore is slower than the checkpoint: the GPU memory goes to swap,
-   then from swap into the snapshot, and back through swap onto the GPU.
-   It keeps a workload alive rather than making snapshots fast. The node
-   needs:
+   node can snapshot more GPU memory than it has RAM. It is slow: with
+   20 GiB of GPU memory under an 8 GiB limit, a checkpoint that takes
+   4 s in memory took 49–240 s, and a restore that takes 2 s took over 7
+   minutes (below).
+   The restore is the slower half: the GPU memory comes back through
+   swap under the same limit, paged in and out again. Swap keeps a
+   workload alive rather than making snapshots fast. The node needs:
 
     - **A swap device** at least as large as the GPU memory being
       snapshotted, on a fast local disk.
@@ -162,16 +164,19 @@ There are two ways to make the room:
       pod's share covers its GPU memory.
 
 Measured on the node below, with a process holding 20 GiB on the GPU in a
-container limited to 8 GiB, through the driver's checkpoint API:
+container limited to 8 GiB (64 GiB in the last row), through the
+driver's checkpoint API:
 
-| | Checkpoint | Afterwards |
-| --- | --- | --- |
-| No swap | killed | the workload is gone |
-| 64 GiB swap, `vm.swappiness=0` | killed | nothing was swapped |
-| 64 GiB swap, `vm.swappiness=60` | 49–240 s | 8 GiB in RAM, 20.9 GiB in swap; the restore took over 7 minutes, with the data intact |
+| | Checkpoint | Restore | Afterwards |
+| --- | --- | --- | --- |
+| No swap | killed | — | the workload is gone |
+| 64 GiB swap, `vm.swappiness=0` | killed | — | nothing was swapped |
+| 64 GiB swap, `vm.swappiness=60` | 49–240 s | over 7 minutes | 8 GiB in RAM, 20.9 GiB in swap at the checkpoint; restored with its data intact |
+| 64 GiB limit: fits in memory | 4.2 s | 2.3 s | 21 GiB in RAM at the checkpoint; restored with its data intact |
 
-The swap was a file on the virtual machine's disk. The same checkpoint
-takes about 1.5 s when the copy fits in memory.
+The swap was a file on the virtual machine's disk, a Ceph RBD volume:
+network storage, whose speed varied between runs (49 s and 240 s for the
+same checkpoint). Swap on a local disk has not been measured.
 
 ## Tested
 
