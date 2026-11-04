@@ -20,11 +20,15 @@ checkpoint and checks them before a restore:
 - **Same NVIDIA driver version.** The restored processes have its
   libraries mapped by path and content.
 - **Same GPU models and count.**
-- **Any GPU index.** The plugin's checkpoint gives the devices back to
-  the driver, so a dump holds no open `/dev/nvidia<minor>`, and the
-  restored processes bind whichever GPUs their container is given. Their
-  identity (UUID) may differ too, as on another node: the plugin maps
-  them by ordinal (`cuda_plugin.device-map=auto`, restores only).
+- **Any GPU index.** A restore onto other GPUs of the node, or of
+  another node, gives the container those GPUs: the plugin maps the
+  snapshot's GPUs to the container's in bus order
+  (`cuda_plugin.device-map=auto`, restores only), and gcr puts the new
+  GPUs' `/dev/nvidia<minor>` into the restored container before CUDA's
+  state goes back, since libcuda opens a GPU by that name. In a user
+  namespace, where a container's device nodes are bind mounts, the
+  snapshot's are bound to the new GPUs; there, GPUs cannot trade minors
+  (0 and 1 for 1 and 0).
 
 A mismatch fails the restore with the reason. A container whose GPUs gcr
 cannot describe (no driver information) is refused checkpoints rather than
@@ -33,8 +37,8 @@ cannot pre-dump: GPU containers migrate stop-and-copy, and time travel
 refuses them (every point would copy GPU memory).
 
 Forks work the same way: each fork of a snapshot gets its own copy of
-the device memory, restored onto the same GPU, which the forks and the
-parent then share as separate CUDA contexts.
+the device memory, restored onto the GPU it is given, which it shares
+with the parent and other forks there as separate CUDA contexts.
 
 ## What a node needs
 
@@ -112,18 +116,75 @@ same driver version and GPU models (above); which GPU the node hands out
 does not matter. Keep GPU node pools on one driver version, and pin
 restored pods to those nodes with a `nodeSelector`.
 
+## When GPU memory is larger than RAM
+
+A checkpoint moves the GPU memory a process uses into its host memory
+before CRIU writes anything to disk, all at once: the driver's checkpoint
+API has no way to stream it out. That copy is the process's own memory,
+so it counts against the container's memory limit, and a snapshot of a
+pod using 20 GiB of GPU memory needs 20 GiB of room under its limit on
+top of what it already uses. A restore needs the same room: the GPU
+memory comes back through the restored process's memory.
+
+Without that room the kernel kills the container in the middle of the
+checkpoint, and the workload is lost:
+
+```console
+Memory cgroup out of memory: Killed process 189619 (python3) ...
+```
+
+There are two ways to make the room:
+
+1. **A memory limit that fits.** Set the pod's memory limit to its host
+   memory plus the GPU memory it uses, on nodes with that much RAM free.
+   Fastest, and the only way with no swap.
+2. **Swap.** The copy is ordinary memory, so it can go to swap, and a
+   node can snapshot more GPU memory than it has RAM. It is slow, and a
+   restore is slower than the checkpoint: the GPU memory goes to swap,
+   then from swap into the snapshot, and back through swap onto the GPU.
+   It keeps a workload alive rather than making snapshots fast. The node
+   needs:
+
+    - **A swap device** at least as large as the GPU memory being
+      snapshotted, on a fast local disk.
+    - **`vm.swappiness` above 0.** Many cloud images set it to 0, and
+      then a container's memory never swaps, however much swap there
+      is (`sysctl vm.swappiness=60`).
+    - **The container allowed to swap.** Under Kubernetes that is
+      [NodeSwap](https://kubernetes.io/docs/concepts/cluster-administration/swap-memory-management/)
+      with `swapBehavior: LimitedSwap`, which gives swap only to
+      Burstable pods whose memory request is below their limit, in
+      proportion to that request: size the request, or the swap, so the
+      pod's share covers its GPU memory.
+
+Measured on the node below, with a process holding 20 GiB on the GPU in a
+container limited to 8 GiB, through the driver's checkpoint API:
+
+| | Checkpoint | Afterwards |
+| --- | --- | --- |
+| No swap | killed | the workload is gone |
+| 64 GiB swap, `vm.swappiness=0` | killed | nothing was swapped |
+| 64 GiB swap, `vm.swappiness=60` | 49–240 s | 8 GiB in RAM, 20.9 GiB in swap; the restore took over 7 minutes, with the data intact |
+
+The swap was a file on the virtual machine's disk. The same checkpoint
+takes about 1.5 s when the copy fits in memory.
+
 ## Tested
 
-Run on one NVIDIA RTX PRO 6000 Blackwell (96 GB), driver 580.178.04,
-Linux 7.0, x86: `test/e2e/gpu` runs where there is a GPU
+Run on four NVIDIA RTX PRO 6000 Blackwell (96 GB each), driver
+580.178.04, Linux 7.0, x86: `test/e2e/gpu` runs where there is a GPU
 (`/dev/nvidiactl`, the CDI spec, the CUDA plugin) and is skipped
 elsewhere.
 
 - `TestCUDA` keeps a counter in GPU memory with PyTorch and checks that
   it carries on after a checkpoint and restore.
 - `TestCUDAFork` loads 4 GiB of weights into GPU memory, snapshots the
-  running container (1.9 s), and starts two forks (1.6–1.8 s each). Each
+  running container (2.9 s), and starts two forks (1.7 s each). Each
   one carries on with the weights intact, as does the parent.
+- `TestCUDAForkOtherGPU`, on a node with more than one GPU, snapshots
+  the same model on the first GPU and forks it onto the last (1.8–2.4 s),
+  in a user namespace and without one: the fork runs on the last GPU,
+  with the weights intact.
 
 `GCR_E2E_CUDA_IMAGE` picks the image. The default is PyTorch built for
 CUDA 12.8, the first with kernels for Blackwell (sm_120).

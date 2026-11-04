@@ -19,7 +19,7 @@ out of than runc's by default.
 | Drop-in for runc under containerd or Kubernetes | Yes: CRI conformance passes on containerd 1.7 to 2.4; some hardening is off under Kubernetes defaults. Under CRI-O, with snapshots and forks but without gcr's user namespaces, time travel or migration in |
 | Move a running sandbox to another node | Yes, with pre-copy on x86; stop-and-copy on arm64; TCP connections reset |
 | Undo what a sandbox did | Yes: time travel, for its processes and writable layer, not its volumes |
-| GPUs | Yes, NVIDIA through CDI: checkpoint, restore and fork with GPU memory, tested on one Blackwell GPU |
+| GPUs | Yes, NVIDIA through CDI: checkpoint, restore and fork with GPU memory, tested on Blackwell GPUs |
 | Strong isolation for hostile multi-tenant code | No: use a VM-based runtime |
 
 ## Advantages
@@ -262,17 +262,21 @@ off.
 
 ### GPUs
 
-- **Tested on one GPU model.** The GPU tests ran on a single NVIDIA RTX
+- **Tested on one GPU model.** The GPU tests ran on four NVIDIA RTX
   PRO 6000 Blackwell (driver 580): checkpoint and restore, and forks of a
-  4 GiB model in GPU memory (snapshot 1.9 s, each fork 1.6–1.8 s). Not
-  yet on several GPUs in one container, other generations, or under
-  Kubernetes. CI has no GPU, so these tests run only by hand on a GPU
+  4 GiB model in GPU memory onto the same GPU and onto another (snapshot
+  2.9 s, each fork 1.7–2.4 s). Not yet on several GPUs in one container,
+  other generations, or under Kubernetes. CI has no GPU, so these tests run only by hand on a GPU
   node.
 - **A GPU fork copies device memory.** Unlike forks' host memory, which
   memory merging can share, each fork has its own copy of the
   snapshot's GPU memory, and the forks have to fit on the GPU together.
 - **A restore needs the same driver version** and the same GPU models
   and count; any GPU index will do.
+- **A checkpoint needs host memory for the GPU memory,** counted against
+  the container's memory limit: the driver copies it out all at once.
+  Without the room, or swap, the container is killed
+  ([GPUs](gpus.md#when-gpu-memory-is-larger-than-ram)).
 - **GPU containers migrate stop-and-copy.** CRIU's CUDA plugin cannot
   pre-dump.
 - **Not yet built:** the NVIDIA ioctl proxy.

@@ -9,7 +9,9 @@ package gpu
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -144,11 +146,58 @@ func TestCUDAFork(t *testing.T) {
 	if _, err := os.Stat("/dev/nvidiactl"); err != nil {
 		t.Skip("no NVIDIA GPU")
 	}
+	forkModel(t, "0", "0", 2, nil)
+}
+
+// TestCUDAForkOtherGPU forks a snapshot taken on the first GPU onto the
+// last: a device plugin hands a restore whichever card is free, and the
+// snapshot does not tie it to the one it ran on. In a user namespace the
+// GPU's device nodes are bind mounts, otherwise nodes in the container's
+// /dev: both must end up the new GPU's.
+func TestCUDAForkOtherGPU(t *testing.T) {
+	out, err := exec.Command("nvidia-smi", "-L").Output()
+	if err != nil {
+		t.Skip("no NVIDIA GPU")
+	}
+	n := strings.Count(string(out), "\n")
+	if n < 2 {
+		t.Skip("one GPU")
+	}
+	last := strconv.Itoa(n - 1)
+	for _, tc := range []struct {
+		name        string
+		annotations map[string]string
+	}{
+		{"user namespace", nil},
+		{"host users", map[string]string{userns.AnnotationHostUsers: "true"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			child := forkModel(t, "0", last, 1, tc.annotations)[0]
+			// The fork's process must be on the last GPU.
+			pid := int(child.Task.Pid())
+			out, err := exec.Command("nvidia-smi", "-i", last, "--query-compute-apps=pid,used_memory", "--format=csv,noheader").Output()
+			if err != nil {
+				t.Fatalf("nvidia-smi: %v", err)
+			}
+			if !strings.Contains(string(out), strconv.Itoa(pid)+",") {
+				t.Fatalf("fork (pid %d) is not on GPU %s, which runs %q", pid, last, out)
+			}
+			t.Logf("GPU %s: %s", last, strings.TrimSpace(string(out)))
+		})
+	}
+}
+
+// forkModel runs the model on GPU from, snapshots it and starts forks
+// of the snapshot on GPU to, checking that every one of them, and the
+// parent, carries on with its weights intact. annotations are the
+// containers'.
+func forkModel(t *testing.T, from, to string, forks int, annotations map[string]string) []*framework.Container {
 	ns := framework.NewNamespace(t, "gcr-e2e")
 	spec := framework.Spec{
-		Image:    cudaImage(),
-		Args:     []string{"python3", "-c", model},
-		SpecOpts: []oci.SpecOpts{cdi.WithCDIDevices("nvidia.com/gpu=0")},
+		Image:       cudaImage(),
+		Args:        []string{"python3", "-c", model},
+		SpecOpts:    []oci.SpecOpts{cdi.WithCDIDevices("nvidia.com/gpu=" + from)},
+		Annotations: annotations,
 	}
 	parent := ns.Run(framework.UniqueID("model"), spec)
 	var at modelState
@@ -162,16 +211,20 @@ func TestCUDAFork(t *testing.T) {
 	if err := control.NewClient(ns.Name, parent.ID).Snapshot(t.Context(), dir); err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-	t.Logf("snapshot of a 4 GiB model in GPU memory in %s", time.Since(begin).Round(time.Millisecond))
+	t.Logf("snapshot of a 4 GiB model in GPU memory on GPU %s in %s", from, time.Since(begin).Round(time.Millisecond))
 
-	const forks = 2
 	children := make([]*framework.Container, forks)
 	for i := range children {
 		s := spec
-		s.Annotations = map[string]string{container.AnnotationForkFrom: dir}
+		s.SpecOpts = []oci.SpecOpts{cdi.WithCDIDevices("nvidia.com/gpu=" + to)}
+		s.Annotations = maps.Clone(annotations)
+		if s.Annotations == nil {
+			s.Annotations = map[string]string{}
+		}
+		s.Annotations[container.AnnotationForkFrom] = dir
 		begin := time.Now()
 		children[i] = ns.Run(framework.UniqueID(fmt.Sprintf("model-fork%d", i)), s)
-		t.Logf("fork %d started in %s", i, time.Since(begin).Round(time.Millisecond))
+		t.Logf("fork %d started on GPU %s in %s", i, to, time.Since(begin).Round(time.Millisecond))
 	}
 	for i, c := range append(children, parent) {
 		var m modelState
@@ -184,4 +237,5 @@ func TestCUDAFork(t *testing.T) {
 			t.Fatalf("container %d: weights sum to %s, %s when loaded, %s in the parent: GPU memory came back wrong", i, m.sum, m.loaded, at.loaded)
 		}
 	}
+	return children
 }

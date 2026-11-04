@@ -71,6 +71,7 @@ has `Hardening = 'off'` and `Landlock = 'off'`.
 | `gcr's user namespaces need the rootfs as overlay mounts from containerd` | `gcr.dev/host-users=false` or `UserNamespaces = 'always'` under CRI-O | use `hostUsers: false` (CRI-O's user namespaces) |
 | `NVIDIA driver ...: checkpoints of GPU containers need r580 or newer` | checkpoints go through the driver's checkpoint API, which r580 brought | upgrade the node's driver ([GPUs](gpus.md#what-a-node-needs)) |
 | `NVIDIA driver: ... no such file or directory` on a checkpoint | the container has GPU devices but the node has no NVIDIA driver loaded | load the driver; gcr will not checkpoint GPUs it cannot describe |
+| a GPU container is OOM-killed during a checkpoint or snapshot | the driver copies the GPU memory into the container's memory, against its limit | raise the memory limit, or give the node swap ([GPUs](gpus.md#when-gpu-memory-is-larger-than-ram)) |
 | `time travel for containers with GPUs` | CRIU's CUDA plugin cannot pre-dump, so every point would copy GPU memory | none yet |
 | `time travel needs a container without a terminal` | | run without `-t` |
 | `time travel is off (start the container with gcr.dev/time-travel)` | `gcr timeline` or `rewind` on a container without it | recreate it with the annotation |
