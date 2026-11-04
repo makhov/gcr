@@ -25,6 +25,7 @@ import (
 
 	"github.com/makhov/gcr/internal/container"
 	"github.com/makhov/gcr/internal/control"
+	"github.com/makhov/gcr/internal/gpu"
 	"github.com/makhov/gcr/internal/userns"
 	"github.com/makhov/gcr/test/e2e/framework"
 )
@@ -301,9 +302,11 @@ func TestCUDASnapshotFiles(t *testing.T) {
 }
 
 // TestCUDACheckpointNoRoom snapshots a container holding more GPU memory
-// than its memory limit leaves room for: the driver would copy it into
-// the container's memory and the kernel kill the container midway, so
-// gcr refuses, and the container runs on.
+// than its memory limit leaves room for. Through the task's memory the
+// driver would copy it there and the kernel kill the container midway, so
+// gcr refuses, and the container runs on. Through custom storage (r615
+// and newer) CRIU's CUDA plugin writes it to an image file instead: the
+// snapshot is taken, and a fork of it under the same limit carries on.
 func TestCUDACheckpointNoRoom(t *testing.T) {
 	if _, err := os.Stat("/dev/nvidiactl"); err != nil {
 		t.Skip("no NVIDIA GPU")
@@ -311,7 +314,7 @@ func TestCUDACheckpointNoRoom(t *testing.T) {
 	ns := framework.NewNamespace(t, "gcr-e2e")
 	// 8 GiB of weights, under a 4 GiB limit and no swap.
 	held := strings.Replace(model, "1 << 30", "2 << 30", 1)
-	c := ns.Run(framework.UniqueID("noroom"), framework.Spec{
+	spec := framework.Spec{
 		Image: cudaImage(),
 		Args:  []string{"python3", "-c", held},
 		SpecOpts: []oci.SpecOpts{
@@ -324,20 +327,63 @@ func TestCUDACheckpointNoRoom(t *testing.T) {
 				return nil
 			},
 		},
-	})
+	}
+	c := ns.Run(framework.UniqueID("noroom"), spec)
 	var at modelState
 	framework.Eventually(t, 3*time.Minute, "the model to load", func() bool {
 		m, ok := readModel(c)
 		at = m
 		return ok && m.count > 3
 	})
-	err := control.NewClient(ns.Name, c.ID).Snapshot(t.Context(), filepath.Join(framework.TempDir(t), "snapshot"))
-	if err == nil || !strings.Contains(err.Error(), "of GPU memory into its memory") {
-		t.Fatalf("snapshot of 8 GiB of GPU memory under a 4 GiB limit: %v", err)
+	s, err := c.C.Spec(ns.Ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
-	t.Logf("refused: %v", err)
+	toImage := gpu.CustomStorage(gpu.LibCUDA(s))
+	dir := filepath.Join(framework.TempDir(t), "snapshot")
+	err = control.NewClient(ns.Name, c.ID).Snapshot(t.Context(), dir)
+	if !toImage {
+		if err == nil || !strings.Contains(err.Error(), "of GPU memory into its memory") {
+			t.Fatalf("snapshot of 8 GiB of GPU memory under a 4 GiB limit: %v", err)
+		}
+		t.Logf("refused: %v", err)
+	} else if err != nil {
+		t.Fatalf("snapshot of 8 GiB of GPU memory under a 4 GiB limit, through custom storage: %v", err)
+	}
 	framework.Eventually(t, time.Minute, "the container to run on", func() bool {
 		m, ok := readModel(c)
 		return ok && m.count > at.count+2
 	})
+	if !toImage {
+		return
+	}
+	t.Logf("snapshot through custom storage; the container's memory peaked at %s", memoryPeak(t, int(c.Task.Pid())))
+	fs := spec
+	fs.Annotations = map[string]string{container.AnnotationForkFrom: dir}
+	fork := ns.Run(framework.UniqueID("noroom-fork"), fs)
+	var m modelState
+	framework.Eventually(t, time.Minute, "the fork to count on", func() bool {
+		var ok bool
+		m, ok = readModel(fork)
+		return ok && m.count > at.count+2
+	})
+	if m.sum != m.loaded || m.loaded != at.loaded {
+		t.Fatalf("fork: weights sum to %s, %s when loaded, %s in the parent: GPU memory came back wrong", m.sum, m.loaded, at.loaded)
+	}
+	t.Logf("fork carries on with its weights; its memory peaked at %s", memoryPeak(t, int(fork.Task.Pid())))
+}
+
+// memoryPeak is memory.peak of pid's cgroup.
+func memoryPeak(t *testing.T, pid int) string {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cg := strings.TrimPrefix(strings.TrimSpace(string(b)), "0::")
+	b, err = os.ReadFile(filepath.Join("/sys/fs/cgroup", cg, "memory.peak"))
+	if err != nil {
+		return "(no memory.peak)"
+	}
+	n, _ := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	return fmt.Sprintf("%.1f GiB", float64(n)/(1<<30))
 }

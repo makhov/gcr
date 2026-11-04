@@ -14,17 +14,22 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/makhov/gcr/internal/gpu"
 )
 
-// checkGPUMemory refuses a checkpoint whose GPU memory will not fit where
-// the driver puts it: CRIU's CUDA plugin has the driver copy each
-// process's GPU memory into its host memory before the dump, all at once,
-// charged to the container's memory cgroup, and without the room the
-// kernel kills the container in the middle of the checkpoint. It refuses
-// only what it measures; when it cannot measure, it says so and lets the
-// checkpoint go ahead.
-func (c *Container) checkGPUMemory(ctx context.Context) error {
+// checkGPUMemory refuses a checkpoint into dir whose GPU memory will not
+// fit where it goes. Through the task's memory (drivers before custom
+// storage, r615), the driver copies each process's GPU memory into its host
+// memory before the dump, all at once, charged to the container's memory
+// cgroup, and without the room the kernel kills the container in the middle
+// of the checkpoint. Through custom storage, CRIU's CUDA plugin writes it to
+// an image file in dir instead, and a disk that fills up midway costs the
+// task its GPU memory, so it has to fit there. It refuses only what it
+// measures; when it cannot measure, it says so and lets the checkpoint go
+// ahead.
+func (c *Container) checkGPUMemory(ctx context.Context, dir string) error {
 	if c.gpu == nil {
 		return nil
 	}
@@ -38,7 +43,11 @@ func (c *Container) checkGPUMemory(ctx context.Context) error {
 		need, err = gpu.MemoryUsed(c.gpuTools, pids)
 	}
 	if err == nil && need > 0 {
-		r, err = memoryRoom("/sys/fs/cgroup", "/proc", pids[0])
+		if c.gpuToImage {
+			r, err = diskRoom(dir)
+		} else {
+			r, err = memoryRoom("/sys/fs/cgroup", "/proc", pids[0])
+		}
 	}
 	if err != nil {
 		log.G(ctx).WithError(err).Warn("cannot tell whether the container has room for its GPU memory; checkpointing it anyway")
@@ -47,12 +56,30 @@ func (c *Container) checkGPUMemory(ctx context.Context) error {
 	if need <= r.bytes {
 		return nil
 	}
+	if c.gpuToImage {
+		return fmt.Errorf("a checkpoint writes the container's %s of GPU memory to %s, which has room for %s: %w",
+			gib(need), r.why, gib(r.bytes), errdefs.ErrFailedPrecondition)
+	}
 	return fmt.Errorf("a checkpoint copies the container's %s of GPU memory into its memory, which has room for %s: %s; raise its memory limit, or give the node swap (docs/gpus.md, When GPU memory is larger than RAM): %w",
 		gib(need), gib(r.bytes), r.why, errdefs.ErrFailedPrecondition)
 }
 
-// room is how much more memory a cgroup's processes can take, and what
-// sets it.
+// diskRoom is the space free on the filesystem dir is, or will be, on.
+func diskRoom(dir string) (room, error) {
+	for d := filepath.Clean(dir); ; d = filepath.Dir(d) {
+		var st unix.Statfs_t
+		err := unix.Statfs(d, &st)
+		if err == nil {
+			return room{st.Bavail * uint64(st.Bsize), d}, nil
+		}
+		if !os.IsNotExist(err) || d == "/" {
+			return room{}, err
+		}
+	}
+}
+
+// room is how much more memory a cgroup's processes can take, or a disk,
+// and what sets it.
 type room struct {
 	bytes uint64
 	why   string

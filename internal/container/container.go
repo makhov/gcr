@@ -119,8 +119,11 @@ type Prepared struct {
 	// record the GPUs; restores check them against these.
 	GPU      *gpu.Info
 	GPUError error
-	// GPUTools measure the GPU memory a checkpoint copies (gpu.ToolsOf).
-	GPUTools gpu.Tools
+	// GPUTools measure the GPU memory a checkpoint copies (gpu.ToolsOf);
+	// GPUToImage, whether it goes to an image file rather than the task's
+	// memory (gpu.CustomStorage).
+	GPUTools   gpu.Tools
+	GPUToImage bool
 	// CheckpointFrom, when set, makes Start wait for it to return a
 	// directory of CRIU images and restore from it (incoming migration).
 	CheckpointFrom func(context.Context) (Incoming, error)
@@ -263,6 +266,7 @@ type Container struct {
 	gpu        *gpu.Info
 	gpuError   error
 	gpuTools   gpu.Tools
+	gpuToImage bool // checkpoints write GPU memory to an image file
 	execs      map[string]*Exec
 }
 
@@ -510,6 +514,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		gpu:            prep.GPU,
 		gpuError:       prep.GPUError,
 		gpuTools:       prep.GPUTools,
+		gpuToImage:     prep.GPUToImage,
 		status:         Created,
 		exited:         make(chan struct{}),
 		onExit:         onExit,
@@ -784,7 +789,7 @@ func (c *Container) Checkpoint(ctx context.Context, opts CheckpointOpts) error {
 	if c.gpuError != nil {
 		return fmt.Errorf("checkpoint: %w", c.gpuError)
 	}
-	if err := c.checkGPUMemory(ctx); err != nil {
+	if err := c.checkGPUMemory(ctx, opts.ImagePath); err != nil {
 		return fmt.Errorf("checkpoint: %w", err)
 	}
 	work := opts.WorkPath
@@ -896,7 +901,7 @@ func (c *Container) snapshot(ctx context.Context, dir, parent string, stop bool)
 	if c.gpuError != nil {
 		return fmt.Errorf("checkpoint: %w", c.gpuError)
 	}
-	if err := c.checkGPUMemory(ctx); err != nil {
+	if err := c.checkGPUMemory(ctx, dir); err != nil {
 		return fmt.Errorf("checkpoint: %w", err)
 	}
 	upper, err := c.UpperDir()
@@ -1253,7 +1258,7 @@ func (c *Container) FreezeDump(ctx context.Context, dir, parent, host string, po
 	if c.gpuError != nil {
 		return fmt.Errorf("checkpoint: %w", c.gpuError)
 	}
-	if err := c.checkGPUMemory(ctx); err != nil {
+	if err := c.checkGPUMemory(ctx, dir); err != nil {
 		return fmt.Errorf("checkpoint: %w", err)
 	}
 	if err := c.fillMemory(); err != nil {

@@ -273,9 +273,10 @@ off.
   snapshot's GPU memory, and the forks have to fit on the GPU together.
 - **A restore needs the same driver version** and as many GPUs, of the
   same chip (the driver checks that, not gcr); any GPU index will do.
-- **A checkpoint needs host memory for the GPU memory,** counted against
-  the container's memory limit: the driver copies it out all at once.
-  Without the room, or swap, the container is killed
+- **Before driver r615, a checkpoint needs host memory for the GPU
+  memory,** counted against the container's memory limit: the driver
+  copies it out all at once, and gcr refuses a checkpoint it would not
+  fit. From r615 it goes straight to disk instead
   ([GPUs](gpus.md#when-gpu-memory-is-larger-than-ram)).
 - **GPU containers migrate stop-and-copy.** CRIU's CUDA plugin cannot
   pre-dump.

@@ -122,9 +122,27 @@ restored pods to those nodes with a `nodeSelector`.
 
 ## When GPU memory is larger than RAM
 
-A checkpoint moves the GPU memory a process uses into its host memory
-before CRIU writes anything to disk, all at once: the driver's checkpoint
-API has no way to stream it out. That copy is the process's own memory,
+**With NVIDIA driver r615 or newer, it does not matter.** Its
+checkpoint API has custom storage: it lets CRIU's CUDA plugin copy the
+GPU memory straight to an image file of its own, next to the rest of the
+checkpoint, in 64 MiB pieces, and back on a restore. Neither the
+container's memory nor CRIU's ever holds it whole, so a container needs
+no room for it under its memory limit, only disk space for it where the
+checkpoint is written; gcr checks that before it starts, since a disk
+that fills up halfway would cost the container its GPU memory. gcr uses
+custom storage whenever the container's libcuda has it.
+
+On the same node as below, a container holding 8.7 GiB of GPU memory
+under a 4 GiB memory limit, with no swap, snapshots with its memory
+peaking at 0.4 GiB, and its fork, under the same limit, at 0.5 GiB.
+Forks start faster too (about 1.0 s against 1.7 s for 4 GiB), and
+snapshots that keep the container running take a little longer (3.8 s
+against 3.0 s), as the memory is written out and read back.
+
+**Before r615,** a checkpoint moves the GPU memory a process uses into
+its host memory before CRIU writes anything to disk, all at once: the
+driver's checkpoint API has no way to stream it out. That copy is the
+process's own memory,
 so it counts against the container's memory limit, and a snapshot of a
 pod using 20 GiB of GPU memory needs 20 GiB of room under its limit on
 top of what it already uses. A restore needs the same room: the GPU
@@ -203,6 +221,13 @@ elsewhere.
   snapshot: its writable layer has to match the dump, although CRIU
   lets the processes run while it seizes them (CUDA has to, to be
   locked).
+- `TestCUDACheckpointNoRoom` holds 8 GiB of GPU memory under a 4 GiB
+  memory limit with no swap. With custom storage (r615+) it snapshots
+  and forks; without, the snapshot is refused and the container runs
+  on.
+
+With driver 615.71.09 the same tests pass through custom storage, on the
+same GPUs.
 
 `GCR_E2E_CUDA_IMAGE` picks the image. The default is PyTorch built for
 CUDA 12.8, the first with kernels for Blackwell (sm_120).
