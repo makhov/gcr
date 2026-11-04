@@ -440,6 +440,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 	if err != nil {
 		return nil, fmt.Errorf("convert spec: %w", err)
 	}
+	setBundle(cfg, o.Bundle)
 	resolveBindSources(cfg)
 	if spec.Process.Terminal && (o.Checkpoint != "" || prep.CheckpointFrom != nil) {
 		// CRIU restores only pipes for stdio; a pty would need --shell-job.
@@ -2159,4 +2160,15 @@ func idExtents(m []configs.IDMap) []userns.Extent {
 		out[i] = userns.Extent{ContainerID: uint32(e.ContainerID), HostID: uint32(e.HostID), Size: uint32(e.Size)}
 	}
 	return out
+}
+
+// setBundle makes bundle the one hooks are told of. specconv takes it from
+// the working directory, as runc runs in the bundle; a shim serves a pod's
+// containers from the sandbox's, so every container but the pause one
+// told its hooks the sandbox's bundle, and a hook that reads the
+// container's config.json through it (CDI's nvidia-cdi-hook) read the
+// pause container's, and looked for /proc in its rootfs.
+func setBundle(cfg *configs.Config, bundle string) {
+	cfg.Labels = slices.DeleteFunc(cfg.Labels, func(l string) bool { return strings.HasPrefix(l, "bundle=") })
+	cfg.Labels = append(cfg.Labels, "bundle="+bundle)
 }

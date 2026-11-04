@@ -14,6 +14,7 @@ import (
 	"github.com/containerd/errdefs"
 	devices "github.com/opencontainers/cgroups/devices/config"
 	"github.com/opencontainers/runc/libcontainer/configs"
+	"github.com/opencontainers/runc/libcontainer/utils"
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 )
@@ -122,4 +123,15 @@ func checkImageMounts(dir string, cfg *configs.Config) error {
 		return err
 	}
 	return checkMounts(had, nil, cfg)
+}
+
+// A pod's containers are created by the shim the sandbox started, in the
+// sandbox's bundle: each one's hooks have to be told its own.
+func TestSetBundle(t *testing.T) {
+	cfg := &configs.Config{Labels: []string{"io.kubernetes.cri.container-name=model", "bundle=/run/containerd/task/sandbox"}}
+	setBundle(cfg, "/run/containerd/task/model")
+	bundle, annotations := utils.Annotations(cfg.Labels)
+	if bundle != "/run/containerd/task/model" || annotations["io.kubernetes.cri.container-name"] != "model" {
+		t.Fatalf("bundle %q, annotations %v", bundle, annotations)
+	}
 }
