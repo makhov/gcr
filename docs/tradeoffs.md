@@ -271,8 +271,8 @@ off.
 - **A GPU fork copies device memory.** Unlike forks' host memory, which
   memory merging can share, each fork has its own copy of the
   snapshot's GPU memory, and the forks have to fit on the GPU together.
-- **A restore needs the same driver version** and the same GPU models
-  and count; any GPU index will do.
+- **A restore needs the same driver version** and as many GPUs, of the
+  same chip (the driver checks that, not gcr); any GPU index will do.
 - **A checkpoint needs host memory for the GPU memory,** counted against
   the container's memory limit: the driver copies it out all at once.
   Without the room, or swap, the container is killed

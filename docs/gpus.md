@@ -19,7 +19,11 @@ checkpoint and checks them before a restore:
 
 - **Same NVIDIA driver version.** The restored processes have its
   libraries mapped by path and content.
-- **Same GPU models and count.**
+- **Same GPU count.** Which GPUs is the driver's call: it restores onto
+  GPUs of the same chip with enough memory, and refuses others (another
+  architecture, a different chip of the same one). gcr does not compare
+  model names, so two cards on one chip may take each other's
+  snapshots; this has been tried only between identical cards.
 - **Any GPU index.** A restore onto other GPUs of the node, or of
   another node, gives the container those GPUs: the plugin maps the
   snapshot's GPUs to the container's in bus order
@@ -112,8 +116,8 @@ its node that gcr can checkpoint it: `gcr doctor`'s `GPUs` line, or the
 installer pod's log, which has the same report.
 
 Snapshots and migrations of GPU pods restore only onto nodes with the
-same driver version and GPU models (above); which GPU the node hands out
-does not matter. Keep GPU node pools on one driver version, and pin
+same driver version and GPUs of the same chip (above); which GPU the
+node hands out does not matter. Keep GPU node pools on one driver version, and pin
 restored pods to those nodes with a `nodeSelector`.
 
 ## When GPU memory is larger than RAM

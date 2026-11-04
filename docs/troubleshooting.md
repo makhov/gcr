@@ -81,7 +81,8 @@ has `Hardening = 'off'` and `Landlock = 'off'`.
 | `post-copy: this node has vm.unprivileged_userfaultfd = 0` | the target cannot restore a container in a user namespace lazily | set the sysctl on the target, or migrate without `-post-copy` |
 | `target is running but serving it its memory failed` | a post-copy migration lost the source or the connection after the target ran | the container is lost; restore it from a snapshot or checkpoint |
 | `gcr.dev/migrate-in needs gcr.dev/migrate-token of at least 16 characters` | the token is missing or too short | use a longer one |
-| GPU driver or model mismatch on restore | the node cannot take the checkpoint | restore on a node with the same driver version and GPU models ([GPUs](gpus.md)) |
+| GPU driver or GPU count mismatch on restore | the node cannot take the checkpoint | restore on a node with the same driver version and as many GPUs ([GPUs](gpus.md)) |
+| a GPU restore fails in CRIU's CUDA plugin on another GPU model | the driver restores only onto GPUs of the same chip, with enough memory | restore onto GPUs like the snapshot's ([GPUs](gpus.md)) |
 
 ## The netlink policy is off
 

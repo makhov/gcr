@@ -13,7 +13,9 @@
 // r580 and newer), in the libcuda the container uses (UseLibCUDA).
 //
 // Restores need the same driver version (the restored processes have its
-// libraries mapped, by path and content) and the same GPU models. They do
+// libraries mapped, by path and content) and as many GPUs. Which GPUs is
+// the driver's to say: it restores onto GPUs of the same chip with enough
+// memory, and refuses others, so gcr does not compare models. Restores do
 // not need the same GPU index: the plugin's checkpoint hands the devices
 // back to the driver, so a dump holds no open /dev/nvidia<minor> and no
 // mount of one, and the restore binds whichever GPUs the container is
@@ -282,12 +284,6 @@ func Compatible(saved, now *Info) error {
 	}
 	if len(saved.GPUs) != len(now.GPUs) {
 		return fmt.Errorf("checkpoint used %d GPU(s), the container has %d: %w", len(saved.GPUs), len(now.GPUs), errdefs.ErrFailedPrecondition)
-	}
-	for i, s := range saved.GPUs {
-		n := now.GPUs[i]
-		if s.Model != n.Model {
-			return fmt.Errorf("checkpoint used a %s, the container has a %s: %w", s.Model, n.Model, errdefs.ErrFailedPrecondition)
-		}
 	}
 	return nil
 }
