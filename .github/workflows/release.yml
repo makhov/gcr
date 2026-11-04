@@ -179,6 +179,15 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
           provenance: true
           sbom: true
+      - name: The image's binaries run
+        # What the installer and the operator start: v0.1.9 to v0.1.11
+        # shipped them without their x bit, and every Kubernetes install
+        # of those failed to start.
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
+        run: |
+          docker run --rm --platform linux/amd64 --entrypoint /gcr "$IMAGE" version
+          docker run --rm --platform linux/amd64 --entrypoint /bin/sh "$IMAGE" -c 'test -x /gcr && test -x /gcr-operator && test -x /install.sh'
       - name: Sign the image
         env:
           IMAGE: ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
