@@ -6,7 +6,9 @@
 FROM busybox:1.37
 ARG TARGETARCH
 ARG VERSION
-COPY dist/gcr-${VERSION}-linux-${TARGETARCH} /gcr
-COPY dist/gcr-operator-${VERSION}-linux-${TARGETARCH} /gcr-operator
+# --chmod: dist/ comes through GitHub Actions artifacts in a release, which
+# keep no file modes, and a binary without its x bit cannot start.
+COPY --chmod=0755 dist/gcr-${VERSION}-linux-${TARGETARCH} /gcr
+COPY --chmod=0755 dist/gcr-operator-${VERSION}-linux-${TARGETARCH} /gcr-operator
 COPY deploy/install.sh /install.sh
 ENTRYPOINT ["/install.sh"]
