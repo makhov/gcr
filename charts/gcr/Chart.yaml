@@ -8,7 +8,7 @@ type: application
 # A chart/vX.Y.Z tag publishes it as version X.Y.Z, with the latest
 # release as its appVersion (.github/workflows/chart-release.yml).
 version: 0.1.0
-appVersion: v0.1.9
+appVersion: v0.1.10
 home: https://makhov.github.io/gcr/
 sources:
   - https://github.com/makhov/gcr
