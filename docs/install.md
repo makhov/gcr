@@ -214,7 +214,7 @@ ok   kernel          7.0.0-38-generic
 ok   cgroup v2       unified hierarchy
 ok   shim            /usr/local/bin/containerd-shim-gcr-v2 {{{ gcr_version }}}
 ok   containerd      v2.4.2, runtime gcr registered
-ok   CRIU            /var/lib/gcr/bin/criu 4.2.1 (v4.2.1+gcr.1)
+ok   CRIU            /var/lib/gcr/bin/criu 4.2.1 (v4.2.1+gcr.2)
 ok   Landlock        ABI 8
 ok   netlink policy  BPF LSM
 ok   lazy restore    vm.unprivileged_userfaultfd = 1

@@ -43,7 +43,7 @@ ok   cgroup v2       unified hierarchy
 ok   shim            /usr/local/bin/containerd-shim-gcr-v2 {{{ gcr_version }}}
 ok   containerd      2.2.1, runtime gcr registered
 ok   docker          runtime gcr registered
-ok   CRIU            /var/lib/gcr/bin/criu 4.2.1 (v4.2.1+gcr.1)
+ok   CRIU            /var/lib/gcr/bin/criu 4.2.1 (v4.2.1+gcr.2)
 ok   Landlock        ABI 7
 off  netlink policy  no BPF LSM: containers' network configuration is limited by seccomp alone
                      -> add bpf to the kernel's lsm= list (...) and reboot
