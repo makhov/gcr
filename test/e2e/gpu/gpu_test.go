@@ -299,3 +299,45 @@ func TestCUDASnapshotFiles(t *testing.T) {
 		child.Remove()
 	}
 }
+
+// TestCUDACheckpointNoRoom snapshots a container holding more GPU memory
+// than its memory limit leaves room for: the driver would copy it into
+// the container's memory and the kernel kill the container midway, so
+// gcr refuses, and the container runs on.
+func TestCUDACheckpointNoRoom(t *testing.T) {
+	if _, err := os.Stat("/dev/nvidiactl"); err != nil {
+		t.Skip("no NVIDIA GPU")
+	}
+	ns := framework.NewNamespace(t, "gcr-e2e")
+	// 8 GiB of weights, under a 4 GiB limit and no swap.
+	held := strings.Replace(model, "1 << 30", "2 << 30", 1)
+	c := ns.Run(framework.UniqueID("noroom"), framework.Spec{
+		Image: cudaImage(),
+		Args:  []string{"python3", "-c", held},
+		SpecOpts: []oci.SpecOpts{
+			cdi.WithCDIDevices("nvidia.com/gpu=0"),
+			oci.WithMemoryLimit(4 << 30),
+			// No swap: with it, the copy would fit, slowly.
+			func(_ context.Context, _ oci.Client, _ *containers.Container, s *specs.Spec) error {
+				swap := int64(4 << 30)
+				s.Linux.Resources.Memory.Swap = &swap
+				return nil
+			},
+		},
+	})
+	var at modelState
+	framework.Eventually(t, 3*time.Minute, "the model to load", func() bool {
+		m, ok := readModel(c)
+		at = m
+		return ok && m.count > 3
+	})
+	err := control.NewClient(ns.Name, c.ID).Snapshot(t.Context(), filepath.Join(framework.TempDir(t), "snapshot"))
+	if err == nil || !strings.Contains(err.Error(), "of GPU memory into its memory") {
+		t.Fatalf("snapshot of 8 GiB of GPU memory under a 4 GiB limit: %v", err)
+	}
+	t.Logf("refused: %v", err)
+	framework.Eventually(t, time.Minute, "the container to run on", func() bool {
+		m, ok := readModel(c)
+		return ok && m.count > at.count+2
+	})
+}

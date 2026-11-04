@@ -434,6 +434,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 				log.G(ctx).WithError(prep.GPUError).Warn("checkpoints of this container's GPUs refused")
 			} else {
 				restoreOpts = gpu.RestoreCRIUOptions
+				prep.GPUTools = gpu.ToolsOf(spec)
 				if lib := gpu.LibCUDA(spec); lib != "" {
 					if err := gpu.UseLibCUDA(filepath.Join(container.StateRoot, "cuda"), lib); err != nil {
 						log.G(ctx).WithError(err).Warn("CRIU's CUDA plugin gets the host's own libcuda")

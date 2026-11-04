@@ -130,12 +130,21 @@ pod using 20 GiB of GPU memory needs 20 GiB of room under its limit on
 top of what it already uses. A restore needs the same room: the GPU
 memory comes back through the restored process's memory.
 
-Without that room the kernel kills the container in the middle of the
-checkpoint, and the workload is lost:
+Without that room the kernel would kill the container in the middle of
+the checkpoint, and the workload would be lost. So before a checkpoint,
+snapshot or migration of a GPU container, gcr measures the GPU memory
+its processes use (with `nvidia-smi`, the one CDI gives the container)
+and the room they have: under the container's memory limit and its
+pod's, counting page cache, which the kernel reclaims, and swap where
+the kernel swaps; and on the node. If the GPU memory does not fit, it
+refuses, and the container runs on:
 
 ```console
-Memory cgroup out of memory: Killed process 189619 (python3) ...
+checkpoint: a checkpoint copies the container's 8.0 GiB of GPU memory into its memory, which has room for 3.6 GiB: cgroup /k8s.io/... is limited to 4.0 GiB and uses 0.4 GiB besides page cache; ...
 ```
+
+When it cannot measure (no `nvidia-smi`, or a driver that does not
+report per-process memory), it logs that and checkpoints anyway.
 
 There are two ways to make the room:
 

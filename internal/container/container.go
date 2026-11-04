@@ -119,6 +119,8 @@ type Prepared struct {
 	// record the GPUs; restores check them against these.
 	GPU      *gpu.Info
 	GPUError error
+	// GPUTools measure the GPU memory a checkpoint copies (gpu.ToolsOf).
+	GPUTools gpu.Tools
 	// CheckpointFrom, when set, makes Start wait for it to return a
 	// directory of CRIU images and restore from it (incoming migration).
 	CheckpointFrom func(context.Context) (Incoming, error)
@@ -260,6 +262,7 @@ type Container struct {
 	criu       CRIUConfig
 	gpu        *gpu.Info
 	gpuError   error
+	gpuTools   gpu.Tools
 	execs      map[string]*Exec
 }
 
@@ -506,6 +509,7 @@ func Create(ctx context.Context, o CreateOpts, onExit func(*Container)) (_ *Cont
 		criu:           prep.CRIU,
 		gpu:            prep.GPU,
 		gpuError:       prep.GPUError,
+		gpuTools:       prep.GPUTools,
 		status:         Created,
 		exited:         make(chan struct{}),
 		onExit:         onExit,
@@ -780,6 +784,9 @@ func (c *Container) Checkpoint(ctx context.Context, opts CheckpointOpts) error {
 	if c.gpuError != nil {
 		return fmt.Errorf("checkpoint: %w", c.gpuError)
 	}
+	if err := c.checkGPUMemory(ctx); err != nil {
+		return fmt.Errorf("checkpoint: %w", err)
+	}
 	work := opts.WorkPath
 	if work == "" {
 		var err error
@@ -828,9 +835,10 @@ func (c *Container) Running() bool {
 	return c.Status() == Running
 }
 
-// Snapshot freezes the container, copies its writable layer to dir/upper and
-// dumps its processes to dir/images, then lets it continue. Freezing first
-// keeps the files and the memory image consistent with each other.
+// Snapshot freezes the container, dumps its processes to dir/images and,
+// while CRIU still holds them stopped, copies its writable layer to
+// dir/upper, then lets it continue: the files and the memory image are
+// of one moment.
 func (c *Container) Snapshot(ctx context.Context, dir string) error {
 	return c.snapshot(ctx, dir, "", false)
 }
@@ -884,6 +892,12 @@ func (c *Container) snapshot(ctx context.Context, dir, parent string, stop bool)
 	}()
 	if !c.Running() || c.isMigrating() {
 		return fmt.Errorf("container is not running or is migrating: %w", errdefs.ErrFailedPrecondition)
+	}
+	if c.gpuError != nil {
+		return fmt.Errorf("checkpoint: %w", c.gpuError)
+	}
+	if err := c.checkGPUMemory(ctx); err != nil {
+		return fmt.Errorf("checkpoint: %w", err)
 	}
 	upper, err := c.UpperDir()
 	if err != nil {
@@ -1238,6 +1252,9 @@ func (c *Container) FreezeDump(ctx context.Context, dir, parent, host string, po
 	defer c.op.Unlock()
 	if c.gpuError != nil {
 		return fmt.Errorf("checkpoint: %w", c.gpuError)
+	}
+	if err := c.checkGPUMemory(ctx); err != nil {
+		return fmt.Errorf("checkpoint: %w", err)
 	}
 	if err := c.fillMemory(); err != nil {
 		return err
