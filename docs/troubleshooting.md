@@ -72,6 +72,7 @@ has `Hardening = 'off'` and `Landlock = 'off'`.
 | `NVIDIA driver ...: checkpoints of GPU containers need r580 or newer` | checkpoints go through the driver's checkpoint API, which r580 brought | upgrade the node's driver ([GPUs](gpus.md#what-a-node-needs)) |
 | `NVIDIA driver: ... no such file or directory` on a checkpoint | the container has GPU devices but the node has no NVIDIA driver loaded | load the driver; gcr will not checkpoint GPUs it cannot describe |
 | `a checkpoint copies the container's ... of GPU memory into its memory, which has room for ...` | the driver copies the GPU memory into the container's memory, against its limit, and it would not fit | raise the memory limit, or give the node swap ([GPUs](gpus.md#when-gpu-memory-is-larger-than-ram)) |
+| `a checkpoint writes the container's ... of GPU memory to ..., which has room for ...` | with custom storage (r615+) the GPU memory goes to an image file, and the disk the checkpoint is written to is short | free space there, or write the checkpoint elsewhere ([GPUs](gpus.md#when-gpu-memory-is-larger-than-ram)) |
 | `time travel for containers with GPUs` | CRIU's CUDA plugin cannot pre-dump, so every point would copy GPU memory | none yet |
 | `time travel needs a container without a terminal` | | run without `-t` |
 | `time travel is off (start the container with gcr.dev/time-travel)` | `gcr timeline` or `rewind` on a container without it | recreate it with the annotation |

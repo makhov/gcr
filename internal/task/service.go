@@ -436,6 +436,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 				restoreOpts = gpu.RestoreCRIUOptions
 				prep.GPUTools = gpu.ToolsOf(spec)
 				if lib := gpu.LibCUDA(spec); lib != "" {
+					prep.GPUToImage = gpu.CustomStorage(lib)
 					if err := gpu.UseLibCUDA(filepath.Join(container.StateRoot, "cuda"), lib); err != nil {
 						log.G(ctx).WithError(err).Warn("CRIU's CUDA plugin gets the host's own libcuda")
 					}

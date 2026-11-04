@@ -4,10 +4,12 @@ package gpu
 
 import (
 	"context"
+	"debug/elf"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -87,4 +89,20 @@ func computeAppsMemory(out string, pids []int) (uint64, error) {
 		sum += m << 20
 	}
 	return sum, nil
+}
+
+// CustomStorage says whether lib, a libcuda, has the driver's custom
+// storage (CUDA 13.4, r615 and newer), through which CRIU's CUDA plugin
+// checkpoints GPU memory to an image file instead of the task's memory.
+func CustomStorage(lib string) bool {
+	f, err := elf.Open(lib)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	syms, err := f.DynamicSymbols()
+	if err != nil {
+		return false
+	}
+	return slices.ContainsFunc(syms, func(s elf.Symbol) bool { return s.Name == "cuCheckpointOperationComplete" })
 }
