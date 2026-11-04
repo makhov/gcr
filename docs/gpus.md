@@ -197,8 +197,9 @@ container limited to 8 GiB, through the driver's checkpoint API:
 | 64 GiB swap, `vm.swappiness=0` | killed | nothing was swapped |
 | 64 GiB swap, `vm.swappiness=60` | 49–240 s | 8 GiB in RAM, 20.9 GiB in swap; the restore took over 7 minutes, with the data intact |
 
-The swap was a file on the virtual machine's disk. The same checkpoint
-takes about 1.5 s when the copy fits in memory.
+The swap was a file on the virtual machine's disk. With a 64 GiB limit,
+where the copy fits in memory, the same checkpoint takes 4.2 s and the
+restore 2.3 s.
 
 ## Tested
 
