@@ -189,6 +189,11 @@ elsewhere.
   the same model on the first GPU and forks it onto the last (1.8–2.4 s),
   in a user namespace and without one: the fork runs on the last GPU,
   with the weights intact.
+- `TestCUDASnapshotFiles` snapshots a GPU container that creates and
+  deletes files every few milliseconds, three times, and forks each
+  snapshot: its writable layer has to match the dump, although CRIU
+  lets the processes run while it seizes them (CUDA has to, to be
+  locked).
 
 `GCR_E2E_CUDA_IMAGE` picks the image. The default is PyTorch built for
 CUDA 12.8, the first with kernels for Blackwell (sm_120).

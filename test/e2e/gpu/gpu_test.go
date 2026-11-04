@@ -239,3 +239,63 @@ func forkModel(t *testing.T, from, to string, forks int, annotations map[string]
 	}
 	return children
 }
+
+// churn keeps a tensor in GPU memory and, every few milliseconds, opens
+// a new file, keeping only the newest open, and writes its number: a
+// snapshot's writable layer must hold the file its dump has open, which
+// it misses if it is copied while the processes can still run.
+const churn = `
+import os, time, torch
+x = torch.zeros(1 << 20, device="cuda")
+i, f = 0, None
+while True:
+    i += 1
+    g = open(f"/tmp/f{i}", "w")
+    if f:
+        f.close()
+        os.unlink(f.name)
+    f = g
+    x += 1
+    torch.cuda.synchronize()
+    open("/tmp/count.new", "w").write(str(i))
+    os.replace("/tmp/count.new", "/tmp/count")
+    time.sleep(0.002)
+`
+
+// TestCUDASnapshotFiles snapshots a GPU container that keeps changing its
+// files and forks each snapshot. CRIU lets a GPU container run while it
+// seizes it (CUDA has to, to be locked), after gcr froze it: the
+// writable layer has to be the one the dump saw.
+func TestCUDASnapshotFiles(t *testing.T) {
+	if _, err := os.Stat("/dev/nvidiactl"); err != nil {
+		t.Skip("no NVIDIA GPU")
+	}
+	ns := framework.NewNamespace(t, "gcr-e2e")
+	spec := framework.Spec{
+		Image:    cudaImage(),
+		Args:     []string{"python3", "-c", churn},
+		SpecOpts: []oci.SpecOpts{cdi.WithCDIDevices("nvidia.com/gpu=0")},
+	}
+	parent := ns.Run(framework.UniqueID("churn"), spec)
+	framework.Eventually(t, 3*time.Minute, "the files to churn", func() bool {
+		s, _ := parent.ReadFile("/tmp/count")
+		n, _ := strconv.Atoi(s)
+		return n > 100
+	})
+	for i := range 3 {
+		dir := filepath.Join(framework.TempDir(t), fmt.Sprintf("snapshot%d", i))
+		if err := control.NewClient(ns.Name, parent.ID).Snapshot(t.Context(), dir); err != nil {
+			t.Fatalf("snapshot %d: %v", i, err)
+		}
+		s := spec
+		s.Annotations = map[string]string{container.AnnotationForkFrom: dir}
+		child := ns.Run(framework.UniqueID(fmt.Sprintf("churn-fork%d", i)), s)
+		at := child.ReadInt("/tmp/count")
+		framework.Eventually(t, time.Minute, fmt.Sprintf("fork %d to carry on", i), func() bool {
+			s, _ := child.ReadFile("/tmp/count")
+			n, _ := strconv.Atoi(s)
+			return n > at+10
+		})
+		child.Remove()
+	}
+}

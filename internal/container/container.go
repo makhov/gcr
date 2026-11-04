@@ -911,9 +911,6 @@ func (c *Container) snapshot(ctx context.Context, dir, parent string, stop bool)
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
-	if err := copyTree(upper, filepath.Join(dir, "upper")); err != nil {
-		return fmt.Errorf("copy writable layer: %w", err)
-	}
 	work := filepath.Join(dir, "work")
 	if err := os.MkdirAll(work, 0o700); err != nil {
 		return err
@@ -926,6 +923,19 @@ func (c *Container) snapshot(ctx context.Context, dir, parent string, stop bool)
 		// in /dev/shm, as Python's multiprocessing leaves) are linked
 		// back for the dump; CRIU refuses them otherwise.
 		LinkRemap: true,
+		// The writable layer as the dump has it: copied while CRIU holds
+		// the tasks stopped, after the dump. The freeze above does not
+		// keep them from writing in between: to seize a container with
+		// GPUs CRIU thaws it, since CUDA has to run to be locked, and a
+		// file created then would be open in the dump and missing from a
+		// layer copied before it. The files CRIU links back for the dump
+		// (LinkRemap) are there too, until it resumes the tasks.
+		PostDump: func() error {
+			if err := copyTree(upper, filepath.Join(dir, "upper")); err != nil {
+				return fmt.Errorf("copy writable layer: %w", err)
+			}
+			return nil
+		},
 	}
 	if parent != "" {
 		// Relative to the images directory; CRIU links it as "parent"
