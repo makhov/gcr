@@ -71,7 +71,7 @@ func TestCheckMounts(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			writeMounts(t, dir, tc.had...)
-			err := checkMounts(dir, tc.has)
+			err := checkImageMounts(dir, tc.has)
 			switch {
 			case tc.want == "" && err != nil:
 				t.Fatalf("refused: %v", err)
@@ -111,7 +111,15 @@ func TestCheckMountsThroughRootfsSymlinks(t *testing.T) {
 			{Destination: "/etc/hosts", Device: "bind", Flags: unix.MS_BIND},
 		},
 	}
-	if err := checkMounts(dir, cfg); err != nil {
+	if err := checkImageMounts(dir, cfg); err != nil {
 		t.Fatalf("refused a fork whose mounts differ only by a symlink in the image: %v", err)
 	}
+}
+
+func checkImageMounts(dir string, cfg *configs.Config) error {
+	had, err := imageBinds(dir)
+	if err != nil {
+		return err
+	}
+	return checkMounts(had, nil, cfg)
 }

@@ -56,7 +56,7 @@ Other owners:
 | `emptyDir` | copied to the target pod's own, while the container is frozen, as the writable layer is (milestone 3) |
 | PersistentVolumes | ReadWriteMany: mounted on both. ReadWriteOnce: refused at first (the volume must detach from the source first, which lengthens the pause) |
 | IP address, open TCP connections | a new IP; connections reset. Services follow labels, so traffic goes to the target once it is Ready |
-| GPUs | stop-and-copy only (CRIU's CUDA plugin cannot pre-dump), and the target needs the same GPU model and driver ([GPUs](../gpus.md)) |
+| GPUs | stop-and-copy only (CRIU's CUDA plugin cannot pre-dump), and the target needs the same driver and GPUs of the same chip ([GPUs](../gpus.md)) |
 
 ## Security
 

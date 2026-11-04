@@ -118,7 +118,9 @@ func TestCompatible(t *testing.T) {
 		{"same GPU", &Info{Driver: "570.86.15", GPUs: []GPU{l4(0, "GPU-a")}}, nil},
 		{"another node, same index", &Info{Driver: "570.86.15", GPUs: []GPU{l4(0, "GPU-b")}}, nil},
 		{"other driver", &Info{Driver: "575.51.03", GPUs: []GPU{l4(0, "GPU-a")}}, errdefs.ErrFailedPrecondition},
-		{"other model", &Info{Driver: "570.86.15", GPUs: []GPU{{Minor: 0, Model: "NVIDIA H100"}}}, errdefs.ErrFailedPrecondition},
+		// The driver says which GPUs a checkpoint restores onto (the same
+		// chip, with enough memory), not the model's name.
+		{"other model", &Info{Driver: "570.86.15", GPUs: []GPU{{Minor: 0, Model: "NVIDIA L4 (another SKU)"}}}, nil},
 		{"two GPUs", &Info{Driver: "570.86.15", GPUs: []GPU{l4(0, "GPU-a"), l4(1, "GPU-c")}}, errdefs.ErrFailedPrecondition},
 		{"no GPU", nil, errdefs.ErrFailedPrecondition},
 		// The index a GPU had is not what a restore binds to: the

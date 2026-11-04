@@ -641,9 +641,6 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 		if err := checkCreds(images, c.cfg, uid); err != nil {
 			return fmt.Errorf("restore: %w", err)
 		}
-		if err := checkMounts(images, c.cfg); err != nil {
-			return fmt.Errorf("restore: %w", err)
-		}
 	}
 	saved, err := gpu.Load(images)
 	if err != nil {
@@ -654,7 +651,30 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 	}
 	var extra []string
 	if c.checkpointFrom != nil {
-		extra = migrationCRIU // an incoming migration's
+		extra = slices.Clone(migrationCRIU) // an incoming migration's
+	}
+	// On other GPUs than the snapshot's: their devices go where the
+	// snapshot's were.
+	moves := gpuMoves(saved, c.gpu)
+	inUserns := c.cfg.Namespaces.Contains(configs.NEWUSER)
+	var had, moved map[string]bool
+	if images == c.forkImages || len(moves) > 0 && inUserns {
+		if had, err = imageBinds(images); err != nil {
+			return fmt.Errorf("restore: %w", err)
+		}
+	}
+	if len(moves) > 0 && inUserns {
+		opts, err := gpuMounts(moves, had, c.cfg)
+		if err != nil {
+			return fmt.Errorf("restore: %w", err)
+		}
+		extra = append(extra, opts...)
+		moved = gpuMounted(opts)
+	}
+	if images == c.forkImages {
+		if err := checkMounts(had, moved, c.cfg); err != nil {
+			return fmt.Errorf("restore: %w", err)
+		}
 	}
 	if err := c.criu.write(true, extra...); err != nil {
 		return fmt.Errorf("CRIU config: %w", err)
@@ -699,6 +719,9 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 		LazyPages:       lazy,
 		StatusFd:        -1,
 		Command:         c.criuCommand(),
+	}
+	if len(moves) > 0 {
+		opts.PostRestore = gpuNodes(moves, hostRoot(c.cfg))
 	}
 	if freshNetwork {
 		opts.EmptyNs = unix.CLONE_NEWNET

@@ -25,34 +25,10 @@ import (
 // while a mount this container has and the images do not is simply not
 // there for the restored processes. A fork taken elsewhere (an image made
 // in CI) must have been run with its pod's mounts.
-func checkMounts(dir string, cfg *configs.Config) error {
-	imgs, err := filepath.Glob(filepath.Join(dir, "mountpoints-*.img"))
-	if err != nil {
-		return err
-	}
-	had := map[string]bool{}
-	for _, path := range imgs {
-		in, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW, 0)
-		if err != nil {
-			return err
-		}
-		img, err := crit.New(in, nil, "", false, false).Decode(&mnt.MntEntry{})
-		in.Close()
-		if err != nil {
-			return fmt.Errorf("%s: %w", filepath.Base(path), err)
-		}
-		for _, e := range img.Entries {
-			m, ok := e.Message.(*mnt.MntEntry)
-			if !ok {
-				return fmt.Errorf("%s: entry is %T", filepath.Base(path), e.Message)
-			}
-			// libcontainer keys a bind mount from the spec by where it
-			// goes; masked paths are keyed by /dev/null.
-			if k := m.GetExtKey(); k != "" && k == m.GetMountpoint() {
-				had[k] = true
-			}
-		}
-	}
+//
+// had are the images' bind mounts (imageBinds), moved those of them a
+// restore binds to other devices (gpuMounts).
+func checkMounts(had, moved map[string]bool, cfg *configs.Config) error {
 	has := map[string]bool{}
 	for _, m := range cfg.Mounts {
 		if m.IsBind() {
@@ -66,7 +42,7 @@ func checkMounts(dir string, cfg *configs.Config) error {
 	}
 	var missing, extra []string
 	for d := range had {
-		if !has[d] {
+		if !has[d] && !moved[d] {
 			missing = append(missing, d)
 		}
 	}
@@ -115,4 +91,37 @@ func inRootfs(rootfs, dest string) string {
 		return dest
 	}
 	return full[len(rootfs):]
+}
+
+// imageBinds are the bind mounts of the container in the CRIU images in
+// dir, by where they are mounted.
+func imageBinds(dir string) (map[string]bool, error) {
+	imgs, err := filepath.Glob(filepath.Join(dir, "mountpoints-*.img"))
+	if err != nil {
+		return nil, err
+	}
+	had := map[string]bool{}
+	for _, path := range imgs {
+		in, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW, 0)
+		if err != nil {
+			return nil, err
+		}
+		img, err := crit.New(in, nil, "", false, false).Decode(&mnt.MntEntry{})
+		in.Close()
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", filepath.Base(path), err)
+		}
+		for _, e := range img.Entries {
+			m, ok := e.Message.(*mnt.MntEntry)
+			if !ok {
+				return nil, fmt.Errorf("%s: entry is %T", filepath.Base(path), e.Message)
+			}
+			// libcontainer keys a bind mount from the spec by where it
+			// goes; masked paths are keyed by /dev/null.
+			if k := m.GetExtKey(); k != "" && k == m.GetMountpoint() {
+				had[k] = true
+			}
+		}
+	}
+	return had, nil
 }

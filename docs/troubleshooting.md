@@ -71,6 +71,7 @@ has `Hardening = 'off'` and `Landlock = 'off'`.
 | `gcr's user namespaces need the rootfs as overlay mounts from containerd` | `gcr.dev/host-users=false` or `UserNamespaces = 'always'` under CRI-O | use `hostUsers: false` (CRI-O's user namespaces) |
 | `NVIDIA driver ...: checkpoints of GPU containers need r580 or newer` | checkpoints go through the driver's checkpoint API, which r580 brought | upgrade the node's driver ([GPUs](gpus.md#what-a-node-needs)) |
 | `NVIDIA driver: ... no such file or directory` on a checkpoint | the container has GPU devices but the node has no NVIDIA driver loaded | load the driver; gcr will not checkpoint GPUs it cannot describe |
+| a GPU container is OOM-killed during a checkpoint or snapshot | the driver copies the GPU memory into the container's memory, against its limit | raise the memory limit, or give the node swap ([GPUs](gpus.md#when-gpu-memory-is-larger-than-ram)) |
 | `time travel for containers with GPUs` | CRIU's CUDA plugin cannot pre-dump, so every point would copy GPU memory | none yet |
 | `time travel needs a container without a terminal` | | run without `-t` |
 | `time travel is off (start the container with gcr.dev/time-travel)` | `gcr timeline` or `rewind` on a container without it | recreate it with the annotation |
@@ -80,7 +81,8 @@ has `Hardening = 'off'` and `Landlock = 'off'`.
 | `post-copy: this node has vm.unprivileged_userfaultfd = 0` | the target cannot restore a container in a user namespace lazily | set the sysctl on the target, or migrate without `-post-copy` |
 | `target is running but serving it its memory failed` | a post-copy migration lost the source or the connection after the target ran | the container is lost; restore it from a snapshot or checkpoint |
 | `gcr.dev/migrate-in needs gcr.dev/migrate-token of at least 16 characters` | the token is missing or too short | use a longer one |
-| GPU driver or model mismatch on restore | the node cannot take the checkpoint | restore on a node with the same driver version and GPU models ([GPUs](gpus.md)) |
+| GPU driver or GPU count mismatch on restore | the node cannot take the checkpoint | restore on a node with the same driver version and as many GPUs ([GPUs](gpus.md)) |
+| a GPU restore fails in CRIU's CUDA plugin on another GPU model | the driver restores only onto GPUs of the same chip, with enough memory | restore onto GPUs like the snapshot's ([GPUs](gpus.md)) |
 
 ## The netlink policy is off
 

@@ -124,8 +124,8 @@ between seconds and minutes.
 ## Name snapshots by what a restore checks
 
 A GPU snapshot does not restore just anywhere. It needs the same NVIDIA
-driver version and the same GPU model
-([GPUs](../gpus.md#in-kubernetes)); which GPU of that model the node
+driver version, which gcr checks, and GPUs of the same chip, which the
+driver checks ([GPUs](../gpus.md#in-kubernetes)); which GPU the node
 hands out does not matter. A restore refuses rather than restoring
 something wrong:
 
