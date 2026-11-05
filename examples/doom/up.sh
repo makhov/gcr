@@ -41,9 +41,16 @@ for n in $(kubectl get nodes -o name); do
 done
 kubectl -n gcr-system rollout status deploy/gcr-operator --timeout=300s
 # The game moves post-copy, which needs CRIU to restore lazily: not in a
-# node in a rootless container. The arcade then moves it pre-copy.
-if ! kubectl -n gcr-system exec ds/gcr-installer -- nsenter -t 1 -m -- \
-	/var/lib/gcr/bin/criu check --feature uffd-noncoop >/dev/null 2>&1; then
+# node in a rootless container. The arcade then moves it pre-copy. Only
+# CRIU's own answer counts: the exec can fail just after the install.
+lazy=
+for _ in $(seq 5); do
+	out=$(kubectl -n gcr-system exec ds/gcr-installer -- nsenter -t 1 -m -- \
+		/var/lib/gcr/bin/criu check --feature uffd-noncoop 2>&1) && { lazy=yes; break; }
+	case "$out" in *"not supported"* | *"not permitted"*) lazy=no; break ;; esac
+	sleep 2
+done
+if [ "$lazy" = no ]; then
 	echo "Note: CRIU can't restore lazily on these nodes (is docker or podman rootless?)." >&2
 	echo "Doom will move pre-copy, with a longer pause; create the cluster as root for post-copy." >&2
 fi
