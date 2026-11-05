@@ -57,10 +57,11 @@ browser ──► Traefik ──► arcade (noVNC, websockify) ──► Service
   last frame dimmed meanwhile. It reconnects to the new pod directly: the
   mover finds it by its `gcr.dev/target-of` label as soon as the move
   starts, while the doom Service only finds it seconds after the game is
-  back.
+  back. The game's X server moves with any key held as the connection
+  dropped still down, so the page then releases those let go of since.
 
 On an arm64 VM with three k0da nodes, moves paused the game for 500–890 ms,
-and the page showed it again 0.7–0.8 seconds after its connection dropped.
+and the page showed it again 0.65–0.75 seconds after its connection dropped.
 
 ## Things to try
 
