@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/tools/cache"
@@ -106,7 +107,7 @@ func (o *operator) pickUp(ctx context.Context, dyn dynamic.Interface, op operati
 	}, "status")
 	// The informer's copy's resourceVersion: an update after another
 	// operator's, or an earlier event's, conflicts.
-	claimed, err = dyn.Resource(op.gvr).Namespace(u.GetNamespace()).UpdateStatus(ctx, claimed, metav1.UpdateOptions{})
+	claimed, err = claim(ctx, dyn.Resource(op.gvr).Namespace(u.GetNamespace()), op.gvr.GroupResource(), claimed)
 	if err != nil {
 		if !apierrors.IsConflict(err) && !apierrors.IsNotFound(err) {
 			log.Printf("%s %s/%s: %v", op.gvr.Resource, u.GetNamespace(), u.GetName(), err)
@@ -133,6 +134,42 @@ func (o *operator) pickUp(ctx context.Context, dyn dynamic.Interface, op operati
 		status, err := op.run(context.WithoutCancel(ctx), claimed, pod)
 		o.finish(context.WithoutCancel(ctx), dyn, op, claimed, status, err)
 	}()
+}
+
+// claimBackoff is how long claim tries for, over the API server's
+// trouble.
+var claimBackoff = wait.Backoff{Duration: 500 * time.Millisecond, Factor: 1.5, Jitter: 0.1, Steps: 10, Cap: 10 * time.Second}
+
+// claim marks an operation Running, as claimed has it. An answer lost to
+// the API server's trouble leaves unknown whether the mark landed: claim
+// reads the operation back, and goes ahead if it did, or marks it again
+// if nobody did. Otherwise, it would be left Running, and taken for one
+// an operator gone away left half done (pickUp).
+func claim(ctx context.Context, r dynamic.ResourceInterface, gr schema.GroupResource, claimed *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	start, _, _ := unstructured.NestedString(claimed.Object, "status", "startTime")
+	var got *unstructured.Unstructured
+	err := retry.OnError(claimBackoff, kubemigrate.Transient, func() error {
+		var err error
+		if got, err = r.UpdateStatus(ctx, claimed, metav1.UpdateOptions{}); err == nil || !kubemigrate.Transient(err) {
+			return err
+		}
+		cur, gerr := r.Get(ctx, claimed.GetName(), metav1.GetOptions{})
+		if gerr != nil || cur.GetUID() != claimed.GetUID() {
+			return err
+		}
+		phase, _, _ := unstructured.NestedString(cur.Object, "status", "phase")
+		at, _, _ := unstructured.NestedString(cur.Object, "status", "startTime")
+		switch {
+		case phase == string(v1alpha1.Running) && at == start:
+			got = cur
+			return nil
+		case phase != "":
+			return apierrors.NewConflict(gr, claimed.GetName(), errors.New("another operator claimed it"))
+		}
+		claimed.SetResourceVersion(cur.GetResourceVersion())
+		return err
+	})
+	return got, err
 }
 
 // finish marks u Succeeded with status, or Failed with err.

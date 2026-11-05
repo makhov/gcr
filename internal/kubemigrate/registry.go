@@ -16,7 +16,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -361,7 +360,7 @@ func plainHTTP(r RegistryOptions) string {
 // pod uid: until it is scheduled, or, not steered to restore, created.
 func waitRecreated(ctx context.Context, cs kubernetes.Interface, ns, name string, uid types.UID, timeout time.Duration) (*corev1.Pod, error) {
 	var dst *corev1.Pod
-	err := wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
+	err := poll(ctx, 250*time.Millisecond, timeout, func(ctx context.Context) (bool, error) {
 		p, err := cs.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
 		switch {
 		case apierrors.IsNotFound(err):
@@ -650,7 +649,7 @@ func restoreOwned(ctx context.Context, cs kubernetes.Interface, src *corev1.Pod,
 	log("waiting for its %s to replace it, to restore from %s", src.OwnerReferences[0].Kind, rs.Ref)
 	var dst *corev1.Pod
 	sel := metav1.ListOptions{LabelSelector: LabelRestore + "=" + rs.ID}
-	err := wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, pushWait+o.Timeout, true, func(ctx context.Context) (bool, error) {
+	err := poll(ctx, 250*time.Millisecond, pushWait+o.Timeout, func(ctx context.Context) (bool, error) {
 		pods, err := cs.CoreV1().Pods(ns).List(ctx, sel)
 		if err != nil || len(pods.Items) == 0 {
 			return false, nil

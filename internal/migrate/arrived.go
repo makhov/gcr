@@ -35,6 +35,12 @@ func ArrivedKey(annotations map[string]string) string {
 // the workload a second time, cold, so it is refused.
 var DepartedDir = "/var/lib/gcr/departed"
 
+// DepartedRefusal is the shim's error for a container that migrated away
+// and is started again in the pod it left (Departed). gcr-operator looks
+// for it in pods' container statuses: such a pod's controller must
+// replace it.
+const DepartedRefusal = "this pod's container migrated to another node and does not start here again"
+
 // Arrived says whether a migration came into key's container before.
 func Arrived(key string) bool { return marked(ArrivedDir, key) }
 

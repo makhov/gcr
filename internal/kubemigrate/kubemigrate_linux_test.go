@@ -2,6 +2,7 @@ package kubemigrate
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/makhov/gcr/internal/control"
@@ -20,6 +21,9 @@ func TestAgreesWithGCR(t *testing.T) {
 		if got != want {
 			t.Errorf("%q here, %q in gcr", got, want)
 		}
+	}
+	if !strings.Contains(migrate.DepartedRefusal, DepartedRefusal) {
+		t.Errorf("%q is not in gcr's refusal, %q", DepartedRefusal, migrate.DepartedRefusal)
 	}
 	b, _ := json.Marshal(control.Info{IDBase: 7})
 	var inf info
