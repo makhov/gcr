@@ -134,7 +134,7 @@ What it costs:
   target touches early wait on the network instead of on the freeze.
   Pre-copy (above) doesn't need the source afterwards, but its downtime
   is still longer where the kernel tracks dirty memory: 256 MiB on x86
-  CI paused 490 to 580 ms with pre-copy, 190 to 300 ms with post-copy.
+  CI paused 350 to 380 ms with pre-copy, 205 to 210 ms with post-copy.
 
 In Kubernetes, a [Migration](operations.md#migration) with
 `mode: PostCopy` (`kubectl gcr migrate --post-copy`) moves this way. A
