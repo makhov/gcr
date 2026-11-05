@@ -134,10 +134,22 @@ custom storage whenever the container's libcuda has it.
 
 On the same node as below, a container holding 8.7 GiB of GPU memory
 under a 4 GiB memory limit, with no swap, snapshots with its memory
-peaking at 0.4 GiB, and its fork, under the same limit, at 0.5 GiB.
-Forks start faster too (about 1.0 s against 1.7 s for 4 GiB), and
-snapshots that keep the container running take a little longer (3.8 s
-against 3.0 s), as the memory is written out and read back.
+peaking at 0.4 GiB, and its fork, under the same limit, at 0.7 GiB.
+
+The image is compressed, like the rest of the checkpoint, with zstd from
+the node (`libzstd.so.1`; without it, it is stored as it is), and memory
+that is all zeroes, such as a KV cache reserved and not yet written, is
+not stored at all ([`Compression`](configuration.md#compression)). Model
+weights barely shrink with the LZ4 CRIU uses for memory pages, but their
+high bytes, sign and exponent, do with zstd: a bf16 model (Qwen2.5-1.5B,
+2.9 GiB of weights) went from 3.41 GiB to 2.24 GiB, a third less to
+write, push to a registry and pull onto another node. Several threads
+compress and decompress it, so on a local disk it costs little:
+
+| bf16 model, local disk | Snapshot | Fork | GPU memory image |
+| --- | --- | --- | --- |
+| Uncompressed | 2.99 s | 0.89 s | 3.41 GiB |
+| Compressed | 3.25 s | 1.02 s | 2.24 GiB |
 
 **Before r615,** a checkpoint moves the GPU memory a process uses into
 its host memory before CRIU writes anything to disk, all at once: the
