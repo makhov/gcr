@@ -91,12 +91,22 @@
   // The game's X server moves with the keys it has down. Keys held as the
   // connection drops stay down in it, unless the page tells it otherwise
   // when it's back: it releases those since let go, and presses those
-  // since held.
+  // since held. It releases those still held when they're let go of too:
+  // noVNC drops the release of a key it didn't see pressed.
   const held = new Map();
-  let stale = new Map();
+  let stale = new Map(), carried = new Map();
   addEventListener("keydown", (e) => { held.set(getKeycode(e), getKeysym(e)); }, true);
-  addEventListener("keyup", (e) => { held.delete(getKeycode(e)); }, true);
-  addEventListener("blur", () => held.clear());
+  addEventListener("keyup", (e) => {
+    const code = getKeycode(e);
+    held.delete(code);
+    if (carried.has(code)) rfb.sendKey(carried.get(code), code, false);
+    carried.delete(code);
+  }, true);
+  addEventListener("blur", () => {
+    for (const [code, sym] of carried) rfb.sendKey(sym, code, false);
+    held.clear();
+    carried.clear();
+  });
   let rfb, clicked = false;
   function connect() {
     const screen = document.getElementById("game").appendChild(document.createElement("div"));
@@ -120,6 +130,7 @@
       for (const [code, sym] of stale) if (!held.has(code)) r.sendKey(sym, code, false);
       for (const [code, sym] of held) if (!stale.has(code)) r.sendKey(sym, code, true);
       stale = new Map();
+      carried = new Map(held);
       if (clicked) r.focus();
       // The still frame stays until the game's first frame is drawn.
       const d = r._display, flip = d.flip;
