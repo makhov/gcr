@@ -38,6 +38,9 @@ kc wait --for=condition=Ready pod plain unconfined hostusers-false gcr-userns en
 kc get pods -o wide
 
 echo "== exec, exit code, stdin"
+# A new node's kubelet may not have its serving certificate yet: until it
+# does, exec fails with "tls: internal error".
+for _ in $(seq 30); do kc exec plain -- true 2>/dev/null && break; sleep 2; done
 [ "$(kc exec plain -- sh -c 'echo $((6*7))')" = 42 ] || fail "exec output"
 code=0; kc exec plain -- sh -c 'exit 3' || code=$?
 [ "$code" = 3 ] || fail "exec exit code $code, want 3"
