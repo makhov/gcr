@@ -96,6 +96,7 @@ nav:
       - Node maintenance: examples/node-maintenance.md
       - A warm pool across the fleet: examples/warm-pool.md
       - Serving many models on few GPUs: examples/model-serving.md
+      - Doom on the move: examples/doom.md
   - Running containers:
       - Docker: docker.md
       - ctr and containerd: ctr.md

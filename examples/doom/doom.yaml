@@ -1,0 +1,111 @@
+# Doom on gcr, moved to another node every 20 seconds while it is played
+# (docs/examples/doom.md).
+#
+#   kubectl apply -f doom.yaml
+#   open http://localhost:8090
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: doom
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: doom}
+  template:
+    metadata:
+      labels: {app: doom}
+      annotations:
+        # A drain moves it, rather than restarting it (docs/operator.md).
+        gcr.dev/migrate-on-evict: "true"
+    spec:
+      runtimeClassName: gcr
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: doom
+          image: ghcr.io/makhov/gcr-example-doom:latest
+          ports: [{containerPort: 5900}]
+          readinessProbe:
+            tcpSocket: {port: 5900}
+            periodSeconds: 1
+          resources:
+            requests: {cpu: 250m, memory: 128Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: doom
+spec:
+  selector: {app: doom}
+  ports: [{port: 5900}]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: arcade
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: arcade
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: arcade
+subjects: [{kind: ServiceAccount, name: arcade}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: arcade}
+---
+# Creating Migrations: gcr-operator's role for it.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: arcade-moves
+subjects: [{kind: ServiceAccount, name: arcade}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: gcr-operations}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: arcade
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: arcade}
+  template:
+    metadata:
+      labels: {app: arcade}
+    spec:
+      serviceAccountName: arcade
+      containers:
+        - name: arcade
+          image: ghcr.io/makhov/gcr-example-arcade:latest
+          env:
+            - {name: INTERVAL, value: "20"}
+          ports: [{containerPort: 6080}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: arcade
+spec:
+  selector: {app: arcade}
+  ports: [{port: 6080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: arcade
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: arcade
+                port: {number: 6080}
