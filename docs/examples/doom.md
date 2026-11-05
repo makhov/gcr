@@ -2,8 +2,7 @@
 
 A game of Doom that moves to another Kubernetes node every 20 seconds
 while you play it. Your health, ammo, position and the monsters chasing
-you all go with it. The game pauses for about half a second, and your
-view of it comes back a few seconds later.
+you all go with it, and the pause is under a second.
 
 It's a toy, but a demanding one: a live display, a game loop, a VNC
 server with a client connected, and a person noticing every hitch. Live
@@ -54,13 +53,14 @@ browser ──► Traefik ──► arcade (noVNC, websockify) ──► Service
   the Deployment. The target keeps the pod's labels, so the Service finds
   it.
 - The VNC connection doesn't survive the move. The pod's address changes,
-  so gcr closes its TCP connections, and the page reconnects. For a few
-  seconds the doom Service has no pod ready, or still names the one that
-  moved, so most of the wait for the picture is the Service catching up,
-  not the pause.
+  so gcr closes its TCP connections, and the page reconnects, showing the
+  last frame dimmed meanwhile. It reconnects to the new pod directly: the
+  mover finds it by its `gcr.dev/target-of` label as soon as the move
+  starts, while the doom Service only finds it seconds after the game is
+  back.
 
 On an arm64 VM with three k0da nodes, moves paused the game for 500–890 ms,
-and the page showed it again 3.5–4 seconds after each move began.
+and the page showed it again 0.7–0.8 seconds after its connection dropped.
 
 ## Things to try
 
