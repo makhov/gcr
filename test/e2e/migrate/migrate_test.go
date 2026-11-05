@@ -87,7 +87,6 @@ func TestMigrateTLS(t *testing.T) {
 // TestMigratePostCopyTLS: post-copy's page stream goes over the TLS
 // connection too.
 func TestMigratePostCopyTLS(t *testing.T) {
-	framework.SkipLazyRestoreOnX86(t)
 	f := testcerts.Write(t, t.TempDir())
 	testMigrate(t, "https", tlsConfig(f.ClientCert, f.ClientKey, f.CA), tlsConfig(f.ServerCert, f.ServerKey, f.CA), migrate.Options{PostCopy: true})
 }
@@ -171,7 +170,6 @@ func TestMigrateTLSRefused(t *testing.T) {
 // pages all over), the target carries on from the source's count, and the
 // source is gone once the target has everything.
 func TestMigratePostCopy(t *testing.T) {
-	framework.SkipLazyRestoreOnX86(t)
 	testMigrateMemory(t, true)
 }
 
