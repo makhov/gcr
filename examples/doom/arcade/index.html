@@ -179,7 +179,8 @@
     still.classList.add("shown");
   }, 200);
   // Keys go to the game, wherever the page was clicked.
-  addEventListener("click", () => { clicked = true; rfb.focus(); });
+  // Captured: noVNC stops the clicks on the game's own canvas.
+  addEventListener("click", () => { clicked = true; rfb.focus(); }, true);
 </script>
 </body>
 </html>
