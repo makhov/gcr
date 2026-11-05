@@ -2,7 +2,8 @@
 
 A game of Doom that moves to another Kubernetes node every 20 seconds
 while you play it. Your health, ammo, position and the monsters chasing
-you all go with it, and the pause is about half a second.
+you all go with it. The game pauses for about half a second, and your
+view of it comes back a few seconds later.
 
 It's a toy, but a demanding one: a live display, a game loop, a VNC
 server with a client connected, and a person noticing every hitch. Live
@@ -49,11 +50,13 @@ browser ──► Traefik ──► arcade (noVNC, websockify) ──► Service
   the Deployment. The target keeps the pod's labels, so the Service finds
   it.
 - The VNC connection doesn't survive the move. The pod's address changes,
-  so gcr closes its TCP connections, and noVNC reconnects. That's the blip
-  you see on top of the pause.
+  so gcr closes its TCP connections, and the page reconnects. For a few
+  seconds the doom Service has no pod ready, or still names the one that
+  moved, so most of the wait for the picture is the Service catching up,
+  not the pause.
 
-On an arm64 VM with three k0da nodes, moves paused the game for 530–890 ms,
-and VNC answered again within about half a second of each.
+On an arm64 VM with three k0da nodes, moves paused the game for 500–890 ms,
+and the page showed it again 3.5–4 seconds after each move began.
 
 ## Things to try
 
@@ -89,9 +92,9 @@ Nothing in Doom knows it moves. What the container needs:
   without MIT-SHM, and x11vnc with `-noshm`.
 - **One container**, as for any live migration for now
   ([What can move](../migration.md#between-kubernetes-nodes)).
-- **gcr v0.1.14 or later.** The doom pod's TCP readiness probe nearly
-  always leaves a connection x11vnc hasn't accepted yet, and earlier gcr
-  refused to migrate a container while it had one.
+- **A gcr newer than v0.1.13.** The doom pod's TCP readiness probe nearly
+  always leaves a connection x11vnc hasn't accepted yet, and gcr up to
+  v0.1.13 refused to migrate a container while it had one.
 
 ## Clean up
 

@@ -18,7 +18,10 @@
   #moving { color: var(--hot); visibility: hidden; }
   body.moving #moving { visibility: visible; }
   main { position: relative; min-height: 0; }
-  iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  #game, #game > div { position: absolute; inset: 0; }
+  #wait { position: absolute; inset: 0; display: grid; place-items: center; color: var(--dim);
+    pointer-events: none; }
+  body.live #wait { display: none; }
   #flash { position: absolute; inset: 0; pointer-events: none; border: 4px solid var(--hot); opacity: 0;
     transition: opacity .6s; }
   #flash.on { opacity: 1; transition: none; }
@@ -39,8 +42,8 @@
   <span id="moving">moving…</span>
 </header>
 <main>
-  <iframe id="game" title="Doom" allow="fullscreen"
-    src="vnc.html?autoconnect=true&reconnect=true&reconnect_delay=200&resize=scale&path=websockify&show_dot=true"></iframe>
+  <div id="game"></div>
+  <div id="wait">connecting…</div>
   <div id="flash"></div>
   <div id="log"></div>
 </main>
@@ -70,8 +73,42 @@
   }
   setInterval(poll, 500);
   poll();
+</script>
+<script type="module">
+  // noVNC's client, without its UI: that gives up when a reconnect fails,
+  // as it does during a move. The doom Service has no pod ready for a
+  // moment, so a connection is refused; or it still names the pod that
+  // moved, so a connection hangs. This client drops an attempt that hasn't
+  // connected in 2 seconds and tries again until the game answers. Each
+  // attempt draws in an element of its own, removed when it's dropped:
+  // noVNC takes a few seconds more to close it.
+  import RFB from "./core/rfb.js";
+  const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/websockify`;
+  let rfb;
+  function connect() {
+    const screen = document.getElementById("game").appendChild(document.createElement("div"));
+    const r = rfb = new RFB(screen, url);
+    r.scaleViewport = true;
+    r.background = "#0b0b0c";
+    let over = false;
+    const retry = () => {
+      if (over) return;
+      over = true;
+      clearTimeout(stuck);
+      screen.remove();
+      document.body.classList.remove("live");
+      setTimeout(connect, 250);
+    };
+    const stuck = setTimeout(() => { r.disconnect(); retry(); }, 2000);
+    r.addEventListener("connect", () => {
+      clearTimeout(stuck);
+      document.body.classList.add("live");
+    });
+    r.addEventListener("disconnect", retry);
+  }
+  connect();
   // Keys go to the game, wherever the page was clicked.
-  addEventListener("click", () => $("game").focus());
+  addEventListener("click", () => rfb.focus());
 </script>
 </body>
 </html>
