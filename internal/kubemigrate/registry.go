@@ -173,6 +173,9 @@ func MigrateViaRegistry(ctx context.Context, cs kubernetes.Interface, ns, name s
 	if o.Node == src.Spec.NodeName {
 		return res, fmt.Errorf("%s/%s is on %s already", ns, name, o.Node)
 	}
+	if err := pinned(src, o.Node); err != nil {
+		return res, fmt.Errorf("%s/%s: %w", ns, name, err)
+	}
 	sts := ownedBy(src, "StatefulSet")
 	if sts && o.Node != "" {
 		return res, fmt.Errorf("%s/%s is a StatefulSet's: the scheduler places the pod it creates again, and a node can't be chosen", ns, name)
@@ -210,10 +213,11 @@ func MigrateViaRegistry(ctx context.Context, cs kubernetes.Interface, ns, name s
 	res.Target = dst.Name
 	stopped, done := false, false
 	defer func() {
+		// res.Target, not dst: a failed wait leaves dst nil.
 		if !stopped {
-			_ = cs.CoreV1().Pods(ns).Delete(context.WithoutCancel(ctx), dst.Name, metav1.DeleteOptions{GracePeriodSeconds: new(int64)})
+			_ = cs.CoreV1().Pods(ns).Delete(context.WithoutCancel(ctx), res.Target, metav1.DeleteOptions{GracePeriodSeconds: new(int64)})
 		} else if !done {
-			retErr = fmt.Errorf("%w (%s stopped at its checkpoint %s; %s waits for it)", retErr, name, ref, dst.Name)
+			retErr = fmt.Errorf("%w (%s stopped at its checkpoint %s; %s waits for it)", retErr, name, ref, res.Target)
 		}
 	}()
 	log("replacement %s created; waiting for it to be scheduled", dst.Name)
@@ -565,7 +569,7 @@ func RestoreAfterShutdown(ctx context.Context, cs kubernetes.Interface, src *cor
 		done := false
 		defer func() {
 			if !done {
-				_ = cs.CoreV1().Pods(ns).Delete(context.WithoutCancel(ctx), dst.Name, metav1.DeleteOptions{GracePeriodSeconds: new(int64)})
+				_ = cs.CoreV1().Pods(ns).Delete(context.WithoutCancel(ctx), res.Target, metav1.DeleteOptions{GracePeriodSeconds: new(int64)})
 			}
 		}()
 		log("replacement %s created, to restore from %s", dst.Name, ref)

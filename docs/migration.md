@@ -141,6 +141,7 @@ The Jobs run gcr's installer image, privileged, in the node's namespaces. gcr-op
 What can move, for now:
 - **Bare pods, a ReplicaSet's (a Deployment's) and a Job's:** the target is handed over to its controller once it is Ready ([gcr-operator](operator.md#deployments-and-jobs)). Pods of other controllers are refused, since those would replace the pod with a cold one. StatefulSets' pods move [through a registry](#through-a-registry) instead.
 - **One container** (no sidecars).
+- **Not pinned to its node** by a `nodeSelector` on `kubernetes.io/hostname` (unless `--to` names the node it pins), since the target is made from the pod's spec and could run nowhere else.
 - **Volumes the target mounts afresh:** ConfigMaps, Secrets, projected and downward API volumes.
 - **`emptyDir` volumes,** on disk or in memory: their files are copied to the target pod's own while the container is frozen, after the writable layer, so they add to the downtime as it does: on the arm64 dev VM, 256 MiB added 0.35 s on disk and 0.2 s in memory, to about 0.3 s without. Files the container has open there are reopened at the same offset.
 - **Not other volumes holding files on the node** (`hostPath`, local PersistentVolumes): refused.

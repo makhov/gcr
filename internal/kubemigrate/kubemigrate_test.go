@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -67,6 +68,47 @@ func TestMovable(t *testing.T) {
 		case tc.refuse != "" && (err == nil || !strings.Contains(err.Error(), tc.refuse)):
 			t.Errorf("%s: %v; want a refusal with %q", name, err, tc.refuse)
 		}
+	}
+}
+
+func TestPinned(t *testing.T) {
+	pin := func(h string) *corev1.Pod {
+		return running(func(p *corev1.Pod) { p.Spec.NodeSelector = map[string]string{"kubernetes.io/hostname": h} })
+	}
+	for name, tc := range map[string]struct {
+		pod    *corev1.Pod
+		to     string
+		refuse bool
+	}{
+		"not pinned":                  {running(nil), "", false},
+		"another selector":            {running(func(p *corev1.Pod) { p.Spec.NodeSelector = map[string]string{"disk": "ssd"} }), "", false},
+		"pinned, anywhere":            {pin("n1"), "", true},
+		"pinned, to another node":     {pin("n1"), "n2", true},
+		"pinned to where it is to go": {pin("n2"), "n2", false},
+	} {
+		if err := pinned(tc.pod, tc.to); (err != nil) != tc.refuse {
+			t.Errorf("%s: %v; want a refusal: %v", name, err, tc.refuse)
+		}
+	}
+}
+
+// A target the scheduler places nowhere: the migration fails, the target
+// goes, and the source stays.
+func TestMigrateUnscheduled(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewClientset(running(nil))
+	_, err := Migrate(ctx, cs, "default", "p", Options{
+		Timeout: 2 * time.Second,
+		Run: func(context.Context, string, string, map[string]string, ...string) (string, error) {
+			return "{}", nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "target") {
+		t.Fatalf("%v; want the target's wait to fail", err)
+	}
+	pods, _ := cs.CoreV1().Pods("default").List(ctx, metav1.ListOptions{})
+	if len(pods.Items) != 1 || pods.Items[0].Name != "p" {
+		t.Errorf("pods left: %v; want only the source", pods.Items)
 	}
 }
 

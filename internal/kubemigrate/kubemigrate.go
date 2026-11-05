@@ -142,6 +142,9 @@ func Migrate(ctx context.Context, cs kubernetes.Interface, ns, name string, o Op
 	if o.Node == src.Spec.NodeName {
 		return res, fmt.Errorf("%s/%s is on %s already", ns, name, o.Node)
 	}
+	if err := pinned(src, o.Node); err != nil {
+		return res, fmt.Errorf("%s/%s: %w", ns, name, err)
+	}
 
 	// A target an earlier attempt left, its migrator gone mid-way: it
 	// waits for a migration that will not come.
@@ -198,8 +201,9 @@ func Migrate(ctx context.Context, cs kubernetes.Interface, ns, name string, o Op
 	res.Target = dst.Name
 	handedOver := false
 	defer func() {
+		// res.Target, not dst: a failed wait leaves dst nil.
 		if !handedOver {
-			_ = cs.CoreV1().Pods(ns).Delete(context.WithoutCancel(ctx), dst.Name, metav1.DeleteOptions{GracePeriodSeconds: new(int64)})
+			_ = cs.CoreV1().Pods(ns).Delete(context.WithoutCancel(ctx), res.Target, metav1.DeleteOptions{GracePeriodSeconds: new(int64)})
 		}
 	}()
 	log("target %s created; waiting for it to be scheduled", dst.Name)
@@ -310,6 +314,17 @@ func Movable(p *corev1.Pod) (string, error) {
 		return "", fmt.Errorf("not running (%s)", p.Status.Phase)
 	}
 	return movable(p, false)
+}
+
+// pinned refuses a pod whose nodeSelector keeps it on its node: its
+// target, made from its spec, could run nowhere else, and would wait to be
+// scheduled until the migration timed out. node is where it is to go, if
+// the caller says.
+func pinned(p *corev1.Pod, node string) error {
+	if h, ok := p.Spec.NodeSelector["kubernetes.io/hostname"]; ok && h != node {
+		return fmt.Errorf("its nodeSelector keeps it on %s (kubernetes.io/hostname): it cannot run anywhere else", h)
+	}
+	return nil
 }
 
 // movable checks what Movable does but for the pod's owner and phase; with claims,
