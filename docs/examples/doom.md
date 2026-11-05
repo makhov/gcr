@@ -14,8 +14,12 @@ cache.
 
 ## Run it
 
-You need [k0da](https://github.com/makhov/k0da) v0.5.0 or later, Docker
-or Podman, kubectl, and port 8090 free:
+You need Linux 6.12 or later, [k0da](https://github.com/makhov/k0da)
+v0.5.0 or later, Docker or Podman, kubectl, and port 8090 free. k0da's
+nodes are containers, so they run on your kernel. On a Mac, run all of
+it in a Linux VM from a current image, such as Lima's
+`template:ubuntu-26.04` or `template:debian-13`. An older Lima `default`
+VM may still be on Ubuntu 24.04, whose 6.8 is too old.
 
 ```sh
 git clone https://github.com/makhov/gcr && cd gcr
