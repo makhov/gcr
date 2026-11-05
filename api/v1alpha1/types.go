@@ -126,7 +126,26 @@ type MigrationSpec struct {
 	// downtime, but nothing needed from the source node once pushed. A
 	// StatefulSet's pod always moves this way.
 	ThroughRegistry bool `json:"throughRegistry,omitempty"`
+	// Mode is how its memory moves node to node: PreCopy (the default)
+	// or PostCopy (docs/migration.md). Not through a registry.
+	Mode MigrationMode `json:"mode,omitempty"`
 }
+
+// MigrationMode is when a migration's memory moves to the target.
+type MigrationMode string
+
+const (
+	// PreCopy copies the memory while the pod runs, then freezes it for
+	// what changed meanwhile: should anything fail before the target
+	// runs, the pod carries on where it was. Where the kernel cannot
+	// track which pages changed (arm64), all of it moves in the freeze.
+	PreCopy MigrationMode = "PreCopy"
+	// PostCopy runs the target before its memory moves: the shortest
+	// pause, whatever the memory, but until all of it arrives the pod
+	// needs both nodes and the connection between them, and is lost if
+	// one goes.
+	PostCopy MigrationMode = "PostCopy"
+)
 
 type MigrationStatus struct {
 	Status `json:",inline"`
@@ -136,6 +155,9 @@ type MigrationStatus struct {
 	Target     string `json:"target,omitempty"`
 	// Downtime is how long its processes were stopped.
 	Downtime string `json:"downtime,omitempty"`
+	// MemoryMoved, after a post-copy migration, is when the last of its
+	// memory reached the target, from the freeze.
+	MemoryMoved string `json:"memoryMoved,omitempty"`
 }
 
 // TimePoint takes a point on the timeline of a container that has time

@@ -132,8 +132,14 @@ What it costs:
 - **No GPUs.** CRIU's CUDA plugin cannot serve GPU memory lazily.
 - **No pre-copy rounds.** Post-copy starts from a full dump; pages the
   target touches early wait on the network instead of on the freeze.
-  Where the kernel tracks dirty memory, pre-copy (above) keeps the downtime
-  as short without needing the source afterwards.
+  Pre-copy (above) doesn't need the source afterwards, but its downtime
+  is still longer where the kernel tracks dirty memory: 256 MiB on x86
+  CI paused 490 to 580 ms with pre-copy, 190 to 300 ms with post-copy.
+
+In Kubernetes, a [Migration](operations.md#migration) with
+`mode: PostCopy` (`kubectl gcr migrate --post-copy`) moves this way. A
+drain's migrations stay pre-copy: a node being drained is no node to
+depend on until the memory has moved.
 
 
 ## Between Kubernetes nodes

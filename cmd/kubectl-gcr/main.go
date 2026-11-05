@@ -2,7 +2,7 @@
 // operations (gcr.dev/v1alpha1, docs/operations.md), which gcr-operator
 // carries out, and waits for it:
 //
-//	kubectl gcr migrate [-n NAMESPACE] [--to NODE] [--through-registry] pod/NAME
+//	kubectl gcr migrate [-n NAMESPACE] [--to NODE] [--post-copy | --through-registry] pod/NAME
 //
 // moves a running pod to another node: its processes carry on there,
 // memory and all, after a pause of well under a second (a Migration).
@@ -41,7 +41,7 @@ import (
 	"github.com/makhov/gcr/api/v1alpha1"
 )
 
-const usage = `usage: kubectl gcr migrate [-n NAMESPACE] [--to NODE] [--through-registry] pod/NAME
+const usage = `usage: kubectl gcr migrate [-n NAMESPACE] [--to NODE] [--post-copy | --through-registry] pod/NAME
        kubectl gcr snapshot [-n NAMESPACE] [-c CONTAINER] [--registry REPO] [--push-secret SECRET] [--plain-http] pod/NAME [IMAGE]
        kubectl gcr point [-n NAMESPACE] [-c CONTAINER] pod/NAME [LABEL]
        kubectl gcr rewind [-n NAMESPACE] [-c CONTAINER] pod/NAME POINT`
@@ -72,6 +72,7 @@ func main() {
 	ns := fs.String("n", "", "the pod's namespace (default: the kubeconfig context's)")
 	to := fs.String("to", "", "migrate: the node to move it to (default: one the scheduler picks, not its own)")
 	viaRegistry := fs.Bool("through-registry", false, "migrate: move it through a checkpoint in gcr-operator's registry, rather than node to node: seconds of downtime, but nothing needed from the source once pushed (a StatefulSet's pod always moves this way)")
+	postCopy := fs.Bool("post-copy", false, "migrate: run it on the target before its memory moves: the shortest pause, but it is lost if either node, or the connection, goes before all its memory arrives")
 	container := fs.String("c", "", "snapshot, point, rewind: the container (default: the pod's only one)")
 	registry := fs.String("registry", "", "snapshot: put the image in this registry repository (host[:port]/path) when no IMAGE is given (default: gcr-operator's -snapshot-registry)")
 	pushSecret := fs.String("push-secret", "", "snapshot: a dockerconfigjson Secret in the pod's namespace with credentials for IMAGE's registry (default: the node's)")
@@ -111,7 +112,11 @@ func main() {
 	var obj any
 	switch cmd {
 	case "migrate":
-		obj = &v1alpha1.Migration{ObjectMeta: meta, Spec: v1alpha1.MigrationSpec{Pod: name, Node: *to, ThroughRegistry: *viaRegistry}}
+		var mode v1alpha1.MigrationMode
+		if *postCopy {
+			mode = v1alpha1.PostCopy
+		}
+		obj = &v1alpha1.Migration{ObjectMeta: meta, Spec: v1alpha1.MigrationSpec{Pod: name, Node: *to, ThroughRegistry: *viaRegistry, Mode: mode}}
 	case "snapshot":
 		obj = &v1alpha1.Snapshot{ObjectMeta: meta, Spec: v1alpha1.SnapshotSpec{Target: target, Image: fs.Arg(1), Registry: *registry, PushSecret: *pushSecret, PlainHTTP: *plainHTTP}}
 	case "point":
@@ -157,7 +162,11 @@ func main() {
 	}
 	switch cmd {
 	case "migrate":
-		fmt.Printf("pod/%s moved to %v as pod/%v (downtime %v)\n", name, status["targetNode"], status["target"], status["downtime"])
+		fmt.Printf("pod/%s moved to %v as pod/%v (downtime %v", name, status["targetNode"], status["target"], status["downtime"])
+		if m, ok := status["memoryMoved"]; ok {
+			fmt.Printf(", all its memory there by %v", m)
+		}
+		fmt.Println(")")
 	case "snapshot":
 		fmt.Println(status["image"])
 	case "point":
