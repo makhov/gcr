@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Doom on the move</title>
+<style>
+  :root { --bg: #0b0b0c; --panel: #17171a; --text: #e8e6e3; --dim: #8b8a88; --hot: #e5482f; --ok: #6cc36c; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  body { display: grid; grid-template-rows: auto 1fr; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: baseline; padding: 10px 16px;
+    background: var(--panel); border-bottom: 1px solid #26262b; }
+  h1 { margin: 0; font-size: 16px; color: var(--hot); letter-spacing: .04em; }
+  .stat b { color: var(--text); font-weight: 600; }
+  .stat { color: var(--dim); }
+  #moving { color: var(--hot); visibility: hidden; }
+  body.moving #moving { visibility: visible; }
+  main { position: relative; min-height: 0; }
+  iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  #flash { position: absolute; inset: 0; pointer-events: none; border: 4px solid var(--hot); opacity: 0;
+    transition: opacity .6s; }
+  #flash.on { opacity: 1; transition: none; }
+  #log { position: absolute; right: 12px; bottom: 12px; max-width: min(420px, calc(100% - 24px));
+    background: rgba(23, 23, 26, .85); padding: 8px 10px; border-radius: 6px; color: var(--dim);
+    pointer-events: none; font-size: 12px; }
+  #log div b { color: var(--ok); font-weight: 600; }
+  #log div.fail b { color: var(--hot); }
+</style>
+</head>
+<body>
+<header>
+  <h1>DOOM, ON THE MOVE</h1>
+  <span class="stat">node <b id="node">…</b></span>
+  <span class="stat">moves <b id="moves">0</b></span>
+  <span class="stat">last pause <b id="pause">–</b></span>
+  <span class="stat">next move in <b id="next">–</b></span>
+  <span id="moving">moving…</span>
+</header>
+<main>
+  <iframe id="game" title="Doom" allow="fullscreen"
+    src="vnc.html?autoconnect=true&reconnect=true&reconnect_delay=200&resize=scale&path=websockify&show_dot=true"></iframe>
+  <div id="flash"></div>
+  <div id="log"></div>
+</main>
+<script>
+  const $ = (id) => document.getElementById(id);
+  let moves = 0;
+  async function poll() {
+    try {
+      const s = await (await fetch("status.json", { cache: "no-store" })).json();
+      $("node").textContent = s.node || "…";
+      $("moves").textContent = s.moves;
+      $("next").textContent = s.moving ? "now" : `${s.next ?? "–"} s`;
+      $("pause").textContent = s.last && s.last.ok ? s.last.downtime : "–";
+      document.body.classList.toggle("moving", !!s.moving);
+      if (s.moves !== moves) {
+        moves = s.moves;
+        $("flash").classList.add("on");
+        setTimeout(() => $("flash").classList.remove("on"), 50);
+      }
+      $("log").replaceChildren(...(s.history || []).slice(0, 5).map((h) => {
+        const d = document.createElement("div");
+        if (!h.ok) d.className = "fail";
+        d.innerHTML = h.ok ? `${h.from} → ${h.to}, paused <b>${h.downtime}</b>` : `<b>failed</b>: ${h.message}`;
+        return d;
+      }));
+    } catch (e) { /* the page outlives the arcade restarting */ }
+  }
+  setInterval(poll, 500);
+  poll();
+  // Keys go to the game, wherever the page was clicked.
+  addEventListener("click", () => $("game").focus());
+</script>
+</body>
+</html>

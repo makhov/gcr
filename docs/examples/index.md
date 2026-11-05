@@ -50,9 +50,18 @@ Whole use cases, each one something you can run.
 
     *An NVIDIA GPU; the recipe is for a cluster.*
 
+-   :material-gamepad-variant-outline: **[Doom on the move](doom.md)**
+
+    ---
+
+    Play Doom while it moves to another node every 20 seconds, health,
+    ammo, monsters and all, with a pause of about half a second.
+
+    *k0da on a laptop, three nodes, no GPU. 10 minutes.*
+
 </div>
 
-All five assume gcr is installed ([Installation](../install.md)). The
+The first five assume gcr is installed ([Installation](../install.md)). The
 `gcr` command itself always runs as root, because its control sockets are
 root's. If you have not run a container on gcr yet,
 [the quickstart](../getting-started.md) is the shorter way in.
