@@ -349,7 +349,9 @@ func (o *operator) move(pod *corev1.Pod) {
 		o.moves.Done()
 	}()
 	ctx := context.Background()
-	res, err := o.migrate(ctx, pod, "", o.throughRegistry(pod))
+	// Pre-copy: a node being drained is no node to depend on until the
+	// memory has moved.
+	res, err := o.migrate(ctx, pod, "", o.throughRegistry(pod), false)
 	if err != nil {
 		log.Printf("%s: migration failed, letting its eviction through: %v", key, err)
 		o.mark(ctx, pod, "failed: "+firstLine(err.Error()))
@@ -360,10 +362,11 @@ func (o *operator) move(pod *corev1.Pod) {
 
 // migrate moves pod to node (or one the scheduler picks), node to node or
 // through the registry.
-func (o *operator) migrate(ctx context.Context, pod *corev1.Pod, node string, viaRegistry bool) (kubemigrate.Result, error) {
+func (o *operator) migrate(ctx context.Context, pod *corev1.Pod, node string, viaRegistry, postCopy bool) (kubemigrate.Result, error) {
 	key := pod.Namespace + "/" + pod.Name
 	opts := o.opts
 	opts.Node = node
+	opts.PostCopy = postCopy
 	opts.Log = func(format string, args ...any) { log.Printf(key+": "+format, args...) }
 	if !viaRegistry {
 		return kubemigrate.Migrate(ctx, o.cs, pod.Namespace, pod.Name, opts)

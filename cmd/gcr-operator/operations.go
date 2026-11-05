@@ -253,6 +253,10 @@ func (o *operator) migration(ctx context.Context, u *unstructured.Unstructured, 
 	if viaRegistry && o.registry.Repository == "" {
 		return nil, errors.New("through a registry, and gcr-operator has none (-registry)")
 	}
+	postCopy := m.Spec.Mode == v1alpha1.PostCopy
+	if postCopy && viaRegistry {
+		return nil, errors.New("post-copy, and its pod moves through a registry (a StatefulSet's always does)")
+	}
 	key := pod.Namespace + "/" + pod.Name
 	// A drain's eviction of it meanwhile waits, as for the moves it starts.
 	o.mu.Lock()
@@ -267,11 +271,15 @@ func (o *operator) migration(ctx context.Context, u *unstructured.Unstructured, 
 		delete(o.moving, key)
 		o.mu.Unlock()
 	}()
-	res, err := o.migrate(ctx, pod, m.Spec.Node, viaRegistry)
+	res, err := o.migrate(ctx, pod, m.Spec.Node, viaRegistry, postCopy)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"targetNode": res.Node, "target": res.Target, "downtime": res.Downtime}, nil
+	status := map[string]any{"targetNode": res.Node, "target": res.Target, "downtime": res.Downtime}
+	if res.MemoryMoved != "" {
+		status["memoryMoved"] = res.MemoryMoved
+	}
+	return status, nil
 }
 
 func (o *operator) timePoint(ctx context.Context, u *unstructured.Unstructured, pod *corev1.Pod) (map[string]any, error) {

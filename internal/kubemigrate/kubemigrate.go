@@ -86,6 +86,9 @@ type Options struct {
 	Image string
 	// GCR is gcr's path on the nodes.
 	GCR string
+	// PostCopy runs the target before the memory moves (gcr migrate
+	// -post-copy): the pod needs both nodes until it all arrives.
+	PostCopy bool
 	// Timeout bounds each wait.
 	Timeout time.Duration
 	// Log, if set, is told each step.
@@ -114,7 +117,10 @@ type Result struct {
 	Target   string
 	Node     string
 	Downtime string
-	Output   string
+	// MemoryMoved, after post-copy, is when the last of the memory reached
+	// the target, from the freeze.
+	MemoryMoved string
+	Output      string
 }
 
 // Migrate moves pod name in namespace ns to another node. The source pod
@@ -231,11 +237,15 @@ func Migrate(ctx context.Context, cs kubernetes.Interface, ns, name string, o Op
 	// The target's shim listens once the kubelet has created its
 	// container; until then the migration is refused before anything
 	// freezes, and is tried again.
+	mode := ""
+	if o.PostCopy {
+		mode = "-post-copy "
+	}
 	script := fmt.Sprintf(`for i in $(seq 60); do
-  out=$(%s -n %s migrate -token "$TOKEN" %s %s 2>&1) && { echo "$out"; exit 0; }
+  out=$(%s -n %s migrate -token "$TOKEN" %s%s %s 2>&1) && { echo "$out"; exit 0; }
   case "$out" in *"connection refused"*) sleep 1;; *) echo "$out"; exit 1;; esac
 done
-echo "$out"; exit 1`, o.GCR, containerdNamespace, id, target)
+echo "$out"; exit 1`, o.GCR, containerdNamespace, mode, id, target)
 	out, err = o.run(ctx, cs, src.Spec.NodeName, "migrate", map[string]string{"TOKEN": token}, "sh", "-c", script)
 	res.Output = out
 	switch {
@@ -247,11 +257,7 @@ echo "$out"; exit 1`, o.GCR, containerdNamespace, id, target)
 	case err != nil:
 		return res, fmt.Errorf("gcr migrate on %s: %w\n%s", src.Spec.NodeName, err, out)
 	}
-	for _, line := range strings.Split(out, "\n") {
-		if d, ok := strings.CutPrefix(line, "downtime: "); ok {
-			res.Downtime = d
-		}
-	}
+	res.Downtime, res.MemoryMoved = downtimeOf(out)
 	// The processes run in the target now; the source's are gone.
 	handedOver = true
 	if held != nil {
@@ -300,6 +306,20 @@ echo "$out"; exit 1`, o.GCR, containerdNamespace, id, target)
 		return res, fmt.Errorf("target %s after the migration: %w", dst.Name, err)
 	}
 	return res, nil
+}
+
+// downtimeOf reads gcr migrate's output: "downtime: D", or, after
+// post-copy, "post-copy: downtime D, memory fetched by M".
+func downtimeOf(out string) (downtime, memory string) {
+	for _, line := range strings.Split(out, "\n") {
+		if d, ok := strings.CutPrefix(line, "downtime: "); ok {
+			downtime = d
+		}
+		if r, ok := strings.CutPrefix(line, "post-copy: downtime "); ok {
+			downtime, memory, _ = strings.Cut(r, ", memory fetched by ")
+		}
+	}
+	return downtime, memory
 }
 
 // Movable says whether the pod can be moved, and returns its container's

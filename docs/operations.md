@@ -129,6 +129,7 @@ metadata:
 spec:
   pod: counter
   node: worker-2            # optional: by default, the scheduler picks one other than its own
+  mode: PreCopy             # optional: PreCopy (the default) or PostCopy
   throughRegistry: false    # optional
 status:
   phase: Succeeded
@@ -136,6 +137,7 @@ status:
   targetNode: worker-2
   target: counter-b853d1
   downtime: 331ms
+  memoryMoved: 903ms        # PostCopy only: when the last of its memory arrived
 ```
 
 The pod moves node to node, with a pause well under a second, and gets
@@ -145,6 +147,19 @@ checkpoint in gcr-operator's registry (its `-registry`, chart
 from the source node once the checkpoint is pushed. A StatefulSet's pod
 always moves this way, and keeps its name. What can move:
 [live migration](migration.md#between-kubernetes-nodes).
+
+`mode` is when the memory moves:
+
+- **`PreCopy`** copies it while the pod runs, then freezes the pod for
+  what changed meanwhile. If anything fails before the target runs, the
+  pod carries on where it was. Where the kernel can't track which pages
+  changed (arm64), all of it moves during the freeze.
+- **`PostCopy`** runs the target first, and its memory follows, each page
+  as it's touched and the rest in the background
+  ([post-copy](migration.md#post-copy)). The pause is the shortest, and
+  doesn't grow with the memory. But until `memoryMoved`, the pod needs
+  both nodes and the connection between them, and is lost if one goes. Not
+  with `throughRegistry`, GPUs, or a StatefulSet's pod.
 
 A pod being moved by a Migration isn't moved again by a drain meanwhile:
 the drain waits, as for the moves gcr-operator starts itself.
