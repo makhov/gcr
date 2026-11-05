@@ -127,8 +127,11 @@ What it costs:
   as with pre-copy.
 - **Lazy restore on the target.** A container in a user namespace is
   restored lazily only where `vm.unprivileged_userfaultfd` is 1
-  ([fork](fork.md#lazy-restore) has why); a target without it refuses a
-  post-copy migration before the source freezes.
+  ([fork](fork.md#lazy-restore) has why), and nothing is restored lazily
+  on a node that is itself a rootless container (a k0da node under
+  rootless Podman), which can't open a userfaultfd. Such a target refuses
+  a post-copy migration before the source freezes, and restores a
+  pre-copy one in full.
 - **No GPUs.** CRIU's CUDA plugin cannot serve GPU memory lazily.
 - **No pre-copy rounds.** Post-copy starts from a full dump; pages the
   target touches early wait on the network instead of on the freeze.
