@@ -282,15 +282,22 @@ func TestMigratePostCopyFails(t *testing.T) {
 }
 
 // TestMigrateOpenConnectionAndLock: a container holding an established
-// TCP connection and a file lock moves; the connection is closed on the
-// target (its address changes across nodes), the lock moves with its
-// file, and the processes carry on. Without tcp-close and file-locks,
-// CRIU refused to dump it at all.
+// TCP connection, one its server has not accepted yet, and a file lock
+// moves; the connections are closed on the target (its address changes
+// across nodes), the lock moves with its file, and the processes carry
+// on. Without tcp-close, skip-in-flight and file-locks, CRIU refused to
+// dump it at all.
 func TestMigrateOpenConnectionAndLock(t *testing.T) {
 	script := []string{"sh", "-c", `
 		sleep 100000 | nc -l -p 9000 >/dev/null &
 		sleep 0.5
 		(while :; do echo x; sleep 1; done) | nc 127.0.0.1 9000 &
+		# A stopped server accepts nothing: the connection waits in its
+		# listen queue.
+		nc -l -p 9001 >/dev/null &
+		until netstat -tln | grep -q ":9001 "; do sleep 0.1; done
+		kill -STOP $!
+		sleep 100000 | nc 127.0.0.1 9001 &
 		flock /tmp/lock -c "sleep 100000" &
 		i=0; while :; do i=$((i+1)); echo $i > /tmp/count.new && mv /tmp/count.new /tmp/count; sleep 0.1; done`}
 	id := framework.UniqueID("mig-tcp")
@@ -302,9 +309,17 @@ func TestMigrateOpenConnectionAndLock(t *testing.T) {
 	started := make(chan error, 1)
 	go func() { started <- dst.Start() }()
 	listening(t)
-	framework.Eventually(t, 30*time.Second, "the source's connection to be established", func() bool {
-		out, _ := src.Exec("netstat", "-tn")
-		return strings.Contains(out, "ESTABLISHED")
+	framework.Eventually(t, 30*time.Second, "the source's connections to be established, one not accepted", func() bool {
+		out, _ := src.Exec("netstat", "-tan")
+		queued := false
+		for _, l := range strings.Split(out, "\n") {
+			// Proto Recv-Q Send-Q Local Foreign State: a listening
+			// socket's Recv-Q is its connections not accepted yet.
+			if f := strings.Fields(l); len(f) == 6 && f[5] == "LISTEN" && strings.HasSuffix(f[3], ":9001") && f[1] == "1" {
+				queued = true
+			}
+		}
+		return queued && strings.Contains(out, "ESTABLISHED")
 	})
 	if _, err := control.NewClient("gcr-e2e-src", src.ID).Migrate(t.Context(), "http://"+addr, token, migrate.Options{}); err != nil {
 		t.Fatalf("migrate with an open connection and a lock: %v", err)

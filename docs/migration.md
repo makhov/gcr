@@ -46,6 +46,7 @@ What happens to the processes' open files and sockets:
 | stdin, stdout, stderr | the target's: its log carries on |
 | listening sockets, UDP sockets | recreated, on the same ports |
 | **established TCP connections** | **closed**: the peer sees them reset. The address changes on another node, so they cannot follow (CRIU's `tcp-close`) |
+| **connections not accepted yet** | **dropped**, the same way: the peer sees them reset (CRIU's `skip-in-flight`) |
 | file locks | moved with their files (CRIU's `file-locks`) |
 
 A migration is refused, and the source carries on, for a Unix socket connected to something outside the container (a host daemon's), io_uring (CRIU does not support it), and inotify or fanotify watches whose files the target cannot find by handle.
