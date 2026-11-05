@@ -57,7 +57,7 @@ def game_pod(name=None):
     return None
 
 
-state = {"node": None, "pod": None, "moves": 0, "moving": False, "last": None, "history": []}
+state = {"node": None, "pod": None, "moves": 0, "moving": False, "last": None, "history": [], "mode": MODE}
 
 
 target = None
@@ -89,7 +89,7 @@ def move(pod):
         "apiVersion": "gcr.dev/v1alpha1",
         "kind": "Migration",
         "metadata": {"generateName": "doom-"},
-        "spec": {"pod": pod["metadata"]["name"], "mode": MODE},
+        "spec": {"pod": pod["metadata"]["name"], "mode": state["mode"]},
     })
     name = m["metadata"]["name"]
     for _ in range(1500):
@@ -104,6 +104,12 @@ def move(pod):
             point(t)
     return {"phase": "Failed", "message": "no result in 5 minutes"}
 
+
+def refused_post_copy(message):
+    """Whether a failed move was post-copy refused, the game left running
+    where it was: gcr's target says so ("post-copy: ..."), and in gcr
+    v0.1.15 runc did ("criu is missing features ... LazyPages")."""
+    return "post-copy: " in message or "LazyPages" in message
 
 def main():
     next_move = time.time() + INTERVAL
@@ -127,6 +133,15 @@ def main():
                     state["pod"] = s.get("target") or state["pod"]
                 else:
                     point(p)
+                if not hop["ok"] and state["mode"] == "PostCopy" and refused_post_copy(hop["message"]):
+                    # The target can't restore lazily (a node in a rootless
+                    # container): the game didn't stop. Pre-copy from now on,
+                    # at once.
+                    state["mode"] = "PreCopy"
+                    state["fallback"] = hop["message"]
+                    print("mover: post-copy refused; moving pre-copy from now on", flush=True)
+                    next_move = time.time()
+                    continue
                 state["last"] = hop
                 state["history"] = ([hop] + state["history"])[:10]
                 print(json.dumps(hop), flush=True)

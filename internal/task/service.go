@@ -387,6 +387,9 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			// source freezes where that cannot work; a pre-copy one
 			// does where it can.
 			recv.LazyCheck = func() error {
+				if err := container.LazyRestoreSupported(); err != nil {
+					return err
+				}
 				if c != nil && c.IDBase() != 0 && !container.LazyPagesAvailable() {
 					return fmt.Errorf("this node has vm.unprivileged_userfaultfd = 0, which a container in a user namespace needs to be restored lazily")
 				}

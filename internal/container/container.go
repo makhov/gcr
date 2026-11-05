@@ -1454,6 +1454,21 @@ func LazyPagesAvailable() bool {
 	return err == nil && strings.TrimSpace(string(b)) == "1"
 }
 
+// LazyRestoreSupported says whether CRIU can restore lazily on this node,
+// or why not. Its lazy-pages daemon needs userfaultfd's non-cooperative
+// events, which Linux (5.11 and later) only gives a process with
+// CAP_SYS_PTRACE in the initial user namespace: not root in a rootless
+// container, such as a k0da node under rootless Podman.
+var LazyRestoreSupported = sync.OnceValue(func() error {
+	out, err := exec.Command("criu", "check", "--feature", "uffd-noncoop").CombinedOutput()
+	if err != nil {
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		return fmt.Errorf("CRIU cannot restore lazily on this node (criu check --feature uffd-noncoop: %s); "+
+			"a node in a rootless container cannot", lines[len(lines)-1])
+	}
+	return nil
+})
+
 // forkImages are the images a fork restores, "" for other containers.
 func forkImages(prep Prepared) string {
 	if prep.ForkFrom == "" {

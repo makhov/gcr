@@ -41,6 +41,7 @@
   <span class="stat">node <b id="node">…</b></span>
   <span class="stat">moves <b id="moves">0</b></span>
   <span class="stat">last pause <b id="pause">–</b></span>
+  <span class="stat" id="modestat">moving <b id="mode">–</b></span>
   <span class="stat">next move in <b id="next">–</b></span>
   <span id="moving">moving…</span>
 </header>
@@ -61,6 +62,8 @@
       $("moves").textContent = s.moves;
       $("next").textContent = s.moving ? "now" : `${s.next ?? "–"} s`;
       $("pause").textContent = s.last && s.last.ok ? s.last.downtime : "–";
+      $("mode").textContent = { PostCopy: "post-copy", PreCopy: "pre-copy" }[s.mode] || "–";
+      $("modestat").title = s.fallback ? `post-copy was refused, so it moves pre-copy: ${s.fallback}` : "";
       document.body.classList.toggle("moving", !!s.moving);
       if (s.moves !== moves) {
         moves = s.moves;

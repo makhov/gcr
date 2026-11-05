@@ -117,6 +117,10 @@ Nothing in Doom knows it moves. What the container needs:
 - **A gcr newer than v0.1.14** for the post-copy moves: its Migration has
   `mode`. With v0.1.14 the game still moves, pre-copy, since the cluster
   drops the field it doesn't know.
+- **Rootful Docker or Podman** for the post-copy moves. A post-copy
+  restore needs userfaultfd, which a process in a rootless container
+  can't open, not even privileged. On rootless nodes the arcade moves the
+  game pre-copy instead, and the page's header says so; `up.sh` warns.
 
 ## Clean up
 
