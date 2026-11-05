@@ -357,7 +357,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		if migrate.Departed(ex.key) {
 			// Its processes run on another node now; the kubelet
 			// restarts it in the pod that lingers here until deleted.
-			return prep, fmt.Errorf("this pod's container migrated to another node and does not start here again: %w", errdefs.ErrFailedPrecondition)
+			return prep, fmt.Errorf("%s: %w", migrate.DepartedRefusal, errdefs.ErrFailedPrecondition)
 		}
 		addr, ok := spec.Annotations[migrate.AnnotationIn]
 		if key := ex.key; ok && migrate.Arrived(key) {

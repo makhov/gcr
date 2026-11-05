@@ -160,6 +160,8 @@ How it works:
 3. **A second Job on the pod's node** runs `gcr migrate` into it. The token reaches the Job through a Secret, not its spec.
 4. **On success, the pod is deleted** and the target carries on. On failure, the target is deleted and the pod carries on.
 
+gcr-operator waits through the API server's trouble (restarting, overloaded, a dropped connection) rather than failing the migration: a Job that ran on is still followed to its end, and the steps after the processes moved are tried again. If a migration still goes wrong after the processes left the pod, gcr refuses to start them again in it, since they ran elsewhere ("migrated to another node and does not start here again"). gcr-operator then deletes the pod, unless a migration of it is under way, so that its controller starts a new one, cold. A bare pod is left for you to delete.
+
 The Jobs run gcr's installer image, privileged, in the node's namespaces. gcr-operator creates the target: only it and `system:masters` may create pods on `gcr-migrate` (`gcr.yaml`'s `ValidatingAdmissionPolicy`), since its pods make a node's shim listen for a migration. Creating a Migration needs the `gcr-operations` role in the pod's namespace ([who may do what](operations.md#who-may-do-what)).
 
 What can move, for now:

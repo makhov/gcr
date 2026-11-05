@@ -54,6 +54,8 @@ Finished operations stay until deleted.
 If gcr-operator restarts while one runs, the operation is marked `Failed`
 ("gcr-operator restarted while it ran") rather than run again: it may
 have been done, or half done. Check the pod, then create another if needed.
+An answer from the API server lost as gcr-operator marks one `Running`
+isn't taken for that: it reads the operation back and goes ahead.
 
 gcr-operator does the work on the pod's node, in a short-lived
 privileged Job in `gcr-system`, running `gcr` there (`gcr snapshot-image`,

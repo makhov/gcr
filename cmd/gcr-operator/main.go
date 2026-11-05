@@ -140,6 +140,7 @@ func main() {
 		log.Fatal(err)
 	}
 	go op.watchOperations(ctx, dyn)
+	go op.watchDeparted(ctx)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /evict", review(op.decide))
 	mux.HandleFunc("POST /restore", review(op.steer))
@@ -428,6 +429,55 @@ func (o *operator) watchShutdowns(ctx context.Context) {
 		},
 	})
 	f.Start(ctx.Done())
+}
+
+// watchDeparted replaces the pods gcr refuses to start because their
+// container migrated away (replaceDeparted).
+func (o *operator) watchDeparted(ctx context.Context) {
+	f := informers.NewSharedInformerFactory(o.cs, 0)
+	pods := f.Core().V1().Pods().Informer()
+	_, _ = pods.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(obj any) { o.replaceDeparted(ctx, obj) },
+		UpdateFunc: func(_, obj any) { o.replaceDeparted(ctx, obj) },
+	})
+	f.Start(ctx.Done())
+}
+
+// staleMigration is how long a pod marked as migrating is taken to be,
+// before its migrator is taken to have gone away: longer than a
+// migration's waits (kubemigrate.Options.Timeout), together.
+const staleMigration = 15 * time.Minute
+
+// replaceDeparted deletes a pod whose container migrated away and that
+// its controller kept: its processes run in no pod, or one the
+// controller does not know, as when its migration went wrong after they
+// moved. gcr refuses to start the container in it again, so it would
+// never run; its controller starts a new one, cold, in its place. A pod
+// being migrated is left alone: it is departed for a moment before its
+// migration deletes it.
+func (o *operator) replaceDeparted(ctx context.Context, obj any) {
+	p, ok := obj.(*corev1.Pod)
+	if !ok || p.DeletionTimestamp != nil || !kubemigrate.Departed(p) || kubemigrate.Migrating(p, staleMigration) {
+		return
+	}
+	owner := metav1.GetControllerOf(p)
+	if owner == nil {
+		return
+	}
+	key := p.Namespace + "/" + p.Name
+	o.mu.Lock()
+	moving := o.moving[key]
+	o.mu.Unlock()
+	if moving {
+		return
+	}
+	log.Printf("%s: its container migrated away and does not start here again; deleting it for its %s %s to replace",
+		key, owner.Kind, owner.Name)
+	uid := p.UID
+	err := o.cs.CoreV1().Pods(p.Namespace).Delete(ctx, p.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
+	if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+		log.Printf("%s: %v", key, err)
+	}
 }
 
 // nodeShuttingDown is in the Ready condition's message of a node whose

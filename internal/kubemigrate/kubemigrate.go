@@ -276,20 +276,25 @@ echo "$out"; exit 1`, o.GCR, containerdNamespace, id, target)
 		} else {
 			cost, _ := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]string{
 				"controller.kubernetes.io/pod-deletion-cost": "-2147483648"}}})
-			if _, err := cs.CoreV1().Pods(ns).Patch(ctx, name, types.MergePatchType, cost, metav1.PatchOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			if err := again(func() error {
+				_, err := cs.CoreV1().Pods(ns).Patch(ctx, name, types.MergePatchType, cost, metav1.PatchOptions{})
+				return err
+			}); err != nil && !apierrors.IsNotFound(err) {
 				return res, fmt.Errorf("the pod runs in %s now, but marking %s for deletion failed: %w", dst.Name, name, err)
 			}
 		}
 		log("handing %s over to %s %s", dst.Name, src.OwnerReferences[0].Kind, src.OwnerReferences[0].Name)
-		if err := handOver(ctx, cs, src, dst.Name, held); err != nil {
+		if err := again(func() error { return handOver(ctx, cs, src, dst.Name, held) }); err != nil {
 			return res, fmt.Errorf("the pod runs in %s now, but handing it over to its %s failed: %w", dst.Name, src.OwnerReferences[0].Kind, err)
 		}
 	}
 	log("deleting %s", name)
-	if err := cs.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: new(int64)}); err != nil && !apierrors.IsNotFound(err) {
+	if err := again(func() error {
+		return cs.CoreV1().Pods(ns).Delete(ctx, name, metav1.DeleteOptions{GracePeriodSeconds: new(int64)})
+	}); err != nil && !apierrors.IsNotFound(err) {
 		return res, fmt.Errorf("the pod runs in %s now, but deleting %s failed: %w", dst.Name, name, err)
 	}
-	if err := wait.PollUntilContextTimeout(ctx, time.Second, o.Timeout, true, func(ctx context.Context) (bool, error) {
+	if err := poll(ctx, time.Second, o.Timeout, func(ctx context.Context) (bool, error) {
 		p, err := cs.CoreV1().Pods(ns).Get(ctx, dst.Name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
@@ -363,9 +368,40 @@ func movable(p *corev1.Pod, claims bool) (string, error) {
 	return id, nil
 }
 
+// DepartedRefusal is in the status of a container gcr refuses to start
+// in the pod it migrated away from (migrate.DepartedRefusal).
+const DepartedRefusal = "migrated to another node and does not start here again"
+
+// Departed says whether gcr refused to start one of p's containers
+// because it migrated away from it: its processes run in another pod, or
+// ran there and were lost, and p never runs again.
+func Departed(p *corev1.Pod) bool {
+	for _, c := range p.Status.ContainerStatuses {
+		for _, t := range []*corev1.ContainerStateTerminated{c.State.Terminated, c.LastTerminationState.Terminated} {
+			if t != nil && strings.Contains(t.Message, DepartedRefusal) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Migrating says whether a migration of p is under way: Migrate marks
+// its source disrupted until it hands over, and takes that back if it
+// fails. One marked longer than stale ago is taken to have been left by
+// a migrator that went away.
+func Migrating(p *corev1.Pod, stale time.Duration) bool {
+	for _, c := range p.Status.Conditions {
+		if c.Type == corev1.DisruptionTarget && c.Reason == "Migration" && c.Status == corev1.ConditionTrue {
+			return time.Since(c.LastTransitionTime.Time) < stale
+		}
+	}
+	return false
+}
+
 // waitReady waits for pod name to be Ready.
 func waitReady(ctx context.Context, cs kubernetes.Interface, ns, name string, timeout time.Duration) error {
-	return wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
+	return poll(ctx, 500*time.Millisecond, timeout, func(ctx context.Context) (bool, error) {
 		p, err := cs.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
@@ -431,7 +467,7 @@ func disrupted(ctx context.Context, cs kubernetes.Interface, ns, name string, on
 // is not in time, as the scheduler did.
 func waitScheduled(ctx context.Context, cs kubernetes.Interface, ns, name string, timeout time.Duration) (*corev1.Pod, error) {
 	var dst *corev1.Pod
-	if err := wait.PollUntilContextTimeout(ctx, time.Second, timeout, true, func(ctx context.Context) (bool, error) {
+	if err := poll(ctx, time.Second, timeout, func(ctx context.Context) (bool, error) {
 		p, err := cs.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
@@ -456,7 +492,7 @@ func waitScheduled(ctx context.Context, cs kubernetes.Interface, ns, name string
 
 // waitNotReady waits for pod name not to be Ready, or gone.
 func waitNotReady(ctx context.Context, cs kubernetes.Interface, ns, name string, timeout time.Duration) error {
-	return wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
+	return poll(ctx, 500*time.Millisecond, timeout, func(ctx context.Context) (bool, error) {
 		p, err := cs.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return true, nil
@@ -644,7 +680,7 @@ func runJob(ctx context.Context, cs kubernetes.Interface, o Options, node, what 
 		_ = cs.BatchV1().Jobs(o.Namespace).Delete(context.WithoutCancel(ctx), name, metav1.DeleteOptions{PropagationPolicy: &background})
 	}()
 	var failed bool
-	if err := wait.PollUntilContextTimeout(ctx, 500*time.Millisecond, o.Timeout, true, func(ctx context.Context) (bool, error) {
+	if err := poll(ctx, 500*time.Millisecond, o.Timeout, func(ctx context.Context) (bool, error) {
 		j, err := cs.BatchV1().Jobs(o.Namespace).Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
