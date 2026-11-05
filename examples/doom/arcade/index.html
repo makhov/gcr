@@ -19,6 +19,9 @@
   body.moving #moving { visibility: visible; }
   main { position: relative; min-height: 0; }
   #game, #game > div { position: absolute; inset: 0; }
+  #still { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
+    filter: grayscale(.7) brightness(.55); visibility: hidden; }
+  body:not(.live) #still.shown { visibility: visible; }
   #wait { position: absolute; inset: 0; display: grid; place-items: center; color: var(--dim);
     pointer-events: none; }
   body.live #wait { display: none; }
@@ -43,6 +46,7 @@
 </header>
 <main>
   <div id="game"></div>
+  <canvas id="still"></canvas>
   <div id="wait">connecting…</div>
   <div id="flash"></div>
   <div id="log"></div>
@@ -76,14 +80,13 @@
 </script>
 <script type="module">
   // noVNC's client, without its UI: that gives up when a reconnect fails,
-  // as it does during a move. The doom Service has no pod ready for a
-  // moment, so a connection is refused; or it still names the pod that
-  // moved, so a connection hangs. This client drops an attempt that hasn't
-  // connected in 2 seconds and tries again until the game answers. Each
-  // attempt draws in an element of its own, removed when it's dropped:
-  // noVNC takes a few seconds more to close it.
+  // as it does during a move, until the game is restored in its new pod.
+  // This client tries again until the game answers, and drops an attempt
+  // that hasn't connected in 2 seconds (one sent to a pod that's gone
+  // hangs). Each attempt draws in an element of its own, removed when it's
+  // dropped: noVNC takes a few seconds more to close it.
   import RFB from "./core/rfb.js";
-  const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/websockify`;
+  const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/websockify?token=doom`;
   let rfb;
   function connect() {
     const screen = document.getElementById("game").appendChild(document.createElement("div"));
@@ -102,11 +105,23 @@
     const stuck = setTimeout(() => { r.disconnect(); retry(); }, 2000);
     r.addEventListener("connect", () => {
       clearTimeout(stuck);
-      document.body.classList.add("live");
+      // The still frame stays until the game's first frame is drawn.
+      setTimeout(() => { if (!over) document.body.classList.add("live"); }, 150);
     });
     r.addEventListener("disconnect", retry);
   }
   connect();
+  // A copy of the picture, shown dimmed while the game is away: noVNC
+  // clears its own as the connection drops.
+  const still = document.getElementById("still");
+  setInterval(() => {
+    const c = document.querySelector("#game canvas");
+    if (!document.body.classList.contains("live") || !c || !c.width) return;
+    still.width = c.width;
+    still.height = c.height;
+    still.getContext("2d").drawImage(c, 0, 0);
+    still.classList.add("shown");
+  }, 200);
   // Keys go to the game, wherever the page was clicked.
   addEventListener("click", () => rfb.focus());
 </script>
