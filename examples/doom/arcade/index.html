@@ -86,27 +86,48 @@
   // hangs). Each attempt draws in an element of its own, removed when it's
   // dropped: noVNC takes a few seconds more to close it.
   import RFB from "./core/rfb.js";
+  import { getKeycode, getKeysym } from "./core/input/util.js";
   const url = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/websockify?token=doom`;
-  let rfb;
+  // The game's X server moves with the keys it has down. Keys held as the
+  // connection drops stay down in it, unless the page tells it otherwise
+  // when it's back: it releases those since let go, and presses those
+  // since held.
+  const held = new Map();
+  let stale = new Map();
+  addEventListener("keydown", (e) => { held.set(getKeycode(e), getKeysym(e)); }, true);
+  addEventListener("keyup", (e) => { held.delete(getKeycode(e)); }, true);
+  addEventListener("blur", () => held.clear());
+  let rfb, clicked = false;
   function connect() {
     const screen = document.getElementById("game").appendChild(document.createElement("div"));
     const r = rfb = new RFB(screen, url);
     r.scaleViewport = true;
     r.background = "#0b0b0c";
-    let over = false;
+    let over = false, live = false;
     const retry = () => {
       if (over) return;
       over = true;
       clearTimeout(stuck);
+      if (live) stale = new Map(held);
       screen.remove();
       document.body.classList.remove("live");
-      setTimeout(connect, 250);
+      setTimeout(connect, 100);
     };
     const stuck = setTimeout(() => { r.disconnect(); retry(); }, 2000);
     r.addEventListener("connect", () => {
       clearTimeout(stuck);
+      live = true;
+      for (const [code, sym] of stale) if (!held.has(code)) r.sendKey(sym, code, false);
+      for (const [code, sym] of held) if (!stale.has(code)) r.sendKey(sym, code, true);
+      stale = new Map();
+      if (clicked) r.focus();
       // The still frame stays until the game's first frame is drawn.
-      setTimeout(() => { if (!over) document.body.classList.add("live"); }, 150);
+      const d = r._display, flip = d.flip;
+      d.flip = function (...a) {
+        d.flip = flip;
+        flip.apply(this, a);
+        if (!over) document.body.classList.add("live");
+      };
     });
     r.addEventListener("disconnect", retry);
   }
@@ -123,7 +144,7 @@
     still.classList.add("shown");
   }, 200);
   // Keys go to the game, wherever the page was clicked.
-  addEventListener("click", () => rfb.focus());
+  addEventListener("click", () => { clicked = true; rfb.focus(); });
 </script>
 </body>
 </html>
