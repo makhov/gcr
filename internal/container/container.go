@@ -107,8 +107,12 @@ func (cc CRIUConfig) write(restore bool, extra ...string) error {
 // restore. A connection to a peer outside the container cannot follow it
 // to another node (the pod's address changes there): it is closed on the
 // target, and the peer sees it reset; without this CRIU refuses to dump a
-// connected socket at all. File locks move with the files they lock.
-var migrationCRIU = []string{"tcp-close", "file-locks"}
+// connected socket at all. A connection a listening socket has not
+// accepted yet is dropped likewise, and its peer sees it reset; without
+// skip-in-flight, CRIU refuses the dump while any is queued, as a server
+// probed or connected to often has one (a kubelet's TCP readiness probe).
+// File locks move with the files they lock.
+var migrationCRIU = []string{"tcp-close", "skip-in-flight", "file-locks"}
 
 // Prepared is what PrepareSpec decided.
 type Prepared struct {
