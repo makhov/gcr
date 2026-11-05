@@ -2,7 +2,7 @@
 
 A game of Doom that moves to another Kubernetes node every 20 seconds
 while you play it. Your health, ammo, position and the monsters chasing
-you all go with it, and the pause is under a second.
+you all go with it, and the pause is a fraction of a second.
 
 It's a toy, but a demanding one: a live display, a game loop, a VNC
 server with a client connected, and a person noticing every hitch. Live
@@ -48,10 +48,12 @@ browser ──► Traefik ──► arcade (noVNC, websockify) ──► Service
   20 seconds and writes its result for the page.
 - Each Migration runs as `kubectl gcr migrate` does
   ([Between Kubernetes nodes](../migration.md#between-kubernetes-nodes)).
-  It makes a target pod on another node, copies the container's memory
-  and files across, freezes it for the final copy, and hands the target to
-  the Deployment. The target keeps the pod's labels, so the Service finds
-  it.
+  It makes a target pod on another node, freezes the game, sends its
+  processes' state and files across, and restores it there before its
+  memory moves: it's post-copy (`mode: PostCopy`), so the game runs on the
+  new node at once and fetches each page from the old one as it touches
+  it, and the rest in the background. Then it hands the target to the
+  Deployment. The target keeps the pod's labels, so the Service finds it.
 - The VNC connection doesn't survive the move. The pod's address changes,
   so gcr closes its TCP connections, and the page reconnects, showing the
   last frame dimmed meanwhile. It reconnects to the new pod directly: the
@@ -60,8 +62,14 @@ browser ──► Traefik ──► arcade (noVNC, websockify) ──► Service
   back. The game's X server moves with any key held as the connection
   dropped still down, so the page then releases those let go of since.
 
-On an arm64 VM with three k0da nodes, moves paused the game for 500–890 ms,
-and the page showed it again 0.65–0.75 seconds after its connection dropped.
+Post-copy gives the shortest pause, but until all its memory has arrived
+the game needs both nodes: one going down mid-move would lose it. Here
+the nodes are containers in one VM, so that's no risk. Pre-copy
+(`MODE=PreCopy`, below) leaves the game where it was if anything fails
+first. On arm64, which can't track which pages changed, it moves all of
+the memory during the pause: on an arm64 VM with three k0da nodes, moves
+paused the game for 500–890 ms, and the page showed it again 0.65–0.75
+seconds after its connection dropped.
 
 ## Things to try
 
@@ -88,6 +96,12 @@ Stop the moves (`INTERVAL` 0), or make them more frequent:
 kubectl set env deploy/arcade INTERVAL=5
 ```
 
+Move it pre-copy instead, and compare the pause:
+
+```sh
+kubectl set env deploy/arcade MODE=PreCopy
+```
+
 ## What it needs from the game
 
 Nothing in Doom knows it moves. What the container needs:
@@ -100,6 +114,9 @@ Nothing in Doom knows it moves. What the container needs:
 - **A gcr newer than v0.1.13.** The doom pod's TCP readiness probe nearly
   always leaves a connection x11vnc hasn't accepted yet, and gcr up to
   v0.1.13 refused to migrate a container while it had one.
+- **A gcr newer than v0.1.14** for the post-copy moves: its Migration has
+  `mode`. With v0.1.14 the game still moves, pre-copy, since the cluster
+  drops the field it doesn't know.
 
 ## Clean up
 

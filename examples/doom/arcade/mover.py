@@ -20,6 +20,10 @@ API = "https://kubernetes.default.svc"
 NS = open(f"{SA}/namespace").read().strip()
 SELECTOR = os.environ.get("SELECTOR", "app=doom")
 INTERVAL = float(os.environ.get("INTERVAL", "20"))
+# PostCopy: the game runs on the new node first, and its memory follows.
+# The pause is shortest; a node going down mid-move would lose the game,
+# which on a k0da cluster in one VM it does not.
+MODE = os.environ.get("MODE", "PostCopy")
 STATUS = "/srv/status.json"
 TARGETS = "/tmp/targets"
 PORT = os.environ.get("GAME", "doom:5900").rsplit(":", 1)[1]
@@ -85,7 +89,7 @@ def move(pod):
         "apiVersion": "gcr.dev/v1alpha1",
         "kind": "Migration",
         "metadata": {"generateName": "doom-"},
-        "spec": {"pod": pod["metadata"]["name"]},
+        "spec": {"pod": pod["metadata"]["name"], "mode": MODE},
     })
     name = m["metadata"]["name"]
     for _ in range(1500):

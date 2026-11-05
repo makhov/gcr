@@ -85,6 +85,7 @@ spec:
           image: ghcr.io/makhov/gcr-example-arcade:latest
           env:
             - {name: INTERVAL, value: "20"}
+            - {name: MODE, value: PostCopy}
           ports: [{containerPort: 6080}]
 ---
 apiVersion: v1
