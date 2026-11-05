@@ -58,6 +58,7 @@
   async function poll() {
     try {
       const s = await (await fetch("status.json", { cache: "no-store" })).json();
+      window.arcade = s;
       $("node").textContent = s.node || "…";
       $("moves").textContent = s.moves;
       $("next").textContent = s.moving ? "now" : `${s.next ?? "–"} s`;
@@ -137,14 +138,33 @@
       if (clicked) r.focus();
       // The still frame stays until the game's first frame is drawn.
       const d = r._display, flip = d.flip;
+      let first = true;
       d.flip = function (...a) {
-        d.flip = flip;
         flip.apply(this, a);
-        if (!over) document.body.classList.add("live");
+        lastFrame = performance.now();
+        if (first && !over) document.body.classList.add("live");
+        first = false;
       };
+      lastFrame = performance.now();
+      connectedTo = window.arcade?.pod;
+      // A connection to a pod the game has left may never drop: after a
+      // post-copy move the old pod stays frozen, its network shut, until
+      // it is deleted, and no reset reaches the arcade. Doom draws all the
+      // time, so one silent for a second while the game moves, or since it
+      // moved, is dropped for a new one.
+      const watch = setInterval(() => {
+        if (over) return clearInterval(watch);
+        const s = window.arcade || {};
+        if (performance.now() - lastFrame > 1000 && (s.moving || (s.pod && s.pod !== connectedTo))) {
+          clearInterval(watch);
+          r.disconnect();
+          retry();
+        }
+      }, 250);
     });
     r.addEventListener("disconnect", retry);
   }
+  let lastFrame = 0, connectedTo;
   connect();
   // A copy of the picture, shown dimmed while the game is away: noVNC
   // clears its own as the connection drops.
