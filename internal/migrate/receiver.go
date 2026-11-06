@@ -32,6 +32,10 @@ const (
 	AnnotationIn = "gcr.dev/migrate-in"
 	// AnnotationToken is the shared secret the source must present.
 	AnnotationToken = "gcr.dev/migrate-token"
+	// AnnotationContainer names the container of a pod with several that
+	// a migration moves; the others start anew, in the target as in any
+	// pod. On a target pod, only that container waits for the migration.
+	AnnotationContainer = "gcr.dev/migrate-container"
 	// MinTokenLength is the shortest token accepted.
 	MinTokenLength = 16
 )

@@ -15,6 +15,7 @@ func TestAgreesWithGCR(t *testing.T) {
 	for got, want := range map[string]string{
 		annotationMigrateIn:    migrate.AnnotationIn,
 		annotationMigrateToken: migrate.AnnotationToken,
+		AnnotationContainer:    migrate.AnnotationContainer,
 		annotationUsernsBase:   userns.AnnotationBase,
 		annotationHostUsers:    userns.AnnotationHostUsers,
 	} {

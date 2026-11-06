@@ -360,7 +360,12 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 			return prep, fmt.Errorf("%s: %w", migrate.DepartedRefusal, errdefs.ErrFailedPrecondition)
 		}
 		addr, ok := spec.Annotations[migrate.AnnotationIn]
-		if key := ex.key; ok && migrate.Arrived(key) {
+		if c, name := spec.Annotations[migrate.AnnotationContainer], spec.Annotations["io.kubernetes.cri.container-name"]; ok && c != "" && name != c {
+			// Another container of a pod a migration comes into: it
+			// starts anew, as in any pod.
+			log.G(ctx).WithField("migrating", c).Info("the migration is for another of this pod's containers: starting this one anew")
+			ok = false
+		} else if key := ex.key; ok && migrate.Arrived(key) {
 			// A container that restarts in a pod a migration came into
 			// (the pod keeps the annotation): it starts as a new one.
 			log.G(ctx).Info("a migration came into this pod's container before: starting it anew")

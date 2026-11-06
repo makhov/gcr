@@ -109,7 +109,8 @@ Nothing in Doom knows it moves. What the container needs:
 - **No System V shared memory.** The pod's IPC namespace belongs to the
   pod, not the container, so its shared memory wouldn't move. Xvfb runs
   without MIT-SHM, and x11vnc with `-noshm`.
-- **One container**, as for any live migration for now
+- **One container that moves.** Doom's pod has one; a pod with several
+  names the one that moves, and the others start anew
   ([What can move](../migration.md#between-kubernetes-nodes)).
 - **A gcr newer than v0.1.13.** The doom pod's TCP readiness probe nearly
   always leaves a connection x11vnc hasn't accepted yet, and gcr up to

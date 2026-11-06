@@ -132,6 +132,7 @@ spec:
   pod: counter
   node: worker-2            # optional: by default, the scheduler picks one other than its own
   mode: PreCopy             # optional: PreCopy (the default) or PostCopy
+  container: app            # optional: of a pod with several, the one that moves (the others start anew)
   throughRegistry: false    # optional
 status:
   phase: Succeeded

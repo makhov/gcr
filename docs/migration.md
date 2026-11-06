@@ -175,7 +175,13 @@ The Jobs run gcr's installer image, privileged, in the node's namespaces. gcr-op
 
 What can move, for now:
 - **Bare pods, a ReplicaSet's (a Deployment's) and a Job's:** the target is handed over to its controller once it is Ready ([gcr-operator](operator.md#deployments-and-jobs)). Pods of other controllers are refused, since those would replace the pod with a cold one. StatefulSets' pods move [through a registry](#through-a-registry) instead.
-- **One container** (no sidecars).
+- **One container moves.** In a pod with several, sidecars included, the annotation `gcr.dev/migrate-container: NAME` (or a Migration's `container`) names the one that moves, and the others start anew in the new pod, as in any pod: a log shipper, a metrics agent or a proxy beside the workload. Without one named, such a pod is refused. On a three-node k0da cluster, a pod with two containers and a sidecar moved twice, 107 and 137 ms, the named container carrying on and the others restarting. What the moving container shares with the others:
+  - **TCP over localhost to them** (a proxy): reset, as any connection; it reconnects to the new ones.
+  - **A Unix socket to them**: refused, as any socket to outside the container.
+  - **An `emptyDir`**: its files are copied in the freeze, while the new pod's other containers may already be writing there.
+  - **A shared PID namespace** (`shareProcessNamespace`): refused.
+
+  Through a registry, pods with one container only.
 - **Not pinned to its node** by a `nodeSelector` on `kubernetes.io/hostname` (unless `--to` names the node it pins), since the target is made from the pod's spec and could run nowhere else.
 - **Volumes the target mounts afresh:** ConfigMaps, Secrets, projected and downward API volumes.
 - **`emptyDir` volumes,** on disk or in memory: their files are copied to the target pod's own while the container is frozen, after the writable layer, so they add to the downtime as it does: on the arm64 dev VM, 256 MiB added 0.35 s on disk and 0.2 s in memory, to about 0.3 s without. Files the container has open there are reopened at the same offset.

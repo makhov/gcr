@@ -129,6 +129,10 @@ type MigrationSpec struct {
 	// Mode is how its memory moves node to node: PreCopy (the default)
 	// or PostCopy (docs/migration.md). Not through a registry.
 	Mode MigrationMode `json:"mode,omitempty"`
+	// Container is the container to move, of a pod with several; without,
+	// the one the pod's gcr.dev/migrate-container annotation names. The
+	// pod's other containers start anew on the new node.
+	Container string `json:"container,omitempty"`
 }
 
 // MigrationMode is when a migration's memory moves to the target.

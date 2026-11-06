@@ -18,8 +18,10 @@ func TestMigratePostCopy(t *testing.T) {
 	for _, postCopy := range []bool{false, true} {
 		cs := fake.NewClientset(running(nil))
 		// The target is scheduled and runs as it is created.
+		var waits string
 		cs.PrependReactor("create", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
 			p := a.(k8stesting.CreateAction).GetObject().(*corev1.Pod)
+			waits = p.Annotations[AnnotationContainer]
 			p.Spec.NodeName, p.Status.HostIP, p.Status.Phase = "n2", "10.0.0.2", corev1.PodRunning
 			return false, nil, nil
 		})
@@ -47,6 +49,9 @@ func TestMigratePostCopy(t *testing.T) {
 		want := Result{Downtime: "490ms"}
 		if postCopy {
 			want = Result{Downtime: "210ms", MemoryMoved: "903ms"}
+		}
+		if waits != "c" {
+			t.Errorf("the target's container waiting for the migration: %q, want c", waits)
 		}
 		if res.Downtime != want.Downtime || res.MemoryMoved != want.MemoryMoved || res.Node != "n2" {
 			t.Errorf("post-copy %v: %+v", postCopy, res)

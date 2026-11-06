@@ -41,8 +41,11 @@ const (
 	// Linux and cgo. kubemigrate_linux_test.go checks they agree.
 	annotationMigrateIn    = "gcr.dev/migrate-in"
 	annotationMigrateToken = "gcr.dev/migrate-token"
-	annotationUsernsBase   = "gcr.dev/userns-base"
-	annotationHostUsers    = "gcr.dev/host-users"
+	// AnnotationContainer on a pod with several containers names the one
+	// a migration moves (migrate.AnnotationContainer).
+	AnnotationContainer  = "gcr.dev/migrate-container"
+	annotationUsernsBase = "gcr.dev/userns-base"
+	annotationHostUsers  = "gcr.dev/host-users"
 	// annotationMigratedFrom is on a target pod the scheduler placed: the
 	// node it must not go back to, which targetPod added to its node
 	// affinity (and takes out again when it moves on).
@@ -89,6 +92,9 @@ type Options struct {
 	// PostCopy runs the target before the memory moves (gcr migrate
 	// -post-copy): the pod needs both nodes until it all arrives.
 	PostCopy bool
+	// Container is the container to move, of a pod with several
+	// (MigratedContainer); the others start anew in the target.
+	Container string
 	// Timeout bounds each wait.
 	Timeout time.Duration
 	// Log, if set, is told each step.
@@ -141,7 +147,7 @@ func Migrate(ctx context.Context, cs kubernetes.Interface, ns, name string, o Op
 	if err != nil {
 		return res, err
 	}
-	id, err := Movable(src)
+	id, err := Movable(src, o.Container)
 	if err != nil {
 		return res, fmt.Errorf("%s/%s: %w", ns, name, err)
 	}
@@ -183,6 +189,10 @@ func Migrate(ctx context.Context, cs kubernetes.Interface, ns, name string, o Op
 	}
 	addr := fmt.Sprintf("0.0.0.0:%d", 17000+n.Int64())
 	dst := targetPod(src, o.Node, addr, token, inf)
+	// Only this container waits for the migration in the target; the
+	// others start anew.
+	container, _ := MigratedContainer(src, o.Container)
+	dst.Annotations[AnnotationContainer] = container
 	// A ReplicaSet's pod: the target stays out of its sight until it runs
 	// the pod's processes, or the ReplicaSet would delete it as one too
 	// many while it waits for them.
@@ -332,7 +342,7 @@ func downtimeOf(out string) (downtime, memory string) {
 
 // Movable says whether the pod can be moved, and returns its container's
 // containerd ID.
-func Movable(p *corev1.Pod) (string, error) {
+func Movable(p *corev1.Pod, container string) (string, error) {
 	if len(p.OwnerReferences) > 1 || len(p.OwnerReferences) == 1 && !ownedBy(p, "ReplicaSet") && !ownedBy(p, "Job") {
 		// Its controller would replace it with a cold one once it is
 		// deleted; ReplicaSets' and Jobs' pods are handed over (handOver).
@@ -342,7 +352,41 @@ func Movable(p *corev1.Pod) (string, error) {
 		return "", fmt.Errorf("not running (%s)", p.Status.Phase)
 	}
 	// Its claims are SharedClaims's to judge.
-	return movable(p, true)
+	return movable(p, true, container)
+}
+
+// runningContainers counts p's containers that run alongside each other:
+// its containers and its sidecars (init containers that keep running).
+func runningContainers(p *corev1.Pod) int {
+	n := len(p.Spec.Containers)
+	for _, c := range p.Spec.InitContainers {
+		if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
+			n++
+		}
+	}
+	return n
+}
+
+// MigratedContainer is the container a migration of p moves: container,
+// if named, else the one p's annotation names, else its only one. Its
+// other containers, sidecars included, start anew in the target.
+func MigratedContainer(p *corev1.Pod, container string) (string, error) {
+	if container == "" {
+		container = p.Annotations[AnnotationContainer]
+	}
+	n := runningContainers(p)
+	switch {
+	case container != "":
+		for _, c := range p.Spec.Containers {
+			if c.Name == container {
+				return container, nil
+			}
+		}
+		return "", fmt.Errorf("no container %s to move (only a pod's containers, not its init containers or sidecars, can be)", container)
+	case n == 1:
+		return p.Spec.Containers[0].Name, nil
+	}
+	return "", fmt.Errorf("%d containers: name the one to move (annotation %s, or the Migration's container); the others start anew", n, AnnotationContainer)
 }
 
 // pinned refuses a pod whose nodeSelector keeps it on its node: its
@@ -359,20 +403,21 @@ func pinned(p *corev1.Pod, node string) error {
 // movable checks what Movable does but for the pod's owner and phase; with claims,
 // PersistentVolumeClaims are allowed, which follow the pod if it is not
 // running meanwhile (whether they are node-local is checked elsewhere).
-func movable(p *corev1.Pod, claims bool) (string, error) {
+func movable(p *corev1.Pod, claims bool, container string) (string, error) {
+	name, err := MigratedContainer(p, container)
+	if err != nil {
+		return "", err
+	}
 	switch {
-	case len(p.Spec.Containers) != 1 || len(p.Status.ContainerStatuses) != 1:
-		return "", fmt.Errorf("%d containers: only pods with one can be moved yet", len(p.Spec.Containers))
+	case p.Spec.ShareProcessNamespace != nil && *p.Spec.ShareProcessNamespace && len(p.Spec.Containers)+len(p.Spec.InitContainers) > 1:
+		// The container's processes live in the pod's PID namespace,
+		// among its other containers'.
+		return "", fmt.Errorf("shareProcessNamespace: the container's processes share their PID namespace with the pod's other containers")
 	case p.Spec.HostUsers != nil && !*p.Spec.HostUsers:
 		// The kubelet picks such a pod's ID range, and would give the
 		// target another; CRIU restores processes into the one they had.
 		return "", fmt.Errorf("hostUsers: false: Kubernetes picks the pod's user namespace range, and the target would get another one; "+
 			"a pod in gcr's own user namespace (annotation %s: \"false\") can move", annotationHostUsers)
-	}
-	for _, c := range p.Spec.InitContainers {
-		if c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways {
-			return "", fmt.Errorf("sidecar %s: only pods with one container can be moved yet", c.Name)
-		}
 	}
 	for _, v := range p.Spec.Volumes {
 		// A new node mounts these afresh with the same contents, and an
@@ -388,11 +433,17 @@ func movable(p *corev1.Pod, claims bool) (string, error) {
 			return "", fmt.Errorf("volume %s: its files would stay on %s (only emptyDir, ConfigMap, Secret, projected, downward API and ReadWriteMany claims' volumes can move yet)", v.Name, p.Spec.NodeName)
 		}
 	}
-	id, ok := strings.CutPrefix(p.Status.ContainerStatuses[0].ContainerID, "containerd://")
-	if !ok {
-		return "", fmt.Errorf("container %q is not containerd's", p.Status.ContainerStatuses[0].ContainerID)
+	for _, s := range p.Status.ContainerStatuses {
+		if s.Name != name {
+			continue
+		}
+		id, ok := strings.CutPrefix(s.ContainerID, "containerd://")
+		if !ok {
+			return "", fmt.Errorf("container %s (%q) is not containerd's", name, s.ContainerID)
+		}
+		return id, nil
 	}
-	return id, nil
+	return "", fmt.Errorf("container %s has not started", name)
 }
 
 // DepartedRefusal is in the status of a container gcr refuses to start
