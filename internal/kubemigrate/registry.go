@@ -124,9 +124,12 @@ func movableThroughRegistry(p *corev1.Pod, owned bool) (string, error) {
 			return "", fmt.Errorf("volume %s: through a registry, emptyDir volumes don't move yet", v.Name)
 		}
 	}
+	if n := runningContainers(p); n > 1 {
+		return "", fmt.Errorf("%d containers: through a registry, only pods with one can be moved yet", n)
+	}
 	// A bare pod's replacement is made before the source goes, and
 	// couldn't attach a ReadWriteOnce volume the source holds.
-	return movable(p, len(p.OwnerReferences) > 0)
+	return movable(p, len(p.OwnerReferences) > 0, "")
 }
 
 // MigrateViaRegistry moves pod name to another node through a checkpoint

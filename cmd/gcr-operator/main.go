@@ -352,7 +352,7 @@ func (o *operator) move(pod *corev1.Pod) {
 	ctx := context.Background()
 	// Pre-copy: a node being drained is no node to depend on until the
 	// memory has moved.
-	res, err := o.migrate(ctx, pod, "", o.throughRegistry(pod), false)
+	res, err := o.migrate(ctx, pod, "", "", o.throughRegistry(pod), false)
 	if err != nil {
 		log.Printf("%s: migration failed, letting its eviction through: %v", key, err)
 		o.mark(ctx, pod, "failed: "+firstLine(err.Error()))
@@ -363,10 +363,11 @@ func (o *operator) move(pod *corev1.Pod) {
 
 // migrate moves pod to node (or one the scheduler picks), node to node or
 // through the registry.
-func (o *operator) migrate(ctx context.Context, pod *corev1.Pod, node string, viaRegistry, postCopy bool) (kubemigrate.Result, error) {
+func (o *operator) migrate(ctx context.Context, pod *corev1.Pod, node, container string, viaRegistry, postCopy bool) (kubemigrate.Result, error) {
 	key := pod.Namespace + "/" + pod.Name
 	opts := o.opts
 	opts.Node = node
+	opts.Container = container
 	opts.PostCopy = postCopy
 	opts.Log = func(format string, args ...any) { log.Printf(key+": "+format, args...) }
 	if !viaRegistry {
@@ -535,7 +536,7 @@ func (o *operator) shutdownNode(node string) {
 		if p.Annotations[annotationOptIn] != "true" || p.DeletionTimestamp != nil {
 			continue
 		}
-		if _, err := kubemigrate.Movable(p); err == nil {
+		if _, err := kubemigrate.Movable(p, ""); err == nil {
 			live = append(live, p)
 			liveUIDs = append(liveUIDs, string(p.UID))
 		} else {
@@ -834,7 +835,7 @@ func (o *operator) throughRegistry(pod *corev1.Pod) bool {
 // movable says whether the pod can be moved, the way move would.
 func (o *operator) movable(pod *corev1.Pod) (string, error) {
 	if !o.throughRegistry(pod) {
-		id, err := kubemigrate.Movable(pod)
+		id, err := kubemigrate.Movable(pod, "")
 		if err == nil {
 			err = kubemigrate.SharedClaims(context.Background(), o.cs, pod)
 		}

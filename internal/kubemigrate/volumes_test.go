@@ -46,7 +46,7 @@ func TestSharedClaims(t *testing.T) {
 		}
 	}
 	// Movable itself leaves claims to SharedClaims.
-	if _, err := Movable(claimed("disk")); err != nil {
+	if _, err := Movable(claimed("disk"), ""); err != nil {
 		t.Errorf("Movable: %v", err)
 	}
 }

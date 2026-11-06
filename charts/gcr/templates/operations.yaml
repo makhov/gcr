@@ -172,6 +172,9 @@ spec:
                 throughRegistry:
                   type: boolean
                   description: "Move it through a checkpoint in gcr-operator's registry rather than node to node. A StatefulSet's pod always moves this way."
+                container:
+                  type: string
+                  description: "The container to move, of a pod with several; without, the one the pod's gcr.dev/migrate-container annotation names. The pod's other containers start anew on the new node."
                 mode:
                   type: string
                   enum: [PreCopy, PostCopy]

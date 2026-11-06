@@ -308,7 +308,10 @@ func (o *operator) migration(ctx context.Context, u *unstructured.Unstructured, 
 		delete(o.moving, key)
 		o.mu.Unlock()
 	}()
-	res, err := o.migrate(ctx, pod, m.Spec.Node, viaRegistry, postCopy)
+	if m.Spec.Container != "" && viaRegistry {
+		return nil, errors.New("a container named, and its pod moves through a registry, which moves pods with one container only")
+	}
+	res, err := o.migrate(ctx, pod, m.Spec.Node, m.Spec.Container, viaRegistry, postCopy)
 	if err != nil {
 		return nil, err
 	}

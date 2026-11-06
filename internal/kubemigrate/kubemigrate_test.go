@@ -61,7 +61,7 @@ func TestMovable(t *testing.T) {
 		}), ""},
 		"pending": {running(func(p *corev1.Pod) { p.Status.Phase = corev1.PodPending }), "not running"},
 	} {
-		id, err := Movable(tc.pod)
+		id, err := Movable(tc.pod, "")
 		switch {
 		case tc.refuse == "" && (err != nil || id != "abc"):
 			t.Errorf("%s: %q, %v; want abc", name, id, err)

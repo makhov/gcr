@@ -64,7 +64,8 @@ carries on rather than starting over.
 | A StatefulSet's | moved through a registry, with one; evicted without | restored from its checkpoint, with a registry |
 | A DaemonSet's | evicted | stopped |
 
-A pod moves if it has **one container** (no sidecars), **its volumes can
+A pod moves if it has **one container**, or names the one that moves
+(annotation `gcr.dev/migrate-container`, the others starting anew), **its volumes can
 follow it** (ConfigMaps, Secrets, projected and downward API volumes
 always; `emptyDir` in a live move; a StatefulSet's PVCs unless they are
 tied to one node), and it is **not in a Kubernetes user namespace**

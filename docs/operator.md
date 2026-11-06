@@ -148,7 +148,8 @@ What then happens to each kind of pod:
 | Others (DaemonSets) | evicted | stopped |
 
 A pod moves if:
-- **it has one container,** no sidecars;
+- **it has one container,** or names the one that moves
+  (`gcr.dev/migrate-container`), the others starting anew;
 - **its volumes can follow it:**
   - ConfigMaps, Secrets, projected and downward API volumes, which the
     new node mounts afresh;
@@ -466,7 +467,8 @@ away is taken over by the next one.
 ## Troubleshooting
 
 **Pods are evicted, not moved.** Read the pod's `gcr.dev/migration`
-annotation (above). Common reasons: the pod has more than one container,
+annotation (above). Common reasons: the pod has more than one container
+and doesn't name the one to move (`gcr.dev/migrate-container`),
 a `hostPath` or node-local volume, or `hostUsers: false`; or no other
 node has gcr ready (`kubectl get nodes -l gcr.dev/runtime=ready`).
 
