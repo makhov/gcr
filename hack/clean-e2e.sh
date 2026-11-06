@@ -24,8 +24,12 @@ for ns in $(ctr namespace ls -q 2>/dev/null); do
 	done
 done
 
-pkill -f containerd-shim-gcr-v2 >/dev/null 2>&1
+# Only this host's: the shims of clusters whose nodes are containers here
+# (k0da, as on the dev VM, which also runs the self-hosted CI jobs) show
+# up too, in mount namespaces of their own, and killing them takes their
+# pods' containers down with them.
+pkill --ns $$ --nslist mnt -f "[c]ontainerd-shim-gcr-v2" >/dev/null 2>&1
 # Snapshots pulled lazily in a failed run stay mounted, each by a nydusd
 # that exits with its mount.
 findmnt -t fuse -n -o TARGET,SOURCE | awk '$2 == "rafs" && $1 ~ "^/tmp/Test" {print $1}' | xargs -r -n1 umount -l
-echo "left: $(pgrep -c -f containerd-shim-gcr-v2 || echo 0) shims, $(crictl pods -q 2>/dev/null | wc -l) pods"
+echo "left: $(pgrep -c --ns $$ --nslist mnt -f "[c]ontainerd-shim-gcr-v2" || echo 0) shims, $(crictl pods -q 2>/dev/null | wc -l) pods"

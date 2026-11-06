@@ -725,9 +725,10 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 	}
 	daemonUp := time.Now()
 	// CRIU sets the hostname the snapshot's UTS namespace had, in the
-	// one the container joins: a fork is another pod, which keeps its own.
+	// one the container joins: a fork, or a migration's target, is
+	// another pod, which keeps its own.
 	var hostname string
-	if uts := c.cfg.Namespaces.PathOf(configs.NEWUTS); uts != "" && images == c.forkImages {
+	if uts := c.cfg.Namespaces.PathOf(configs.NEWUTS); uts != "" && (images == c.forkImages || c.checkpointFrom != nil) {
 		if hostname, err = hostnameOf(uts); err != nil {
 			return fmt.Errorf("restore: hostname: %w", err)
 		}

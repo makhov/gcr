@@ -40,7 +40,7 @@ What happens to the processes' open files and sockets:
 | | on the target |
 | --- | --- |
 | files in the container's filesystem | reopened at the same offset: the writable layer moves, and the image is the same |
-| files on volumes | reopened by path. ConfigMaps, Secrets and projected volumes have the same contents there; an `emptyDir`'s files go with the migration, on disk or in memory; other volumes holding a node's own files (`hostPath`) would not, and `kubectl gcr migrate` refuses such pods |
+| files on volumes | reopened by path. ConfigMaps, Secrets and projected volumes have the same contents there; an `emptyDir`'s files go with the migration, on disk or in memory; other volumes (`hostPath`, PersistentVolumeClaims) are refused in Kubernetes ([what can move](#between-kubernetes-nodes)) |
 | files deleted while open or mapped | kept: CRIU stores small ones and links back mapped ones |
 | pipes, sockets between the container's processes, eventfd, epoll, signalfd, timerfd, memfd, shared memory | restored with their contents |
 | stdin, stdout, stderr | the target's: its log carries on |
@@ -179,10 +179,15 @@ What can move, for now:
 - **Not pinned to its node** by a `nodeSelector` on `kubernetes.io/hostname` (unless `--to` names the node it pins), since the target is made from the pod's spec and could run nowhere else.
 - **Volumes the target mounts afresh:** ConfigMaps, Secrets, projected and downward API volumes.
 - **`emptyDir` volumes,** on disk or in memory: their files are copied to the target pod's own while the container is frozen, after the writable layer, so they add to the downtime as it does: on the arm64 dev VM, 256 MiB added 0.35 s on disk and 0.2 s in memory, to about 0.3 s without. Files the container has open there are reopened at the same offset.
-- **Not other volumes holding files on the node** (`hostPath`, local PersistentVolumes): refused.
+- **No other volumes:** `hostPath` and every PersistentVolumeClaim are refused, network ones (NFS, a cloud disk) included. Only a StatefulSet's pod, moving [through a registry](#through-a-registry), takes its claims along.
 - **No user namespace.** A pod with `hostUsers: false` is refused: the kubelet picks its range, and would give the target another one. Pods in gcr's own user namespace (`gcr.dev/host-users: "false"`) can't be checkpointed in Kubernetes yet either. CRIU checks every namespace belongs to the container's user namespace, and the pod's network namespace, made by CRI, belongs to the host's ([#70](https://github.com/makhov/gcr/issues/70)).
 
 The pod gets a new name and IP, and its TCP connections reset. Services select it by its labels, which it keeps.
+
+What the processes see of the move:
+
+- **Clocks carry on.** `CLOCK_MONOTONIC` and `CLOCK_BOOTTIME` continue from where they were, whatever the new node's uptime: CRIU restores the processes into a time namespace offset to their dumped values. Timers and timeouts don't jump; they don't count the pause either. `CLOCK_REALTIME` isn't namespaced: it moves forward by the pause, and by any difference between the nodes' clocks.
+- **The new pod's name as the hostname.** `hostname`, `/etc/hostname` and downward API files give the new pod's name. What a process copied at its start keeps the old one: `$HOSTNAME` in its environment, and the pod's name or IP in variables from the downward API.
 
 ### Through a registry
 
