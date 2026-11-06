@@ -1,44 +1,15 @@
-# A controller and two workers, all of which run pods. Traefik on the
-# controller takes HTTP on its port 80, published on the host's 8090:
-# http://localhost:8090 reaches the cluster's Ingresses.
+# A k0da cluster: a controller and two workers, all of which run pods. The
+# controller's port 30090, where the arcade's Service listens on every node
+# (doom.yaml), is published on the host's 8090: http://localhost:8090.
 apiVersion: k0da.k0sproject.io/v1alpha1
 kind: Cluster
 spec:
   k0s:
     version: v1.37.1-k0s.0
-    config:
-      apiVersion: k0s.k0sproject.io/v1beta1
-      kind: ClusterConfig
-      spec:
-        extensions:
-          helm:
-            repositories:
-              - name: traefik
-                url: https://traefik.github.io/charts
-            charts:
-              - name: traefik
-                chartname: traefik/traefik
-                version: "42.2.0"
-                namespace: traefik
-                values: |
-                  ports:
-                    web:
-                      hostPort: 80
-                  service:
-                    type: ClusterIP
-                  nodeSelector:
-                    node-role.kubernetes.io/control-plane: "true"
-                  tolerations:
-                    - key: node-role.kubernetes.io/master
-                      operator: Exists
-                      effect: NoSchedule
-                    - key: node-role.kubernetes.io/control-plane
-                      operator: Exists
-                      effect: NoSchedule
   nodes:
     - role: controller
       ports:
-        - containerPort: 80
+        - containerPort: 30090
           hostPort: 8090
     - role: worker
     - role: worker

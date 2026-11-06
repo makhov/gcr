@@ -1,0 +1,13 @@
+# The same cluster on kind (up.sh with TOOL=kind): a control plane and two
+# workers, which run the game. The control plane's port 30090, where the
+# arcade's Service listens on every node (doom.yaml), is published on the
+# host's 8090: http://localhost:8090.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30090
+        hostPort: 8090
+  - role: worker
+  - role: worker

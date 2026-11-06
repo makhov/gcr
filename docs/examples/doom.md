@@ -14,20 +14,26 @@ cache.
 ## Run it
 
 You need Linux 6.12 or later, [k0da](https://github.com/makhov/k0da)
-v0.5.0 or later, Docker or Podman, kubectl, and port 8090 free. k0da's
-nodes are containers, so they run on your kernel. On a Mac, run all of
+v0.5.0 or later or [kind](https://kind.sigs.k8s.io), Docker or Podman,
+kubectl, and port 8090 free. Their nodes are containers, so they run on
+your kernel. On a Mac, run all of
 it in a Linux VM from a current image, such as Lima's
 `template:ubuntu-26.04` or `template:debian-13`. An older Lima `default`
 VM may still be on Ubuntu 24.04, whose 6.8 is too old.
 
 ```sh
 git clone https://github.com/makhov/gcr && cd gcr
-examples/doom/up.sh
+examples/doom/up.sh            # with k0da
+TOOL=kind examples/doom/up.sh  # with kind
 ```
 
 `up.sh` creates a cluster of three nodes (a controller and two workers),
 installs gcr from its latest release's manifests, and starts the game. When
 it's done, open <http://localhost:8090>, click the game, and play.
+
+kind on a host that already runs a cluster can run out of inotify
+instances, and a worker's kubelet then doesn't start:
+`sysctl fs.inotify.max_user_instances=512` gives it room.
 
 The bar at the top shows the node the game runs on, how many times it has
 moved, the last pause and the time until the next move. The edge of the
@@ -36,8 +42,8 @@ screen flashes red on each move.
 ## What happens
 
 ```
-browser ──► Traefik ──► arcade (noVNC, websockify) ──► Service doom ──► doom (Xvfb, x11vnc, Chocolate Doom)
-             :8090        runc, stays put                                gcr, moves
+browser ──► NodePort ──► arcade (noVNC, websockify) ──► Service doom ──► doom (Xvfb, x11vnc, Chocolate Doom)
+            :8090 → :30090  runc, stays put                               gcr, moves
 ```
 
 - **`doom`** is a Deployment on the `gcr` runtime class: Chocolate Doom
@@ -125,5 +131,5 @@ Nothing in Doom knows it moves. What the container needs:
 ## Clean up
 
 ```sh
-k0da delete -n doom
+k0da delete -n doom          # or: kind delete cluster --name doom
 ```

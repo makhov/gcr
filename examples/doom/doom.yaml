@@ -93,20 +93,8 @@ kind: Service
 metadata:
   name: arcade
 spec:
+  # On every node's port 30090, which the cluster's config publishes on
+  # the host's 8090 (cluster.yaml, kind.yaml).
+  type: NodePort
   selector: {app: arcade}
-  ports: [{port: 6080}]
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: arcade
-spec:
-  rules:
-    - http:
-        paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: arcade
-                port: {number: 6080}
+  ports: [{port: 6080, nodePort: 30090}]
