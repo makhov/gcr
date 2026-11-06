@@ -1275,6 +1275,90 @@ func (c *Container) PreDump(ctx context.Context, dir, parent, host string, port 
 
 // FreezeDump freezes the container and dumps it to a page server and dir.
 // The container stays frozen: Thaw on failure, Stop once the target runs.
+// sharedFS are the filesystems a pod's claims are shared through, by
+// their statfs magic: NFS, Ceph, SMB, and FUSE (JuiceFS, GlusterFS,
+// object stores). Their clients keep writes in the page cache until
+// flushed, where the target, on another node, can't see them.
+var sharedFS = map[int64]string{0x6969: "nfs", 0x00c36400: "ceph", 0xfe534d42: "smb2", 0xff534d42: "cifs", 0x65735546: "fuse"}
+
+// sharedMount is a volume of the container on a shared filesystem.
+type sharedMount struct{ source, dest, fs string }
+
+// sharedMounts are the container's volumes on shared filesystems.
+func (c *Container) sharedMounts() []sharedMount {
+	var ms []sharedMount
+	for _, m := range c.cfg.Mounts {
+		if m.Flags&unix.MS_BIND == 0 {
+			continue
+		}
+		var st unix.Statfs_t
+		if err := unix.Statfs(m.Source, &st); err != nil {
+			continue
+		}
+		if fs, ok := sharedFS[int64(st.Type)]; ok {
+			ms = append(ms, sharedMount{m.Source, m.Destination, fs})
+		}
+	}
+	return ms
+}
+
+// checkSharedVolumes refuses a migration CRIU would fail to restore on
+// another node, before the container freezes: a file on a shared volume
+// deleted while open. NFS renames it .nfsXXXX on the node that has it
+// open, where CRIU dumps it, and the target can't link it back.
+func (c *Container) checkSharedVolumes() error {
+	ms := c.sharedMounts()
+	if len(ms) == 0 {
+		return nil
+	}
+	pids, err := c.lc.Processes()
+	if err != nil {
+		return err
+	}
+	for _, pid := range pids {
+		fds, _ := os.ReadDir(fmt.Sprintf("/proc/%d/fd", pid))
+		for _, fd := range fds {
+			path, err := os.Readlink(fmt.Sprintf("/proc/%d/fd/%s", pid, fd.Name()))
+			if err != nil {
+				continue
+			}
+			for _, m := range ms {
+				if !strings.HasPrefix(path, m.dest+"/") {
+					continue
+				}
+				if strings.HasPrefix(filepath.Base(path), ".nfs") || strings.HasSuffix(path, " (deleted)") {
+					return fmt.Errorf("%s, on the %s volume at %s, was deleted while open (pid %d): CRIU can't restore it on another node",
+						path, m.fs, m.dest, pid)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// syncSharedVolumes flushes the frozen container's writes to the shared
+// filesystems it has mounted, for the migration's target to find them.
+func (c *Container) syncSharedVolumes(ctx context.Context) error {
+	start := time.Now()
+	var synced []string
+	for _, m := range c.sharedMounts() {
+		fs := m.fs
+		fd, err := unix.Open(m.source, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+		if err == nil {
+			err = unix.Syncfs(fd)
+			unix.Close(fd)
+		}
+		if err != nil {
+			return fmt.Errorf("flushing %s (%s) for the target: %w", m.dest, fs, err)
+		}
+		synced = append(synced, m.dest+" ("+fs+")")
+	}
+	if len(synced) > 0 {
+		log.G(ctx).WithFields(log.Fields{"volumes": synced, "took": time.Since(start).Round(time.Microsecond)}).Info("flushed shared volumes")
+	}
+	return nil
+}
+
 func (c *Container) FreezeDump(ctx context.Context, dir, parent, host string, port int) error {
 	c.op.Lock()
 	defer c.op.Unlock()
@@ -1287,8 +1371,15 @@ func (c *Container) FreezeDump(ctx context.Context, dir, parent, host string, po
 	if err := c.fillMemory(); err != nil {
 		return err
 	}
+	if err := c.checkSharedVolumes(); err != nil {
+		return fmt.Errorf("checkpoint: %w", err)
+	}
 	if err := c.lc.Pause(); err != nil {
 		return fmt.Errorf("freeze: %w", err)
+	}
+	if err := c.syncSharedVolumes(ctx); err != nil {
+		_ = c.lc.Resume()
+		return err
 	}
 	if err := c.dump(dir, parent, host, port, false); err != nil {
 		_ = c.lc.Resume()
@@ -1356,9 +1447,18 @@ func (c *Container) LazyDump(ctx context.Context, dir, host string, port int) (w
 	if err != nil {
 		return fail(err)
 	}
+	if err := c.checkSharedVolumes(); err != nil {
+		unix.Close(statusFd)
+		return fail(fmt.Errorf("checkpoint: %w", err))
+	}
 	if err := c.lc.Pause(); err != nil {
 		unix.Close(statusFd)
 		return fail(fmt.Errorf("freeze: %w", err))
+	}
+	if err := c.syncSharedVolumes(ctx); err != nil {
+		_ = c.lc.Resume()
+		unix.Close(statusFd)
+		return fail(err)
 	}
 	init := c.Pid()
 	if err := c.criu.write(false, migrationCRIU...); err != nil {
