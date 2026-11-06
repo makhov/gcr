@@ -40,7 +40,7 @@ What happens to the processes' open files and sockets:
 | | on the target |
 | --- | --- |
 | files in the container's filesystem | reopened at the same offset: the writable layer moves, and the image is the same |
-| files on volumes | reopened by path. ConfigMaps, Secrets and projected volumes have the same contents there; an `emptyDir`'s files go with the migration, on disk or in memory; other volumes (`hostPath`, PersistentVolumeClaims) are refused in Kubernetes ([what can move](#between-kubernetes-nodes)) |
+| files on volumes | reopened by path. ConfigMaps, Secrets and projected volumes have the same contents there; an `emptyDir`'s files go with the migration, on disk or in memory; a ReadWriteMany claim's (NFS, CephFS, a cloud's file share) is mounted by both pods at once, and the source's writes are flushed to it after the freeze; other volumes (`hostPath`, ReadWriteOnce claims) are refused in Kubernetes ([what can move](#between-kubernetes-nodes)) |
 | files deleted while open or mapped | kept: CRIU stores small ones and links back mapped ones |
 | pipes, sockets between the container's processes, eventfd, epoll, signalfd, timerfd, memfd, shared memory | restored with their contents |
 | stdin, stdout, stderr | the target's: its log carries on |
@@ -179,7 +179,8 @@ What can move, for now:
 - **Not pinned to its node** by a `nodeSelector` on `kubernetes.io/hostname` (unless `--to` names the node it pins), since the target is made from the pod's spec and could run nowhere else.
 - **Volumes the target mounts afresh:** ConfigMaps, Secrets, projected and downward API volumes.
 - **`emptyDir` volumes,** on disk or in memory: their files are copied to the target pod's own while the container is frozen, after the writable layer, so they add to the downtime as it does: on the arm64 dev VM, 256 MiB added 0.35 s on disk and 0.2 s in memory, to about 0.3 s without. Files the container has open there are reopened at the same offset.
-- **No other volumes:** `hostPath` and every PersistentVolumeClaim are refused, network ones (NFS, a cloud disk) included. Only a StatefulSet's pod, moving [through a registry](#through-a-registry), takes its claims along.
+- **ReadWriteMany claims** (NFS, CephFS, a cloud's file share), not tied to a node: the target mounts the volume while the source still has it, and once the source freezes, its writes still in the node's page cache are flushed (`syncfs`, well under a millisecond on NFS). Files open there reopen at the same offset, and `flock` locks move with them. A file there deleted while still open is refused before the freeze: NFS keeps it as `.nfsXXXX` on the source's node only, and the target can't link it back. On a three-node k0da cluster with an NFS server, a counter writing through one open file moved four times, pre-copy and post-copy, pausing 90 to 207 ms, and its file came out unbroken.
+- **No other volumes:** `hostPath` and ReadWriteOnce claims (a cloud disk, Ceph RBD) are refused: only one node can have such a volume at a time, so it would have to be detached and attached again while the pod is frozen. Only a StatefulSet's pod, moving [through a registry](#through-a-registry), takes those along.
 - **No user namespace.** A pod with `hostUsers: false` is refused: the kubelet picks its range, and would give the target another one. Pods in gcr's own user namespace (`gcr.dev/host-users: "false"`) can't be checkpointed in Kubernetes yet either. CRIU checks every namespace belongs to the container's user namespace, and the pod's network namespace, made by CRI, belongs to the host's ([#70](https://github.com/makhov/gcr/issues/70)).
 
 The pod gets a new name and IP, and its TCP connections reset. Services select it by its labels, which it keeps.

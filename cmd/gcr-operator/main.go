@@ -834,7 +834,11 @@ func (o *operator) throughRegistry(pod *corev1.Pod) bool {
 // movable says whether the pod can be moved, the way move would.
 func (o *operator) movable(pod *corev1.Pod) (string, error) {
 	if !o.throughRegistry(pod) {
-		return kubemigrate.Movable(pod)
+		id, err := kubemigrate.Movable(pod)
+		if err == nil {
+			err = kubemigrate.SharedClaims(context.Background(), o.cs, pod)
+		}
+		return id, err
 	}
 	if o.registry.Repository == "" {
 		return "", errors.New("a StatefulSet's pod moves through a registry, and gcr-operator has none (-registry)")

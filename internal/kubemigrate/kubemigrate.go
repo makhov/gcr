@@ -151,6 +151,9 @@ func Migrate(ctx context.Context, cs kubernetes.Interface, ns, name string, o Op
 	if err := pinned(src, o.Node); err != nil {
 		return res, fmt.Errorf("%s/%s: %w", ns, name, err)
 	}
+	if err := SharedClaims(ctx, cs, src); err != nil {
+		return res, fmt.Errorf("%s/%s: %w", ns, name, err)
+	}
 
 	// A target an earlier attempt left, its migrator gone mid-way: it
 	// waits for a migration that will not come.
@@ -338,7 +341,8 @@ func Movable(p *corev1.Pod) (string, error) {
 	if p.Status.Phase != corev1.PodRunning {
 		return "", fmt.Errorf("not running (%s)", p.Status.Phase)
 	}
-	return movable(p, false)
+	// Its claims are SharedClaims's to judge.
+	return movable(p, true)
 }
 
 // pinned refuses a pod whose nodeSelector keeps it on its node: its
@@ -373,12 +377,15 @@ func movable(p *corev1.Pod, claims bool) (string, error) {
 	for _, v := range p.Spec.Volumes {
 		// A new node mounts these afresh with the same contents, and an
 		// emptyDir's files go with the migration; others hold files on
-		// this node that would not follow.
+		// this node that would not follow. Claims, where allowed, depend
+		// on their volumes, which take the API to find: through a
+		// registry, claimsFollow says whether they follow; live,
+		// SharedClaims.
 		if claims && v.PersistentVolumeClaim != nil {
 			continue
 		}
 		if v.ConfigMap == nil && v.Secret == nil && v.Projected == nil && v.DownwardAPI == nil && v.EmptyDir == nil {
-			return "", fmt.Errorf("volume %s: its files would stay on %s (only emptyDir, ConfigMap, Secret, projected and downward API volumes can move yet)", v.Name, p.Spec.NodeName)
+			return "", fmt.Errorf("volume %s: its files would stay on %s (only emptyDir, ConfigMap, Secret, projected, downward API and ReadWriteMany claims' volumes can move yet)", v.Name, p.Spec.NodeName)
 		}
 	}
 	id, ok := strings.CutPrefix(p.Status.ContainerStatuses[0].ContainerID, "containerd://")
