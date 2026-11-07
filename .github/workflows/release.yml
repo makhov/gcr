@@ -204,6 +204,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions: write   # to run the docs workflow on main
     steps:
       - uses: actions/checkout@v7
         with:
@@ -218,9 +219,18 @@ jobs:
         run: |
           if git diff --quiet; then
             echo "main installs $TAG already"
-            exit 0
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -aqm "chart, deploy: install $TAG"
+            git push origin HEAD:main
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -aqm "chart, deploy: install $TAG"
-          git push origin HEAD:main
+      - name: Publish the documentation for it
+        # From main, not from here: the github-pages environment takes
+        # main's ref, and a release event carries the tag's, which it
+        # refuses ("not allowed to deploy to github-pages"). The pages
+        # name the newest tag, which is this release.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run docs.yml --ref main

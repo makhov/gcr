@@ -1,7 +1,9 @@
 # The documentation site (mkdocs.yml): built on pull requests that touch
-# it, and built and published to GitHub Pages from main and when a release
-# is published. The version the pages show comes from the release tag
-# (hack/mkdocs_macros.py), so publishing a release refreshes them.
+# it, and built and published to GitHub Pages from main. The version the
+# pages show is the newest release tag (hack/mkdocs_macros.py), so a
+# release refreshes them by running this on main once it is published
+# (release.yml's stamp job): the github-pages environment takes main's
+# ref and not a tag's, which is what a release event carries.
 name: Docs
 
 on:
@@ -10,8 +12,6 @@ on:
     paths: [docs/**, mkdocs.yml, hack/mkdocs_macros.py, .github/workflows/docs.yml]
   pull_request:
     paths: [docs/**, mkdocs.yml, hack/mkdocs_macros.py, .github/workflows/docs.yml]
-  release:
-    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -23,16 +23,12 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:
-          # The tags: the version the pages show, when the run is not a
-          # release's own.
+          # The tags: the newest is the version the pages show.
           fetch-depth: 0
-      - name: The release the pages name
-        if: github.event_name == 'release'
-        run: echo "GCR_VERSION=${{ github.event.release.tag_name }}" >>"$GITHUB_ENV"
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
@@ -53,7 +49,7 @@ jobs:
   deploy:
     if: github.event_name != 'pull_request'
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pages: write
       id-token: write
