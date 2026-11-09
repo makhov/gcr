@@ -45,9 +45,13 @@ echo "== cluster"
 k0da delete -n "$CLUSTER" >/dev/null 2>&1 || true
 k0da create -n "$CLUSTER" -c hack/k8s/migrate-cluster.yaml --timeout 300s >"$work/k0da.log" 2>&1 ||
 	{ cat "$work/k0da.log"; fail "k0da create"; }
-k0da load archive "$work/image.tar" -n "$CLUSTER" >"$work/k0da.log" 2>&1 ||
-	{ cat "$work/k0da.log"; fail "k0da load"; }
 for _ in $(seq 60); do [ "$(kc get nodes --no-headers 2>/dev/null | grep -c ' Ready')" -ge 3 ] && break; sleep 5; done
+# Into every node's containerd, which a node only has once it is up.
+for i in $(seq 5); do
+	k0da load archive "$work/image.tar" -n "$CLUSTER" >"$work/k0da.log" 2>&1 && break
+	[ "$i" = 5 ] && { cat "$work/k0da.log"; fail "k0da load"; }
+	sleep 10
+done
 kc get nodes
 
 echo "== gcr and gcr-operator"
