@@ -55,10 +55,11 @@ done
 kc get nodes
 
 echo "== gcr and gcr-operator"
-kc apply -f - <deploy/gcr.yaml >/dev/null
-kc -n gcr-system set image ds/gcr-installer install="$IMAGE" >/dev/null
-kc apply -f - <deploy/gcr-operator.yaml >/dev/null
-kc -n gcr-system set image deploy/gcr-operator operator="$IMAGE" >/dev/null
+# With this image from the start: two gcr-operators running at once, the
+# release's and this one, would each give the webhook their own CA.
+for m in gcr gcr-operator; do
+	sed "s#image: ghcr.io/makhov/gcr:v[0-9.]*#image: $IMAGE#" "deploy/$m.yaml" | kc apply -f - >/dev/null
+done
 for n in $(kc get nodes -o name); do
 	kc wait "$n" --for=jsonpath='{.metadata.labels.gcr\.dev/runtime}'=ready --timeout 300s >/dev/null ||
 		fail "gcr not ready on ${n#node/}"
