@@ -1,0 +1,13 @@
+# Stock k0s nodes, a controller and two workers, all of which run pods,
+# without gcr: the installer DaemonSet (deploy/gcr.yaml) puts it there,
+# CRIU included, and gcr-operator moves pods between them
+# (hack/e2e-k8s-migrate.sh).
+apiVersion: k0da.k0sproject.io/v1alpha1
+kind: Cluster
+spec:
+  k0s:
+    version: v1.37.1-k0s.0
+  nodes:
+    - role: controller
+    - role: worker
+    - role: worker

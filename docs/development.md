@@ -41,6 +41,7 @@ containerd's CRI config).
 | `make test-e2e` | end-to-end tests in `test/e2e`, below | root (via sudo), containerd, CNI, the CRIU fork, network |
 | `critest --runtime-handler gcr` | CRI conformance | root, containerd, CNI |
 | `make test-k8s` | Kubernetes (stock k0s via k0da) with a gcr RuntimeClass | docker or podman, k0da >= v0.4.0 |
+| `make test-k8s-migrate` | gcr-operator moving pods on three k0da nodes: Migrations pre-copy and post-copy, `kubectl drain`, a pod with two containers, refusals; gcr installed from a release built here | docker (or `DOCKER=podman`), k0da, what `make release` needs |
 
 The end-to-end tests are Go tests behind the `e2e` build tag, one directory
 per test, sharing a harness in `test/e2e/framework` (containerd's client,
