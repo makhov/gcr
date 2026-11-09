@@ -43,8 +43,10 @@ $DOCKER save -o "$work/image.tar" "$IMAGE"
 
 echo "== cluster"
 k0da delete -n "$CLUSTER" >/dev/null 2>&1 || true
-k0da create -n "$CLUSTER" -c hack/k8s/migrate-cluster.yaml --timeout 300s >/dev/null
-k0da load archive "$work/image.tar" -n "$CLUSTER" >/dev/null
+k0da create -n "$CLUSTER" -c hack/k8s/migrate-cluster.yaml --timeout 300s >"$work/k0da.log" 2>&1 ||
+	{ cat "$work/k0da.log"; fail "k0da create"; }
+k0da load archive "$work/image.tar" -n "$CLUSTER" >"$work/k0da.log" 2>&1 ||
+	{ cat "$work/k0da.log"; fail "k0da load"; }
 for _ in $(seq 60); do [ "$(kc get nodes --no-headers 2>/dev/null | grep -c ' Ready')" -ge 3 ] && break; sleep 5; done
 kc get nodes
 
