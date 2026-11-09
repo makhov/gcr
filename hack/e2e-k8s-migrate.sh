@@ -65,10 +65,10 @@ for n in $(kc get nodes -o name); do
 done
 kc -n gcr-system rollout status deploy/gcr-operator --timeout 300s >/dev/null || fail "gcr-operator did not start"
 
-# A counter, in memory: /tmp/started is when it started, /tmp/n how far it
-# got. One that moved carries on; one started anew starts again.
+# A counter, in memory: /tmp/started is when it started, and a random id
+# (busybox's date has no nanoseconds), /tmp/n how far it got. One that moved carries on; one started anew starts again.
 # shellcheck disable=SC2016 # expanded in the pod
-counter='date +%s%N > /tmp/started; i=0; while :; do i=$((i+1)); echo $i > /tmp/n; sleep 0.1; done'
+counter='echo $(date +%s)-$(cat /proc/sys/kernel/random/uuid) > /tmp/started; i=0; while :; do i=$((i+1)); echo $i > /tmp/n; sleep 0.1; done'
 kc apply -f - >/dev/null <<YAML
 apiVersion: apps/v1
 kind: Deployment
@@ -176,10 +176,21 @@ for mode in PreCopy PostCopy; do
 done
 
 echo "== kubectl drain"
+# The eviction webhook lets evictions through when the API server can't
+# reach gcr-operator (failurePolicy: Ignore), as a new k0s cluster's may
+# not yet: its service proxy goes the webhook's way.
+for _ in $(seq 60); do
+	kc get --raw /api/v1/namespaces/gcr-system/services/https:gcr-operator:443/proxy/healthz >/dev/null 2>&1 && break
+	sleep 2
+done
+kc get --raw /api/v1/namespaces/gcr-system/services/https:gcr-operator:443/proxy/healthz >/dev/null ||
+	fail "the API server can't reach gcr-operator's webhook"
 src=$(pod counter)
 from=$(kc get pod "$src" -o jsonpath='{.spec.nodeName}')
 before=$(state "$src")
-kc drain "$from" --ignore-daemonsets --delete-emptydir-data --timeout 300s >/dev/null 2>&1 || fail "drain of $from"
+# The counter only: the bare pods here would stop a drain without --force.
+kc drain "$from" --pod-selector app=counter --ignore-daemonsets --delete-emptydir-data --timeout 300s >"$work/drain.log" 2>&1 ||
+	{ cat "$work/drain.log"; fail "drain of $from"; }
 kc uncordon "$from" >/dev/null
 [ "$(kc get pod "$(pod counter)" -o jsonpath='{.spec.nodeName}')" != "$from" ] || fail "counter is still on $from"
 moved counter "$before"
