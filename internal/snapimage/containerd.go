@@ -53,25 +53,8 @@ func FromContainerd(ctx context.Context, address, ns, id string) (_ Base, closeF
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s's config: %w", img.Name(), err)
 	}
-	name := img.Name()
-	if repo, _, ok := cutTag(name); ok {
-		name = repo + "@" + img.Target().Digest.String()
-	}
+	name := repository(img.Name()) + "@" + img.Target().Digest.String()
 	return &containerdBase{name: name, store: store, manifest: m, config: config}, client.Close, nil
-}
-
-// cutTag splits a tagged reference into its repository and tag; ok is
-// false for one by digest, or with neither.
-func cutTag(ref string) (repo, tag string, ok bool) {
-	for i := len(ref) - 1; i >= 0 && ref[i] != '/'; i-- {
-		if ref[i] == '@' {
-			return "", "", false
-		}
-		if ref[i] == ':' {
-			return ref[:i], ref[i+1:], true
-		}
-	}
-	return "", "", false
 }
 
 func (b *containerdBase) Name() string               { return b.name }

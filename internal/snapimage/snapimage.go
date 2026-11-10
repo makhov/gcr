@@ -521,15 +521,20 @@ func ReadInfo(dir string) (Info, error) {
 // Allowed says whether image (a reference, as a pod names it) matches one
 // of patterns: "*" matches any, a pattern ending in "*" any reference it
 // is a prefix of, and another the reference, or its repository (without
+// repository is ref without its digest or tag.
+func repository(ref string) string {
+	if i := strings.Index(ref, "@"); i >= 0 {
+		ref = ref[:i]
+	}
+	if i := strings.LastIndex(ref, ":"); i > strings.LastIndex(ref, "/") {
+		ref = ref[:i]
+	}
+	return ref
+}
+
 // tag or digest).
 func Allowed(image string, patterns []string) bool {
-	repo := image
-	if i := strings.Index(repo, "@"); i >= 0 {
-		repo = repo[:i]
-	}
-	if i := strings.LastIndex(repo, ":"); i > strings.LastIndex(repo, "/") {
-		repo = repo[:i]
-	}
+	repo := repository(image)
 	for _, p := range patterns {
 		switch {
 		case p == "*":

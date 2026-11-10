@@ -151,16 +151,7 @@ func movableThroughRegistry(p *corev1.Pod, owned bool) (string, error) {
 // waiting for the checkpoint, and a StatefulSet's pod is deleted, to be
 // started again cold.
 func MigrateViaRegistry(ctx context.Context, cs kubernetes.Interface, ns, name string, o Options, r RegistryOptions) (res Result, retErr error) {
-	if o.Timeout == 0 {
-		o.Timeout = 5 * time.Minute
-	}
-	if o.GCR == "" {
-		o.GCR = "/usr/local/bin/gcr"
-	}
-	if o.Log == nil {
-		o.Log = func(string, ...any) {}
-	}
-	log := o.Log
+	o, log := o.defaults()
 	if r.Repository == "" || strings.Contains(path.Base(r.Repository), ":") || strings.Contains(r.Repository, "@") {
 		return res, fmt.Errorf("registry %q: want a repository, host[:port]/path, with no tag", r.Repository)
 	}
@@ -388,26 +379,7 @@ func waitRecreated(ctx context.Context, cs kubernetes.Interface, ns, name string
 // claimsFollow checks that the pod's PersistentVolumeClaims can follow it
 // to another node: bound, and to volumes not tied to one node.
 func claimsFollow(ctx context.Context, cs kubernetes.Interface, p *corev1.Pod) error {
-	for _, v := range p.Spec.Volumes {
-		if v.PersistentVolumeClaim == nil {
-			continue
-		}
-		pvc, err := cs.CoreV1().PersistentVolumeClaims(p.Namespace).Get(ctx, v.PersistentVolumeClaim.ClaimName, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("volume %s: %w", v.Name, err)
-		}
-		if pvc.Spec.VolumeName == "" {
-			return fmt.Errorf("volume %s: claim %s is not bound", v.Name, pvc.Name)
-		}
-		pv, err := cs.CoreV1().PersistentVolumes().Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("volume %s: %w", v.Name, err)
-		}
-		if why := nodeLocal(pv); why != "" {
-			return fmt.Errorf("volume %s: %s %s, so its files would stay on %s", v.Name, pv.Name, why, p.Spec.NodeName)
-		}
-	}
-	return nil
+	return eachClaim(ctx, cs, p, func(*corev1.PersistentVolume) error { return nil })
 }
 
 // nodeLocal says why a volume can't be used from another node, or "".
@@ -540,16 +512,8 @@ func Steer(pod *corev1.Pod, r Restore) ([]byte, error) {
 // in a replacement made here. If the checkpoint never arrives, the
 // StatefulSet's pod starts cold, and the bare pod is left failed.
 func RestoreAfterShutdown(ctx context.Context, cs kubernetes.Interface, src *corev1.Pod, rs *Restore, o Options, r RegistryOptions) (res Result, retErr error) {
-	if o.Timeout == 0 {
-		o.Timeout = 5 * time.Minute
-	}
-	if o.GCR == "" {
-		o.GCR = "/usr/local/bin/gcr"
-	}
-	if o.Log == nil {
-		o.Log = func(string, ...any) {}
-	}
-	ns, name, log := src.Namespace, src.Name, o.Log
+	o, log := o.defaults()
+	ns, name := src.Namespace, src.Name
 	if _, err := MovableAtShutdown(src); err != nil {
 		return res, fmt.Errorf("%s/%s: %w", ns, name, err)
 	}

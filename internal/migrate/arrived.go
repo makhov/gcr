@@ -1,7 +1,6 @@
 package migrate
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,9 +75,5 @@ func mark(dir, key string) error {
 			}
 		}
 	}
-	err := os.WriteFile(filepath.Join(dir, key), nil, 0o600)
-	if errors.Is(err, os.ErrExist) {
-		return nil
-	}
-	return err
+	return os.WriteFile(filepath.Join(dir, key), nil, 0o600)
 }

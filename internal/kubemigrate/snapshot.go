@@ -142,9 +142,8 @@ func (o Options) defaults() (Options, func(string, ...any)) {
 	if o.GCR == "" {
 		o.GCR = "/usr/local/bin/gcr"
 	}
-	log := o.Log
-	if log == nil {
-		log = func(string, ...any) {}
+	if o.Log == nil {
+		o.Log = func(string, ...any) {}
 	}
-	return o, log
+	return o, o.Log
 }
