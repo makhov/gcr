@@ -67,9 +67,9 @@ done
 kc -n gcr-system rollout status deploy/gcr-operator --timeout 300s >/dev/null || fail "gcr-operator did not start"
 
 # A counter, in memory: /tmp/started is when it started, and a random id
-# (busybox's date has no nanoseconds), /tmp/n how far it got. One that moved carries on; one started anew starts again.
+# (busybox's date has no nanoseconds), /tmp/n how far it got (renamed into place: a read never finds it empty). One that moved carries on; one started anew starts again.
 # shellcheck disable=SC2016 # expanded in the pod
-counter='echo $(date +%s)-$(cat /proc/sys/kernel/random/uuid) > /tmp/started; i=0; while :; do i=$((i+1)); echo $i > /tmp/n; sleep 0.1; done'
+counter='echo $(date +%s)-$(cat /proc/sys/kernel/random/uuid) > /tmp/started; i=0; while :; do i=$((i+1)); echo $i > /tmp/n.new; mv /tmp/n.new /tmp/n; sleep 0.1; done'
 kc apply -f - >/dev/null <<YAML
 apiVersion: apps/v1
 kind: Deployment
