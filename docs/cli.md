@@ -38,7 +38,7 @@ plugin into `/var/lib/gcr`; a containerd drop-in in `conf.d` beside
 `-containerd-config`, in the configuration's own format version, which it
 makes containerd import; with `-docker`, runtime `gcr` in
 `/etc/docker/daemon.json`. It restarts what it reconfigured (`-containerd-unit`,
-default `containerd`) unless `-no-restart`, and if containerd does not
+default `containerd`; Docker is reloaded, which keeps its containers) unless `-no-restart`, and if containerd does not
 come back with the new configuration, puts the old one back. On k0s it
 writes `/etc/k0s/containerd.d/gcr.toml` instead, which k0s applies itself.
 It ends with `gcr doctor`. Running it again is safe, and with a newer `gcr`

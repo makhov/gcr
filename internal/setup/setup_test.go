@@ -44,6 +44,11 @@ func TestRegisterContainerd(t *testing.T) {
 			major:  2,
 			want:   []string{"imports = ['/etc/other.toml', 'CONFD/*.toml']"},
 		},
+		"config with imports over lines": {
+			config: "version = 3\nimports = [\n  '/etc/other.toml',\n]\n[plugins]\n",
+			major:  2,
+			want:   []string{"version = 3\nimports = ['/etc/other.toml', 'CONFD/*.toml']\n[plugins]"},
+		},
 		"config importing conf.d": {
 			config: "version = 3\nimports = ['CONFD/*.toml']\n",
 			major:  2,
