@@ -195,6 +195,11 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 	}
 	ex := &extras{stateDir: filepath.Join(stateRoot, ns, r.ID), id: r.ID, migrateTLS: cfg.MigrationTLS}
 	var c *container.Container
+	// A migration's receiver listens before Create returns, so the
+	// source may call in before c is set: its calls wait for it (nil
+	// if Create failed).
+	created := make(chan struct{})
+	target := func() *container.Container { <-created; return c }
 	opts := container.CreateOpts{
 		ID:         r.ID,
 		Namespace:  ns,
@@ -376,17 +381,32 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 		if ok {
 			recv, err := migrate.NewReceiver(s.ctx, addr, spec.Annotations[migrate.AnnotationToken], cfg.MigrationTLS,
 				filepath.Join(ex.stateDir, "migrate-in"),
-				func() (string, error) { return c.UpperDir() },
-				func() uint32 { return c.IDBase() },
-				func() []string { return c.Layers() })
+				func() (string, error) {
+					if c := target(); c != nil {
+						return c.UpperDir()
+					}
+					return "", errors.New("the container was not created")
+				},
+				func() uint32 {
+					if c := target(); c != nil {
+						return c.IDBase()
+					}
+					return 0
+				},
+				func() []string {
+					if c := target(); c != nil {
+						return c.Layers()
+					}
+					return nil
+				})
 			if err != nil {
 				return prep, fmt.Errorf("migration receiver: %w", err)
 			}
 			recv.EmptyDirs = func() map[string]string {
-				if c == nil {
-					return nil
+				if c := target(); c != nil {
+					return c.EmptyDirs()
 				}
-				return c.EmptyDirs()
+				return nil
 			}
 			// A post-copy migration restores lazily, refused before the
 			// source freezes where that cannot work; a pre-copy one
@@ -395,6 +415,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 				if err := container.LazyRestoreSupported(); err != nil {
 					return err
 				}
+				c := target()
 				if c != nil && c.IDBase() != 0 && !container.LazyPagesAvailable() {
 					return fmt.Errorf("this node has vm.unprivileged_userfaultfd = 0, which a container in a user namespace needs to be restored lazily")
 				}
@@ -541,6 +562,7 @@ func (s *service) Create(ctx context.Context, r *taskAPI.CreateTaskRequest) (*ta
 	}
 	opts.OnOOM = func(c *container.Container) { s.send(&eventstypes.TaskOOM{ContainerID: c.ID}) }
 	c, err = container.Create(ctx, opts, s.handleExit)
+	close(created)
 	if err != nil {
 		ex.Close()
 		return nil, errgrpc.ToGRPC(err)
