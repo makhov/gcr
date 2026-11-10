@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -208,6 +209,10 @@ func Send(ctx context.Context, src Source, target, token string, t TLS, work str
 	phase("volumes")
 	var restored struct{ Lazy bool }
 	if err := c.post(ctx, "/restore", &restored); err != nil {
+		if restoreUnknown(err) {
+			handedOver = true
+			return res, fmt.Errorf("restore on target: %w: whether the target restored is unknown, so the source stays frozen", err)
+		}
 		return res, fmt.Errorf("restore on target: %w", err)
 	}
 	phase("restore")
@@ -273,9 +278,10 @@ func (c *client) postCopy(ctx context.Context, src Source, work string, handedOv
 		return res, err
 	}
 	go splice(local, remote)
-	if err := c.doHeader(ctx, http.MethodPost, "/restore", nil, nil, http.Header{HeaderPostCopy: {"1"}}); err != nil {
+	if err := c.doHeader(ctx, http.MethodPost, "/restore", nil, nil, http.Header{HeaderPostCopy: {"1"}}); err != nil && !restoreUnknown(err) {
 		return res, fmt.Errorf("restore on target: %w", err)
 	}
+	// Without an answer, the target may run already: it gets its memory.
 	*handedOver = true
 	res.Downtime = time.Since(frozen)
 	// The target runs; the source serves it the rest of the memory, then
@@ -345,12 +351,25 @@ func (c *client) doHeader(ctx context.Context, method, path string, body io.Read
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, bytes.TrimSpace(b))
+		return &refusedError{fmt.Sprintf("%s %s: %s: %s", method, path, resp.Status, bytes.TrimSpace(b))}
 	}
 	if out != nil {
 		return json.NewDecoder(resp.Body).Decode(out)
 	}
 	return nil
+}
+
+// refusedError is the target's answer to a request it did not carry out.
+// Any other error leaves unknown whether it did.
+type refusedError struct{ msg string }
+
+func (e *refusedError) Error() string { return e.msg }
+
+// restoreUnknown is a /restore that got no answer: the target may run the
+// container, so the source must never run again.
+func restoreUnknown(err error) bool {
+	var refused *refusedError
+	return !errors.As(err, &refused)
 }
 
 func (c *client) post(ctx context.Context, path string, out any) error {
