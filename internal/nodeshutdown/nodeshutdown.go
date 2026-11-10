@@ -135,9 +135,13 @@ const (
 
 // PodUID returns the UID of the pod a container belongs to if its
 // checkpoint is wanted when the node shuts down: the pod opted in and the
-// container is its workload's. "" otherwise.
+// container is its workload's: the one gcr.dev/migrate-container names
+// (migrate.AnnotationContainer), if the pod names one. "" otherwise.
 func PodUID(annotations map[string]string) string {
 	if annotations[AnnotationOptIn] != "true" || annotations["io.kubernetes.cri.container-type"] != "container" {
+		return ""
+	}
+	if c := annotations["gcr.dev/migrate-container"]; c != "" && c != annotations["io.kubernetes.cri.container-name"] {
 		return ""
 	}
 	uid := annotations["io.kubernetes.cri.sandbox-uid"]
