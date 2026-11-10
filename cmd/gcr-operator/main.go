@@ -87,11 +87,17 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// client-go's default, 5 a second, queues the webhooks' calls behind
-	// the moves' when a node's pods all move at once, past the webhooks'
-	// timeout.
+	// client-go's default, 5 a second, is too few when a node's pods all
+	// move at once.
 	cfg.QPS, cfg.Burst = 50, 100
 	cs, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// The operations poll with clients of their own: the webhooks' calls
+	// never queue behind them, past the webhooks' timeout, which would
+	// let a drain evict the pods instead.
+	slow, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -111,7 +117,7 @@ func main() {
 		log.Fatalf("webhook %s: %v", *webhook, err)
 	}
 
-	op := &operator{cs: cs, opts: kubemigrate.Options{Namespace: *namespace, Image: *image, GCR: *gcrPath}, moving: map[string]bool{}, replaced: map[string]time.Time{}, restoring: map[types.UID]*kubemigrate.Restore{}, last: map[string]lastPod{},
+	op := &operator{cs: cs, slow: slow, opts: kubemigrate.Options{Namespace: *namespace, Image: *image, GCR: *gcrPath}, moving: map[string]bool{}, replaced: map[string]time.Time{}, restoring: map[types.UID]*kubemigrate.Restore{}, last: map[string]lastPod{},
 		owned: map[types.UID]map[types.UID]lastPod{}, nodesDown: map[string]bool{}, operating: map[types.UID]bool{},
 		self: metav1.ObjectMeta{Namespace: *namespace, Name: os.Getenv("POD_NAME")}, node: os.Getenv("NODE_NAME")}
 	if *registry != "" {
@@ -161,7 +167,10 @@ func main() {
 }
 
 type operator struct {
-	cs   kubernetes.Interface
+	cs kubernetes.Interface
+	// slow is what migrations and other operations poll with (cs if
+	// nil), rate-limited apart from cs, which the webhooks use.
+	slow kubernetes.Interface
 	opts kubemigrate.Options
 	// registry is where StatefulSets' pods move through; with none, they
 	// are evicted.
@@ -337,6 +346,14 @@ func (o *operator) decide(ctx context.Context, req *admissionv1.AdmissionRequest
 	return tooMany(pod, "is moving to another node instead (gcr)")
 }
 
+// ops is the client operations poll with.
+func (o *operator) ops() kubernetes.Interface {
+	if o.slow != nil {
+		return o.slow
+	}
+	return o.cs
+}
+
 // move migrates pod, and marks it failed if it cannot be; on success its
 // source is gone, and the evictions retried for it find nothing to evict.
 func (o *operator) move(pod *corev1.Pod) {
@@ -369,10 +386,10 @@ func (o *operator) migrate(ctx context.Context, pod *corev1.Pod, node, container
 	opts.PostCopy = postCopy
 	opts.Log = func(format string, args ...any) { log.Printf(key+": "+format, args...) }
 	if !viaRegistry {
-		return kubemigrate.Migrate(ctx, o.cs, pod.Namespace, pod.Name, opts)
+		return kubemigrate.Migrate(ctx, o.ops(), pod.Namespace, pod.Name, opts)
 	}
 	begin := time.Now()
-	res, err := kubemigrate.MigrateViaRegistry(ctx, o.cs, pod.Namespace, pod.Name, opts, o.registry)
+	res, err := kubemigrate.MigrateViaRegistry(ctx, o.ops(), pod.Namespace, pod.Name, opts, o.registry)
 	if o.throughRegistry(pod) {
 		o.mu.Lock()
 		o.replaced[key] = begin
@@ -598,7 +615,7 @@ func (o *operator) moveLive(pod *corev1.Pod) {
 	opts := o.opts
 	opts.Run = o.execRun
 	opts.Log = func(format string, args ...any) { log.Printf(key+": "+format, args...) }
-	res, err := kubemigrate.Migrate(context.Background(), o.cs, pod.Namespace, pod.Name, opts)
+	res, err := kubemigrate.Migrate(context.Background(), o.ops(), pod.Namespace, pod.Name, opts)
 	if err != nil {
 		log.Printf("%s: its node %s shuts down, and it could not migrate live, so it is checkpointed: %v", key, pod.Spec.NodeName, firstLine(err.Error()))
 		o.mu.Lock()
@@ -823,7 +840,7 @@ func (o *operator) restore(pod *corev1.Pod, rs *kubemigrate.Restore) {
 	opts := o.opts
 	opts.Log = func(format string, args ...any) { log.Printf(key+": "+format, args...) }
 	log.Printf("%s: stopped as its node %s shuts down: restoring it elsewhere from its checkpoint", key, pod.Spec.NodeName)
-	res, err := kubemigrate.RestoreAfterShutdown(context.Background(), o.cs, pod, rs, opts, o.registry)
+	res, err := kubemigrate.RestoreAfterShutdown(context.Background(), o.ops(), pod, rs, opts, o.registry)
 	if err != nil {
 		log.Printf("%s: not restored: %v", key, err)
 		return

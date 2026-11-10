@@ -274,7 +274,7 @@ func (o *operator) snapshot(ctx context.Context, u *unstructured.Unstructured, p
 		}
 		r.Auth = sec.Data[corev1.DockerConfigJsonKey]
 	}
-	img, err := kubemigrate.SnapshotImage(ctx, o.cs, s.Namespace, pod.Name, r, o.logFor(u))
+	img, err := kubemigrate.SnapshotImage(ctx, o.ops(), s.Namespace, pod.Name, r, o.logFor(u))
 	if err != nil {
 		return nil, err
 	}
@@ -327,7 +327,7 @@ func (o *operator) timePoint(ctx context.Context, u *unstructured.Unstructured, 
 	if err := v1alpha1.FromUnstructured(u, &p); err != nil {
 		return nil, err
 	}
-	n, err := kubemigrate.TakePoint(ctx, o.cs, p.Namespace, pod.Name, p.Spec.Container, p.Spec.Label, o.logFor(u))
+	n, err := kubemigrate.TakePoint(ctx, o.ops(), p.Namespace, pod.Name, p.Spec.Container, p.Spec.Label, o.logFor(u))
 	if err != nil {
 		return nil, err
 	}
@@ -339,5 +339,5 @@ func (o *operator) rewind(ctx context.Context, u *unstructured.Unstructured, pod
 	if err := v1alpha1.FromUnstructured(u, &r); err != nil {
 		return nil, err
 	}
-	return nil, kubemigrate.Rewind(ctx, o.cs, r.Namespace, pod.Name, r.Spec.Container, r.Spec.Point, o.logFor(u))
+	return nil, kubemigrate.Rewind(ctx, o.ops(), r.Namespace, pod.Name, r.Spec.Container, r.Spec.Point, o.logFor(u))
 }
