@@ -334,6 +334,11 @@ func join(key, user string, base uint32, holder string, anyFree bool) (Range, er
 			if base, err = ParseBase(string(b)); err != nil {
 				return err
 			}
+			// The base must still be this key's, not freed and claimed
+			// by another since.
+			if owner, err := os.ReadFile(filepath.Join(stateDir, "bases", strconv.Itoa(int(base)))); err != nil || string(owner) != key {
+				return fmt.Errorf("user namespace range %d of %q has been given to another container: %w", base, key, errdefs.ErrConflict)
+			}
 		case errors.Is(err, os.ErrNotExist) && (base != 0 || anyFree):
 			got, err := claim(key, base)
 			if errdefs.IsConflict(err) {
@@ -371,8 +376,12 @@ func release(r Range, user string) error {
 			return nil
 		}
 	}
-	_ = os.Remove(filepath.Join(stateDir, "bases", strconv.Itoa(int(r.Base))))
-	return os.RemoveAll(users)
+	// The key first: a key left pointing at a freed base would join
+	// whoever claims it next. A base left behind is only not reused.
+	if err := os.RemoveAll(users); err != nil {
+		return err
+	}
+	return os.Remove(filepath.Join(stateDir, "bases", strconv.Itoa(int(r.Base))))
 }
 
 // pullGrace is how long a snapshot's hold stays without the snapshot.

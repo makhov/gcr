@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -258,6 +259,18 @@ func TestJoin(t *testing.T) {
 	}
 	if _, err := Join(parent.Key, "fork3", parent.Base); !errdefs.IsConflict(err) {
 		t.Fatalf("join a range given to another container: %v, want conflict", err)
+	}
+	// A key left behind pointing at that range (a release cut short)
+	// does not join it either.
+	stale := filepath.Join(stateDir, "keys", parent.Key)
+	if err := os.MkdirAll(stale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stale, "base"), []byte(strconv.Itoa(int(parent.Base))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Join(parent.Key, "fork4", parent.Base); !errdefs.IsConflict(err) {
+		t.Fatalf("join through a stale key: %v, want conflict", err)
 	}
 	if _, err := Join("default_unknown", "x", 0); err == nil {
 		t.Fatal("joined a key with no range and no base")
