@@ -82,6 +82,9 @@ func TestTLSRefusesPlainTargets(t *testing.T) {
 	if err := (TLS{Cert: "/c"}).Validate(); !errdefs.IsInvalidArgument(err) {
 		t.Fatalf("Cert without Key: %v", err)
 	}
+	if _, err := NewReceiver(context.Background(), "127.0.0.1:0", testToken, TLS{CA: "/ca"}, t.TempDir(), nil, nil, nil); !errdefs.IsInvalidArgument(err) {
+		t.Fatalf("a target with CA only: %v", err)
+	}
 }
 
 // The page stream is carried over the migration's connection, after the

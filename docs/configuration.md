@@ -341,7 +341,7 @@ only), so this covers all of it.
 
 - As a target, with `Cert` and `Key`, the container's receiver serves
   TLS 1.3 only. With `CA` as well, it requires each source to present a
-  certificate signed by it.
+  certificate signed by it. With `CA` only, it refuses migrations in.
 - As a source, with any of the three set, it migrates only to `https://`
   targets and verifies them against `CA` (the system's roots without
   one), presenting `Cert` and `Key` if set. The target's certificate must
