@@ -1,6 +1,7 @@
 package nodeshutdown
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,11 +22,20 @@ func TestPodUID(t *testing.T) {
 		"not a pod's":    {map[string]string{AnnotationOptIn: "true"}, ""},
 		"a path for UID": {pod("true", "container", "../x"), ""},
 		"a dot first":    {pod("true", "container", ".x"), ""},
+		"the one named": {merge(pod("true", "container", "u1"), map[string]string{
+			"gcr.dev/migrate-container": "app", "io.kubernetes.cri.container-name": "app"}), "u1"},
+		"another one": {merge(pod("true", "container", "u1"), map[string]string{
+			"gcr.dev/migrate-container": "app", "io.kubernetes.cri.container-name": "side"}), ""},
 	} {
 		if got := PodUID(tc.annotations); got != tc.want {
 			t.Errorf("%s: %q, want %q", name, got, tc.want)
 		}
 	}
+}
+
+func merge(a, b map[string]string) map[string]string {
+	maps.Copy(a, b)
+	return a
 }
 
 func TestStates(t *testing.T) {
