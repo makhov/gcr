@@ -74,6 +74,29 @@ func TestControlRoundTrip(t *testing.T) {
 	}
 }
 
+// The container is deleted, closing its control socket, as its migration
+// hands over: the migration's request still gets its result.
+func TestCloseAnswersMigrate(t *testing.T) {
+	socketDir = t.TempDir()
+	var srv *Server
+	closed := make(chan struct{})
+	srv, err := Serve(context.Background(), "ns", "c1", Handlers{
+		Migrate: func(context.Context, string, string, migrate.Options) (migrate.Result, error) {
+			go func() { srv.Close(); close(closed) }()
+			time.Sleep(100 * time.Millisecond)
+			return migrate.Result{Downtime: time.Millisecond}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := NewClient("ns", "c1").Migrate(context.Background(), "http://target", "t", migrate.Options{})
+	if err != nil || res.Downtime != time.Millisecond {
+		t.Fatalf("migrate %+v, %v", res, err)
+	}
+	<-closed
+}
+
 func TestControlWithoutTimeTravel(t *testing.T) {
 	socketDir = t.TempDir()
 	srv, err := Serve(context.Background(), "ns", "c2", Handlers{})
