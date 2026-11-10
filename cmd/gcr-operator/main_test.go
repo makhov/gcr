@@ -39,9 +39,9 @@ func TestDecide(t *testing.T) {
 	}{
 		"not opted in":          {nil, true, false, ""},
 		"opted in":              {map[string]string{annotationOptIn: "true"}, false, true, "migrating"},
-		"moving":                {map[string]string{annotationOptIn: "true", annotationState: fresh}, false, false, ""},
-		"left by another":       {map[string]string{annotationOptIn: "true", annotationState: stale}, true, false, "failed"},
-		"failed: evicted":       {map[string]string{annotationOptIn: "true", annotationState: "failed: x"}, true, false, ""},
+		"moving":                {map[string]string{annotationOptIn: "true", kubemigrate.AnnotationState: fresh}, false, false, ""},
+		"left by another":       {map[string]string{annotationOptIn: "true", kubemigrate.AnnotationState: stale}, true, false, "failed"},
+		"failed: evicted":       {map[string]string{annotationOptIn: "true", kubemigrate.AnnotationState: "failed: x"}, true, false, ""},
 		"opted in, not movable": {map[string]string{annotationOptIn: "true", "unused": ""}, true, false, "failed"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -60,8 +60,8 @@ func TestDecide(t *testing.T) {
 				t.Errorf("refused with %d, want 429 (drain retries it)", resp.Result.Code)
 			}
 			got, _ := cs.CoreV1().Pods("default").Get(context.Background(), "p", metav1.GetOptions{})
-			if tc.state != "" && !strings.HasPrefix(got.Annotations[annotationState], tc.state) {
-				t.Errorf("state %q, want %s…", got.Annotations[annotationState], tc.state)
+			if tc.state != "" && !strings.HasPrefix(got.Annotations[kubemigrate.AnnotationState], tc.state) {
+				t.Errorf("state %q, want %s…", got.Annotations[kubemigrate.AnnotationState], tc.state)
 			}
 		})
 	}
@@ -114,7 +114,7 @@ func TestDecideHandover(t *testing.T) {
 		"its operator finished":    {[]*corev1.Pod{operatorPod("op-old", corev1.PodFailed, false)}, true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			objs := []runtime.Object{pod(map[string]string{annotationOptIn: "true", annotationState: "migrating " + fresh + " by op-old"})}
+			objs := []runtime.Object{pod(map[string]string{annotationOptIn: "true", kubemigrate.AnnotationState: "migrating " + fresh + " by op-old"})}
 			for _, p := range tc.others {
 				objs = append(objs, p)
 			}
@@ -126,7 +126,7 @@ func TestDecideHandover(t *testing.T) {
 				t.Fatalf("started %v, allowed %v; want started %v, refused", started, resp.Allowed, tc.started)
 			}
 			got, _ := cs.CoreV1().Pods("default").Get(context.Background(), "p", metav1.GetOptions{})
-			if s := got.Annotations[annotationState]; tc.started && !strings.HasSuffix(s, " by op-new") {
+			if s := got.Annotations[kubemigrate.AnnotationState]; tc.started && !strings.HasSuffix(s, " by op-new") {
 				t.Errorf("taken over, but marked %q", s)
 			}
 		})
@@ -149,7 +149,7 @@ func TestDecideHandover(t *testing.T) {
 		if resp := o.decide(context.Background(), own); resp.Allowed {
 			t.Fatal("evicted before the pod on its node moved")
 		}
-		mine.Annotations[annotationState] = "failed: x"
+		mine.Annotations[kubemigrate.AnnotationState] = "failed: x"
 		if _, err := cs.CoreV1().Pods("default").Update(context.Background(), mine, metav1.UpdateOptions{}); err != nil {
 			t.Fatal(err)
 		}
@@ -209,8 +209,8 @@ func TestDecideStatefulSet(t *testing.T) {
 				t.Errorf("refused with %d, want %d", resp.Result.Code, tc.code)
 			}
 			got, _ := cs.CoreV1().Pods("default").Get(context.Background(), "p", metav1.GetOptions{})
-			if tc.wantState != "" && !strings.HasPrefix(got.Annotations[annotationState], tc.wantState) {
-				t.Errorf("state %q, want %s…", got.Annotations[annotationState], tc.wantState)
+			if tc.wantState != "" && !strings.HasPrefix(got.Annotations[kubemigrate.AnnotationState], tc.wantState) {
+				t.Errorf("state %q, want %s…", got.Annotations[kubemigrate.AnnotationState], tc.wantState)
 			}
 		})
 	}

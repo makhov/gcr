@@ -41,6 +41,10 @@ const (
 	// Linux and cgo. kubemigrate_linux_test.go checks they agree.
 	annotationMigrateIn    = "gcr.dev/migrate-in"
 	annotationMigrateToken = "gcr.dev/migrate-token"
+	// AnnotationState is gcr-operator's, on a pod it moves for an
+	// eviction: "migrating <since>" or "failed: why". Not the target's:
+	// it's another pod.
+	AnnotationState = "gcr.dev/migration"
 	// AnnotationContainer on a pod with several containers names the one
 	// a migration moves (migrate.AnnotationContainer).
 	AnnotationContainer  = "gcr.dev/migrate-container"
@@ -667,6 +671,7 @@ func targetPod(src *corev1.Pod, node, addr, token string, inf info) *corev1.Pod 
 	for k, v := range src.Annotations {
 		dst.Annotations[k] = v
 	}
+	delete(dst.Annotations, AnnotationState)
 	dst.Annotations[annotationMigrateIn] = addr
 	dst.Annotations[annotationMigrateToken] = token
 	if inf.IDBase != 0 {
