@@ -524,27 +524,38 @@ func (o *operator) shutdownNode(node string) {
 	}
 	var live []*corev1.Pod
 	var liveUIDs, checkpointUIDs []string
+	// A pod a drain or a Migration moves already is left to that move.
+	// The others are restored from a checkpoint only if their
+	// migrations fail.
+	o.mu.Lock()
 	for i := range pods.Items {
 		p := &pods.Items[i]
 		if p.Annotations[annotationOptIn] != "true" || p.DeletionTimestamp != nil {
 			continue
 		}
 		if _, err := kubemigrate.Movable(p, ""); err == nil {
-			live = append(live, p)
-			liveUIDs = append(liveUIDs, string(p.UID))
+			if key := p.Namespace + "/" + p.Name; !o.moving[key] {
+				o.moving[key] = true
+				o.restoring[p.UID] = nil
+				live = append(live, p)
+				liveUIDs = append(liveUIDs, string(p.UID))
+			}
 		} else {
 			checkpointUIDs = append(checkpointUIDs, string(p.UID))
 		}
 	}
+	o.mu.Unlock()
 	if len(live) == 0 && len(checkpointUIDs) == 0 {
 		return
 	}
-	// Restored from a checkpoint only if their migrations fail.
-	o.mu.Lock()
-	for _, p := range live {
-		o.restoring[p.UID] = nil
+	notMoving := func(pods []*corev1.Pod) {
+		o.mu.Lock()
+		for _, p := range pods {
+			delete(o.restoring, p.UID)
+			delete(o.moving, p.Namespace+"/"+p.Name)
+		}
+		o.mu.Unlock()
 	}
-	o.mu.Unlock()
 	plan := func(how string, uids []string) error {
 		if len(uids) == 0 {
 			return nil
@@ -557,18 +568,15 @@ func (o *operator) shutdownNode(node string) {
 	}
 	if err := plan("-live", liveUIDs); err != nil {
 		log.Printf("node %s shuts down, and its pods are checkpointed, not migrated live: %v", node, err)
-		o.mu.Lock()
-		for _, p := range live {
-			delete(o.restoring, p.UID)
-		}
-		o.mu.Unlock()
+		notMoving(live)
 		return
 	}
 	log.Printf("node %s shuts down: migrating %d pods live, %d through checkpoints", node, len(live), len(checkpointUIDs))
-	for _, p := range live {
+	for i, p := range live {
 		o.mu.Lock()
 		if o.stopping {
 			o.mu.Unlock()
+			notMoving(live[i:])
 			return
 		}
 		o.moves.Add(1)
@@ -580,8 +588,13 @@ func (o *operator) shutdownNode(node string) {
 // moveLive migrates pod off its node, shutting down, as a drain does; if
 // it cannot, the pod is checkpointed there and restored from the registry.
 func (o *operator) moveLive(pod *corev1.Pod) {
-	defer o.moves.Done()
 	key := pod.Namespace + "/" + pod.Name
+	defer func() {
+		o.mu.Lock()
+		delete(o.moving, key)
+		o.mu.Unlock()
+		o.moves.Done()
+	}()
 	opts := o.opts
 	opts.Run = o.execRun
 	opts.Log = func(format string, args ...any) { log.Printf(key+": "+format, args...) }
