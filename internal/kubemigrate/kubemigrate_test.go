@@ -113,7 +113,9 @@ func TestMigrateUnscheduled(t *testing.T) {
 }
 
 func TestTargetPod(t *testing.T) {
-	src := running(func(p *corev1.Pod) { p.Annotations = map[string]string{annotationHostUsers: "false", "keep": "me"} })
+	src := running(func(p *corev1.Pod) {
+		p.Annotations = map[string]string{annotationHostUsers: "false", "keep": "me", AnnotationState: "migrating 2026-11-10T10:00:00Z by op"}
+	})
 	dst := targetPod(src, "", "0.0.0.0:17001", "tok", info{IDBase: 65536})
 	if *dst.Spec.RuntimeClassName != RuntimeClass || dst.Spec.NodeName != "" {
 		t.Fatalf("runtime class %q, node %q", *dst.Spec.RuntimeClassName, dst.Spec.NodeName)
@@ -123,6 +125,11 @@ func TestTargetPod(t *testing.T) {
 		if dst.Annotations[k] != want {
 			t.Errorf("annotation %s = %q, want %q", k, dst.Annotations[k], want)
 		}
+	}
+	// Its mark of a move under way would make the target's next eviction
+	// look like one already moving.
+	if _, ok := dst.Annotations[AnnotationState]; ok {
+		t.Errorf("the target carries the source's %s", AnnotationState)
 	}
 	terms := dst.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
 	if len(terms) != 1 || terms[0].MatchExpressions[0].Values[0] != "n1" || terms[0].MatchExpressions[0].Operator != corev1.NodeSelectorOpNotIn {

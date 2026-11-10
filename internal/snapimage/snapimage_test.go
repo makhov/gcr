@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/v2/core/mount"
+
+	"github.com/makhov/gcr/internal/userns"
 	"golang.org/x/sys/unix"
 )
 
@@ -89,6 +91,60 @@ func TestFind(t *testing.T) {
 	}
 	if got := Find(overlay(top, mid)); got != "" {
 		t.Errorf("Find under a layer that hides it = %q", got)
+	}
+
+	// Links out of the snapshot, to another pod's checkpoint on the node,
+	// make it no snapshot: CRIU would follow them as root.
+	victim := filepath.Join(low, Dir)
+	for name, link := range map[string]func(d string) error{
+		"the directory": func(d string) error { return os.Symlink(victim, filepath.Join(d, Dir)) },
+		"its images": func(d string) error {
+			mkSnapshot(t, d)
+			if err := os.Remove(filepath.Join(d, Dir, "images")); err != nil {
+				return err
+			}
+			return os.Symlink(filepath.Join(victim, "images"), filepath.Join(d, Dir, "images"))
+		},
+		"a file in its images": func(d string) error {
+			mkSnapshot(t, d)
+			return os.Symlink(filepath.Join(victim, InfoFile), filepath.Join(d, Dir, "images", "pages-1.img"))
+		},
+		"its user namespace key": func(d string) error {
+			mkSnapshot(t, d)
+			return os.Symlink(filepath.Join(victim, InfoFile), filepath.Join(d, Dir, userns.KeyFile))
+		},
+	} {
+		d := t.TempDir()
+		if err := link(d); err != nil {
+			t.Fatal(err)
+		}
+		if got := Find(overlay(d)); got != "" {
+			t.Errorf("%s linking out: Find = %q", name, got)
+		}
+	}
+	// Links between its images are its own.
+	d := t.TempDir()
+	mkSnapshot(t, d)
+	for _, round := range []string{"1", "2"} {
+		if err := os.Mkdir(filepath.Join(d, Dir, "images", round), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink("../1", filepath.Join(d, Dir, "images", "2", "parent")); err != nil {
+		t.Fatal(err)
+	}
+	if got := Find(overlay(d)); got != filepath.Join(d, Dir) {
+		t.Errorf("a link between its images: Find = %q", got)
+	}
+}
+
+func mkSnapshot(t *testing.T, d string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(d, Dir, "images"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(d, Dir, InfoFile), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

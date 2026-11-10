@@ -64,9 +64,6 @@ const (
 	// annotationOptIn on a pod (from its template) asks for a migration
 	// instead of an eviction.
 	annotationOptIn = "gcr.dev/migrate-on-evict"
-	// annotationState is the operator's own, on the pod being moved:
-	// "migrating <since>" or "failed: why".
-	annotationState = "gcr.dev/migration"
 	// staleAfter is when a pod's mark of a migration under way, left by a
 	// migrator that went away, is taken for failed: longer than a
 	// migration's waits (kubemigrate.Options.Timeout), together.
@@ -277,7 +274,7 @@ func (o *operator) decide(ctx context.Context, req *admissionv1.AdmissionRequest
 		return allow
 	}
 	key := req.Namespace + "/" + req.Name
-	state := pod.Annotations[annotationState]
+	state := pod.Annotations[kubemigrate.AnnotationState]
 	switch {
 	case strings.HasPrefix(state, "failed"):
 		return allow // as without gcr: it restarts elsewhere
@@ -399,7 +396,7 @@ func (o *operator) waitingOnNode(ctx context.Context) int {
 	for i := range pods.Items {
 		p := &pods.Items[i]
 		if p.Annotations[annotationOptIn] != "true" || p.DeletionTimestamp != nil ||
-			strings.HasPrefix(p.Annotations[annotationState], "failed") {
+			strings.HasPrefix(p.Annotations[kubemigrate.AnnotationState], "failed") {
 			continue
 		}
 		if _, err := o.movable(p); err == nil {
@@ -955,7 +952,7 @@ func (o *operator) gone(ctx context.Context, name string) bool {
 }
 
 func (o *operator) mark(ctx context.Context, pod *corev1.Pod, state string) {
-	patch, _ := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]string{annotationState: state}}})
+	patch, _ := json.Marshal(map[string]any{"metadata": map[string]any{"annotations": map[string]string{kubemigrate.AnnotationState: state}}})
 	if _, err := o.cs.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
 		log.Printf("%s/%s: marking it %q: %v", pod.Namespace, pod.Name, state, err)
 	}

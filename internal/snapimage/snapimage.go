@@ -38,6 +38,8 @@ import (
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content"
 
+	"github.com/makhov/gcr/internal/userns"
+
 	"github.com/makhov/gcr/internal/container"
 	"github.com/makhov/gcr/internal/snapshot/registry"
 )
@@ -459,14 +461,51 @@ func Find(rootfs []mount.Mount) string {
 	}
 	for _, l := range layers {
 		d := filepath.Join(l, Dir)
-		if _, err := os.Lstat(d); err == nil {
-			if _, err := os.Stat(filepath.Join(d, InfoFile)); err == nil {
+		if fi, err := os.Lstat(d); err == nil {
+			if fi.IsDir() && contained(d) {
 				return d
 			}
-			return "" // hidden by a layer above, or not one of gcr's
+			// Hidden by a layer above, not one of gcr's, or linking out.
+			return ""
 		}
 	}
 	return ""
+}
+
+// contained says whether the snapshot in d keeps to d: its info and key
+// regular files, its images a directory without links out of it. CRIU
+// reads them as root on the
+// node: through a link, an image could restore another pod's checkpoint,
+// or take its user namespace. Its writable layer's links are the
+// container's own, followed in it.
+func contained(d string) bool {
+	for _, f := range []string{InfoFile, userns.KeyFile} {
+		fi, err := os.Lstat(filepath.Join(d, f))
+		if f == userns.KeyFile && errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil || !fi.Mode().IsRegular() {
+			return false
+		}
+	}
+	images := filepath.Join(d, "images")
+	if fi, err := os.Lstat(images); err != nil || !fi.IsDir() {
+		return false
+	}
+	return filepath.WalkDir(images, func(p string, e fs.DirEntry, err error) error {
+		if err != nil || e.Type()&fs.ModeSymlink == 0 {
+			return err
+		}
+		to, err := os.Readlink(p)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(images, filepath.Join(filepath.Dir(p), to))
+		if filepath.IsAbs(to) || err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+			return fs.ErrPermission
+		}
+		return nil
+	}) == nil
 }
 
 // ReadInfo reads the InfoFile in a state directory.

@@ -41,6 +41,10 @@ const (
 	// Linux and cgo. kubemigrate_linux_test.go checks they agree.
 	annotationMigrateIn    = "gcr.dev/migrate-in"
 	annotationMigrateToken = "gcr.dev/migrate-token"
+	// AnnotationState is gcr-operator's, on a pod it moves for an
+	// eviction: "migrating <since>" or "failed: why". Not the target's:
+	// it's another pod.
+	AnnotationState = "gcr.dev/migration"
 	// AnnotationContainer on a pod with several containers names the one
 	// a migration moves (migrate.AnnotationContainer).
 	AnnotationContainer  = "gcr.dev/migrate-container"
@@ -273,7 +277,14 @@ echo "$out"; exit 1`, o.GCR, containerdNamespace, mode, id, target)
 		// the meantime, cost the least.
 		log("waiting for %s to be Ready", dst.Name)
 		if err := waitReady(ctx, cs, ns, dst.Name, o.Timeout); err != nil {
-			return res, fmt.Errorf("the pod runs in %s now, but it is not Ready: %w", dst.Name, err)
+			// Handed over all the same, or it runs on with no owner while
+			// its controller starts a cold pod. Once the source is not
+			// Ready either, the one costing less to delete goes: the
+			// source.
+			log("%s is not Ready (%v): handing it over once %s isn't either", dst.Name, err, name)
+			if err := waitNotReady(ctx, cs, ns, name, o.Timeout); err != nil {
+				return res, fmt.Errorf("the pod runs in %s now, but neither it is Ready nor %s isn't: %w", dst.Name, name, err)
+			}
 		}
 		if ownedBy(src, "Job") {
 			// A Job of two pods deletes the more recently Ready one,
@@ -658,6 +669,7 @@ func targetPod(src *corev1.Pod, node, addr, token string, inf info) *corev1.Pod 
 	for k, v := range src.Annotations {
 		dst.Annotations[k] = v
 	}
+	delete(dst.Annotations, AnnotationState)
 	dst.Annotations[annotationMigrateIn] = addr
 	dst.Annotations[annotationMigrateToken] = token
 	if inf.IDBase != 0 {

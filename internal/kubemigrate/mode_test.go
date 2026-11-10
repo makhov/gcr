@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -56,5 +58,47 @@ func TestMigratePostCopy(t *testing.T) {
 		if res.Downtime != want.Downtime || res.MemoryMoved != want.MemoryMoved || res.Node != "n2" {
 			t.Errorf("post-copy %v: %+v", postCopy, res)
 		}
+	}
+}
+
+// A ReplicaSet's pod whose target never gets Ready (a readiness probe on a
+// backend that is down) is handed over all the same, once the source is
+// not Ready either: otherwise the target runs on without an owner while
+// the ReplicaSet starts a cold pod.
+func TestMigrateHandsOverNotReady(t *testing.T) {
+	yes := true
+	rs := &appsv1.ReplicaSet{ObjectMeta: metav1.ObjectMeta{Name: "rs", Namespace: "default", UID: "rs-uid"},
+		Spec: appsv1.ReplicaSetSpec{Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "x"}}}}
+	src := running(func(p *corev1.Pod) {
+		p.OwnerReferences = []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "rs", UID: "rs-uid", Controller: &yes}}
+	})
+	cs := fake.NewClientset(src, rs)
+	cs.PrependReactor("create", "pods", func(a k8stesting.Action) (bool, runtime.Object, error) {
+		p := a.(k8stesting.CreateAction).GetObject().(*corev1.Pod)
+		p.Spec.NodeName, p.Status.HostIP, p.Status.Phase = "n2", "10.0.0.2", corev1.PodRunning
+		p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
+		return false, nil, nil
+	})
+	res, err := Migrate(context.Background(), cs, "default", "p", Options{
+		Timeout: time.Second,
+		Run: func(_ context.Context, _, what string, _ map[string]string, _ ...string) (string, error) {
+			if what == "info" {
+				return "{}", nil
+			}
+			return "downtime: 100ms\n", nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst, err := cs.CoreV1().Pods("default").Get(context.Background(), res.Target, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dst.OwnerReferences) != 1 || dst.OwnerReferences[0].Name != "rs" || dst.Labels["app"] != "x" {
+		t.Errorf("the target wasn't handed over: owners %v, labels %v", dst.OwnerReferences, dst.Labels)
+	}
+	if _, err := cs.CoreV1().Pods("default").Get(context.Background(), "p", metav1.GetOptions{}); err == nil {
+		t.Error("the source is still there")
 	}
 }
