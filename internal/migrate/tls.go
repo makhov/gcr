@@ -64,6 +64,10 @@ func (t TLS) pool() (*x509.CertPool, error) {
 // serverConfig is the target's: nil when it serves plain HTTP.
 func (t TLS) serverConfig() (*tls.Config, error) {
 	if t.Cert == "" {
+		if t.CA != "" {
+			// Its sources expect TLS: plain HTTP would only fail them.
+			return nil, fmt.Errorf("MigrationTLS: a target needs Cert and Key, not CA only: %w", errdefs.ErrInvalidArgument)
+		}
 		return nil, nil
 	}
 	certs, err := t.certificates()
