@@ -267,7 +267,7 @@ func writeUpper(tw *tar.Writer, dir string) error {
 		if err := unix.Lstat(p, &st); err != nil {
 			return err
 		}
-		xattrs, err := readXattrs(p)
+		xattrs, err := container.Xattrs(p)
 		if err != nil {
 			return err
 		}
@@ -410,36 +410,6 @@ func copyFile(w io.Writer, p string) error {
 	defer f.Close()
 	_, err = io.Copy(w, f)
 	return err
-}
-
-func readXattrs(p string) (map[string]string, error) {
-	size, err := unix.Llistxattr(p, nil)
-	if err != nil || size == 0 {
-		if errors.Is(err, unix.ENOTSUP) {
-			err = nil
-		}
-		return nil, err
-	}
-	buf := make([]byte, size)
-	if size, err = unix.Llistxattr(p, buf); err != nil {
-		return nil, err
-	}
-	out := map[string]string{}
-	for _, name := range strings.Split(strings.TrimRight(string(buf[:size]), "\x00"), "\x00") {
-		if name == "" {
-			continue
-		}
-		n, err := unix.Lgetxattr(p, name, nil)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %s: %w", p, name, err)
-		}
-		v := make([]byte, n)
-		if n, err = unix.Lgetxattr(p, name, v); err != nil {
-			return nil, fmt.Errorf("%s: %s: %w", p, name, err)
-		}
-		out[name] = string(v[:n])
-	}
-	return out, nil
 }
 
 // Find returns the state directory (Dir) of the snapshot the rootfs
