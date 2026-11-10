@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -352,5 +354,34 @@ func TestShutdownRestoreOwned(t *testing.T) {
 	o.seen(stopped, false)
 	if resp := o.steer(ctx, created()); resp.Patch != nil {
 		t.Fatalf("steered with an older policy: %s", resp.Patch)
+	}
+}
+
+// Every operator pod serves the one certificate the webhooks trust.
+func TestSharedCert(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewSimpleClientset()
+	const host = "gcr-operator.gcr-system.svc"
+	cert, ca, err := sharedCert(ctx, cs, "gcr-system", "gcr-operator-tls", host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert2, ca2, err := sharedCert(ctx, cs, "gcr-system", "gcr-operator-tls", host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(ca, ca2) || !bytes.Equal(cert.Certificate[0], cert2.Certificate[0]) {
+		t.Fatal("a second pod made a certificate of its own")
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(ca) {
+		t.Fatal("no CA in the Secret")
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{DNSName: host, Roots: roots}); err != nil {
+		t.Fatal(err)
 	}
 }

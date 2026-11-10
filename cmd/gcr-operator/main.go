@@ -103,7 +103,7 @@ func main() {
 			log.Fatalf("%v (or pass -image)", err)
 		}
 	}
-	cert, ca, err := selfSigned(*service + "." + *namespace + ".svc")
+	cert, ca, err := sharedCert(ctx, cs, *namespace, *service+"-tls", *service+"."+*namespace+".svc")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -967,11 +967,39 @@ func tooMany(pod *corev1.Pod, why string) *admissionv1.AdmissionResponse {
 	}}
 }
 
-// selfSigned makes a CA and a certificate for host signed by it.
-func selfSigned(host string) (tls.Certificate, []byte, error) {
+// sharedCert is the webhook's certificate for host, kept in the Secret
+// name so that every gcr-operator pod serves the same one: a pod with a CA
+// of its own would set the webhooks to trust it, the API server would fail
+// the handshake with the others, and, the webhooks failing open, drains
+// would evict pods instead of moving them. The first pod makes it.
+func sharedCert(ctx context.Context, cs kubernetes.Interface, ns, name, host string) (tls.Certificate, []byte, error) {
+	secrets := cs.CoreV1().Secrets(ns)
+	sec, err := secrets.Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		var certPEM, keyPEM, ca []byte
+		if certPEM, keyPEM, ca, err = selfSigned(host); err != nil {
+			return tls.Certificate{}, nil, err
+		}
+		sec = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}, Type: corev1.SecretTypeTLS,
+			Data: map[string][]byte{corev1.TLSCertKey: certPEM, corev1.TLSPrivateKeyKey: keyPEM, "ca.crt": ca}}
+		if _, err = secrets.Create(ctx, sec, metav1.CreateOptions{}); apierrors.IsAlreadyExists(err) {
+			// Another pod made it first: serve its.
+			sec, err = secrets.Get(ctx, name, metav1.GetOptions{})
+		}
+	}
+	if err != nil {
+		return tls.Certificate{}, nil, fmt.Errorf("secret %s/%s: %w", ns, name, err)
+	}
+	cert, err := tls.X509KeyPair(sec.Data[corev1.TLSCertKey], sec.Data[corev1.TLSPrivateKeyKey])
+	return cert, sec.Data["ca.crt"], err
+}
+
+// selfSigned makes a CA and a certificate for host signed by it, in PEM:
+// the certificate, its key, and the CA.
+func selfSigned(host string) (certPEM, keyPEM, ca []byte, err error) {
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return tls.Certificate{}, nil, err
+		return nil, nil, nil, err
 	}
 	now := time.Now()
 	caTmpl := &x509.Certificate{
@@ -981,11 +1009,11 @@ func selfSigned(host string) (tls.Certificate, []byte, error) {
 	}
 	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
 	if err != nil {
-		return tls.Certificate{}, nil, err
+		return nil, nil, nil, err
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return tls.Certificate{}, nil, err
+		return nil, nil, nil, err
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: host}, DNSNames: []string{host},
@@ -995,9 +1023,14 @@ func selfSigned(host string) (tls.Certificate, []byte, error) {
 	caCert, _ := x509.ParseCertificate(caDER)
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &key.PublicKey, caKey)
 	if err != nil {
-		return tls.Certificate{}, nil, err
+		return nil, nil, nil, err
 	}
-	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key},
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}),
 		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}), nil
 }
 
