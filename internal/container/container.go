@@ -640,7 +640,7 @@ func (c *Container) callerNetwork() bool {
 // restore restores the container from images. With freshNetwork, its
 // network namespace is restored empty but for its loopback, for the caller
 // to set up (callerNetwork).
-func (c *Container) restore(images string, freshNetwork bool) error {
+func (c *Container) restore(images string, freshNetwork bool) (retErr error) {
 	c.trackedSince = ""
 	// The images may come from elsewhere (a snapshot, a migration): their
 	// user namespace must be this container's.
@@ -751,6 +751,14 @@ func (c *Container) restore(images string, freshNetwork bool) error {
 		c.io.detach() // restore requires pipes, never a terminal
 		return fmt.Errorf("restore (criu log in %s): %w%s", work, err, criuErrors(filepath.Join(work, "restore.log")))
 	}
+	// The processes run from here: a step failing must not leave them
+	// running, untracked, in a container that failed to start.
+	defer func() {
+		if retErr != nil {
+			_ = proc.Signal(unix.SIGKILL)
+			_, _ = proc.Wait()
+		}
+	}()
 	restored := time.Now()
 	inCRIU, gaps := criuTimes(filepath.Join(work, "restore.log"), 3)
 	defer func() {
