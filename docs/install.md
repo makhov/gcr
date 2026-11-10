@@ -61,8 +61,8 @@ and its CUDA plugin inside it.
   `conf.d`, gcr makes it, keeping the old file as `config.toml.gcr-backup`;
 - with `-docker`, adds runtime `gcr` to `/etc/docker/daemon.json`
   ([Docker](docker.md));
-- restarts containerd, and Docker if it changed it. Running containers
-  carry on. `-no-restart` leaves the restart to you;
+- restarts containerd, and reloads Docker if it changed it. Running
+  containers carry on. `-no-restart` leaves the restart to you;
 - runs `gcr doctor`.
 
 Containers keep using runc unless you ask for gcr, so installing it

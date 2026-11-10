@@ -8,13 +8,13 @@ snapshots, forks and time travel work on the containers Docker runs.
 ## Setting it up
 
 `sudo gcr setup -docker` does all of this: it registers the runtime with
-containerd and with Docker, and restarts both. The rest of this section
+containerd and with Docker, restarts containerd and reloads dockerd. The rest of this section
 is what it writes, for when you would rather do it yourself.
 
 dockerd has to use the host's containerd, the one gcr is installed for
 (Docker's static binaries bring a containerd of their own; packages use
 the system's). Register the runtime in `/etc/docker/daemon.json` and
-restart dockerd:
+reload dockerd (`systemctl reload docker`):
 
 ```json
 {

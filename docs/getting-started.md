@@ -26,7 +26,7 @@ sudo gcr setup -docker
 
 The script downloads the latest release, checks it, and puts it in
 `/usr/local/bin`. `gcr setup` installs the `gcr` command and its shim, registers the
-runtime with containerd (and, with `-docker`, with Docker), restarts both,
+runtime with containerd (and, with `-docker`, with Docker), restarts containerd and reloads Docker,
 and then reports on the host:
 
 ```
@@ -36,7 +36,7 @@ installed /var/lib/gcr/bin/criu
 wrote /etc/containerd/conf.d/gcr.toml
 restarted containerd (running containers carry on)
 registered runtime gcr in /etc/docker/daemon.json
-restarted docker
+reloaded docker
 
 ok   kernel          6.17.0-40-generic
 ok   cgroup v2       unified hierarchy

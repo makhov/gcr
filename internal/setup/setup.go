@@ -182,11 +182,13 @@ func Run(o Options) error {
 		if err != nil {
 			return fmt.Errorf("docker: %w", err)
 		}
+		// dockerd takes new runtimes on a reload; a restart would stop
+		// its containers (without live-restore).
 		if changed && !o.NoRestart {
-			if err := restart("docker"); err != nil {
-				return err
+			if out, err := exec.Command("systemctl", "reload", "docker").CombinedOutput(); err != nil {
+				return fmt.Errorf("reload docker: %w: %s (reload it yourself, or rerun with -no-restart)", err, bytes.TrimSpace(out))
 			}
-			say("restarted docker")
+			say("reloaded docker")
 		}
 	}
 	return nil
@@ -288,7 +290,8 @@ func containerdMajor(binary string) int {
 }
 
 var (
-	importsLine = regexp.MustCompile(`(?m)^\s*imports\s*=\s*\[(.*)\]`)
+	// The list may span lines, and end in a comma.
+	importsLine = regexp.MustCompile(`(?m)^[ \t]*imports[ \t]*=[ \t]*\[([^\]]*)\]`)
 	versionLine = regexp.MustCompile(`(?m)^\s*version\s*=\s*(\d+)`)
 )
 
@@ -361,11 +364,11 @@ func registerContainerd(config string, h handler, major int, say func(string, ..
 				return changed, undo, nil
 			}
 			// Add conf.d to the imports there are.
-			list := strings.TrimSpace(string(m[1]))
+			list := strings.TrimRight(strings.TrimSpace(string(m[1])), ",")
 			if list != "" {
 				list += ", "
 			}
-			next = importsLine.ReplaceAll(b, []byte(fmt.Sprintf("imports = [%s'%s']", list, pattern)))
+			next = importsLine.ReplaceAllLiteral(b, []byte(fmt.Sprintf("imports = [%s'%s']", list, pattern)))
 		} else {
 			// Top-level keys go before the first table.
 			line := []byte(fmt.Sprintf("imports = ['%s']\n", pattern))
