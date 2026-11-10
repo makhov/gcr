@@ -18,9 +18,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/checkpoint-restore/go-criu/v8/stats"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -109,7 +111,7 @@ func Send(ctx context.Context, src Source, target, token string, t TLS, work str
 	}
 	c := &client{
 		base: u, token: token, idBase: src.IDBase(), layers: src.Layers(),
-		http: &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConf}},
+		http: &http.Client{Transport: &http.Transport{TLSClientConfig: tlsConf, DialContext: dialer.DialContext}},
 	}
 	defer c.http.CloseIdleConnections()
 	// Once the target runs the container, the source must never run again:
@@ -318,6 +320,26 @@ type client struct {
 	idBase uint32
 	layers []string
 	http   *http.Client
+}
+
+// peerTimeout is how long the target may leave what was sent unanswered
+// before the connection fails: a target whose node went away must not
+// keep the source waiting (and, once frozen, frozen) for the kernel's
+// quarter of an hour. Requests have no deadline of their own: rounds and
+// the restore take as long as the memory does.
+const peerTimeout = 30 * time.Second
+
+var dialer = &net.Dialer{
+	Timeout: peerTimeout, KeepAlive: peerTimeout / 2,
+	Control: func(_, _ string, rc syscall.RawConn) error {
+		var err error
+		if cerr := rc.Control(func(fd uintptr) {
+			err = unix.SetsockoptInt(int(fd), unix.IPPROTO_TCP, unix.TCP_USER_TIMEOUT, int(peerTimeout.Milliseconds()))
+		}); cerr != nil {
+			return cerr
+		}
+		return err
+	},
 }
 
 func (c *client) header(req *http.Request) {
