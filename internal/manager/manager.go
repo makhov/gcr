@@ -123,7 +123,8 @@ func (m *manager) Start(ctx context.Context, opts *bootapi.BootstrapParams) (_ *
 }
 
 // Stop cleans up after a shim that is gone: kills what is left of the
-// container, removes its libcontainer state and unmounts its rootfs.
+// container, removes its libcontainer state and unmounts its rootfs and
+// volumes.
 func (m *manager) Stop(ctx context.Context, id string) (shim.StopStatus, error) {
 	ns, err := namespaces.NamespaceRequired(ctx)
 	if err != nil {
@@ -150,8 +151,13 @@ func (m *manager) Stop(ctx context.Context, id string) (shim.StopStatus, error) 
 	default:
 		return shim.StopStatus{}, err
 	}
-	if err := mount.UnmountRecursive(filepath.Join(bundle, "rootfs"), 0); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return shim.StopStatus{}, fmt.Errorf("unmount rootfs: %w", err)
+	// And the volumes exposed under mounts/ for a container in a user
+	// namespace (userns.ExposeMounts): containerd deletes the bundle next,
+	// which would delete the volumes' files through them.
+	for _, dir := range []string{"rootfs", "mounts"} {
+		if err := mount.UnmountRecursive(filepath.Join(bundle, dir), 0); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return shim.StopStatus{}, fmt.Errorf("unmount %s: %w", dir, err)
+		}
 	}
 	return shim.StopStatus{
 		ExitedAt:   time.Now(),
