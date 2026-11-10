@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/containerd/errdefs"
 
@@ -198,7 +199,13 @@ func httpError(w http.ResponseWriter, err error) {
 	http.Error(w, err.Error(), code)
 }
 
+// Close lets the requests in flight answer first, for a while: a
+// migration's container exits, and is deleted, as it hands over, while
+// its request still has the result to send.
 func (s *Server) Close() {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = s.srv.Shutdown(ctx)
 	_ = s.srv.Close()
 	_ = os.Remove(s.path)
 }
