@@ -1068,7 +1068,16 @@ func (c *Container) Rewind(ctx context.Context, dir string) error {
 		c.mu.Unlock()
 		return fmt.Errorf("stop processes: %w", err)
 	}
-	<-replaced
+	// Processes that exited on their own just before were taken for an
+	// exit, not a rewind's kill: nothing closes replaced then.
+	select {
+	case <-replaced:
+	case <-c.exited:
+		c.mu.Lock()
+		c.replacing = false
+		c.mu.Unlock()
+		return fmt.Errorf("rewind: the container exited: %w", errdefs.ErrFailedPrecondition)
+	}
 
 	// From here on the old processes are gone; a failure leaves the task
 	// stopped, and containerd is told it exited.
