@@ -282,7 +282,14 @@ echo "$out"; exit 1`, o.GCR, containerdNamespace, mode, id, target)
 		// the meantime, cost the least.
 		log("waiting for %s to be Ready", dst.Name)
 		if err := waitReady(ctx, cs, ns, dst.Name, o.Timeout); err != nil {
-			return res, fmt.Errorf("the pod runs in %s now, but it is not Ready: %w", dst.Name, err)
+			// Handed over all the same, or it runs on with no owner while
+			// its controller starts a cold pod. Once the source is not
+			// Ready either, the one costing less to delete goes: the
+			// source.
+			log("%s is not Ready (%v): handing it over once %s isn't either", dst.Name, err, name)
+			if err := waitNotReady(ctx, cs, ns, name, o.Timeout); err != nil {
+				return res, fmt.Errorf("the pod runs in %s now, but neither it is Ready nor %s isn't: %w", dst.Name, name, err)
+			}
 		}
 		if ownedBy(src, "Job") {
 			// A Job of two pods deletes the more recently Ready one,
