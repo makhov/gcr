@@ -6,7 +6,7 @@ VM  := gcr
 # Run a command in the dev VM, in the same directory as here.
 IN_VM = limactl shell --workdir $(CURDIR) $(VM) --
 
-.PHONY: build static install vet test test-e2e test-k8s test-install vm criu bpf release release-publish image manifests docs docs-serve-dev
+.PHONY: build static install vet test test-e2e test-k8s test-install test-k8s-migrate vm criu bpf release release-publish image manifests docs docs-serve-dev
 
 build:
 	CGO_ENABLED=1 go build -tags $(TAGS) -ldflags '$(VERSION_LDFLAGS)' -o $(BIN) ./cmd/containerd-shim-gcr-v2
@@ -105,6 +105,11 @@ image:
 # The installer DaemonSet on a one-node k0da cluster (hack/e2e-install.sh).
 test-install:
 	DOCKER="$(DOCKER)" hack/e2e-install.sh
+
+# gcr-operator moving pods on a three-node k0da cluster, installed by the
+# installer DaemonSet (hack/e2e-k8s-migrate.sh).
+test-k8s-migrate:
+	DOCKER="$(DOCKER)" hack/e2e-k8s-migrate.sh
 
 # The documentation site (mkdocs.yml), into site/, as CI builds it: a
 # broken link or a page missing from the nav fails it. Needs mkdocs:

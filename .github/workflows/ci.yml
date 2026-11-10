@@ -151,3 +151,23 @@ jobs:
       - run: go install github.com/makhov/k0da@v0.4.0
       - run: make static
       - run: sudo env "PATH=$PATH:$(go env GOPATH)/bin" K0DA_RUNTIME=podman ./hack/e2e-k8s.sh
+
+  k8s-migrate:
+    # gcr-operator moving pods between three k0da nodes (stock k0s, in
+    # Docker): a release and its image built here, installed by the
+    # installer DaemonSet, CRIU included. Migrations pre-copy and
+    # post-copy, kubectl drain, a pod with two containers, and refusals.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+      - run: sudo apt-get update && sudo apt-get install -y libseccomp-dev zstd
+      - run: go install github.com/makhov/k0da@v0.6.1
+      - run: PATH="$PATH:$(go env GOPATH)/bin" ./hack/e2e-k8s-migrate.sh
