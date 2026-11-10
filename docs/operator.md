@@ -503,7 +503,7 @@ Set in the Deployment's `args`:
 | `-image IMAGE` | the installer's image, or `busybox:1.37` | The image the moves' Jobs run: anything with `nsenter`. |
 | `-gcr PATH` | `/usr/local/bin/gcr` | gcr on the nodes. |
 | `-namespace NS` | its own | Where the Jobs run, and the Service. |
-| `-service NAME` | `gcr-operator` | The webhooks' Service, which its certificate names. |
+| `-service NAME` | `gcr-operator` | The webhooks' Service, which its certificate names. Every replica serves the one certificate, kept in the Secret `NAME-tls`; the first makes it. |
 | `-webhook NAME` | `gcr-operator` | The webhook configurations it gives its certificate's CA. |
 | `-listen ADDR` | `:8443` | Where the webhooks listen. |
 
