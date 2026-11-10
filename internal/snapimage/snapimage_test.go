@@ -17,6 +17,20 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestRepository(t *testing.T) {
+	for ref, want := range map[string]string{
+		"docker.io/library/nginx:1.27":                "docker.io/library/nginx",
+		"docker.io/library/nginx@sha256:abcd":         "docker.io/library/nginx",
+		"docker.io/library/nginx:1.27@sha256:abcd":    "docker.io/library/nginx",
+		"registry.local:5000/team/app":                "registry.local:5000/team/app",
+		"registry.local:5000/team/app:v2@sha256:abcd": "registry.local:5000/team/app",
+	} {
+		if got := repository(ref); got != want {
+			t.Errorf("repository(%q) = %q, want %q", ref, got, want)
+		}
+	}
+}
+
 func TestAllowed(t *testing.T) {
 	for _, tc := range []struct {
 		image    string

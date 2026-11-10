@@ -58,7 +58,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "start:", err)
 		os.Exit(1)
 	}
-	shim.RunShim(context.Background(), manager.New("io.containerd.gcr.v2"), func(c *shim.Config) {
+	shim.RunShim(context.Background(), manager.New(setup.RuntimeType), func(c *shim.Config) {
 		// Containers are children of this process and are waited on by
 		// libcontainer; an implicit reaper would steal their exit status.
 		c.NoReaper = true

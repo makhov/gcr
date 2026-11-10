@@ -186,17 +186,11 @@ func (r *Receiver) Close() {
 	if r.ps != nil {
 		r.ps.Kill()
 	}
-	r.mu.Unlock()
-}
-
-// CloseLazyPages stops taking post-copy page streams, once the restore
-// has all its memory. The streams under way are not cut.
-func (r *Receiver) CloseLazyPages() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	// Post-copy's page streams: those under way are not cut.
 	if r.lazyLn != nil {
 		r.lazyLn.Close()
 	}
+	r.mu.Unlock()
 }
 
 func (r *Receiver) auth(h http.HandlerFunc) http.HandlerFunc {

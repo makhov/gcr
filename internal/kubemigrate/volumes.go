@@ -17,6 +17,17 @@ import (
 // it would have to be detached and attached again while the pod is
 // frozen.
 func SharedClaims(ctx context.Context, cs kubernetes.Interface, p *corev1.Pod) error {
+	return eachClaim(ctx, cs, p, func(pv *corev1.PersistentVolume) error {
+		if !slices.Contains(pv.Spec.AccessModes, corev1.ReadWriteMany) {
+			return fmt.Errorf("%s is not ReadWriteMany: only one node at a time can have it (%v)", pv.Name, pv.Spec.AccessModes)
+		}
+		return nil
+	})
+}
+
+// eachClaim checks each of p's claims is bound, to a volume not tied to a
+// node, which check accepts.
+func eachClaim(ctx context.Context, cs kubernetes.Interface, p *corev1.Pod, check func(*corev1.PersistentVolume) error) error {
 	for _, v := range p.Spec.Volumes {
 		if v.PersistentVolumeClaim == nil {
 			continue
@@ -35,8 +46,8 @@ func SharedClaims(ctx context.Context, cs kubernetes.Interface, p *corev1.Pod) e
 		if why := nodeLocal(pv); why != "" {
 			return fmt.Errorf("volume %s: %s %s, so its files would stay on %s", v.Name, pv.Name, why, p.Spec.NodeName)
 		}
-		if !slices.Contains(pv.Spec.AccessModes, corev1.ReadWriteMany) {
-			return fmt.Errorf("volume %s: %s is not ReadWriteMany: only one node at a time can have it (%v)", v.Name, pv.Name, pv.Spec.AccessModes)
+		if err := check(pv); err != nil {
+			return fmt.Errorf("volume %s: %w", v.Name, err)
 		}
 	}
 	return nil

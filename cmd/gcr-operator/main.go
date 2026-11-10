@@ -67,8 +67,9 @@ const (
 	// annotationState is the operator's own, on the pod being moved:
 	// "migrating <since>" or "failed: why".
 	annotationState = "gcr.dev/migration"
-	// staleAfter is when a "migrating" mark left by an operator that went
-	// away counts as failed, and the eviction is let through.
+	// staleAfter is when a pod's mark of a migration under way, left by a
+	// migrator that went away, is taken for failed: longer than a
+	// migration's waits (kubemigrate.Options.Timeout), together.
 	staleAfter = 15 * time.Minute
 )
 
@@ -447,11 +448,6 @@ func (o *operator) watchDeparted(ctx context.Context) {
 	f.Start(ctx.Done())
 }
 
-// staleMigration is how long a pod marked as migrating is taken to be,
-// before its migrator is taken to have gone away: longer than a
-// migration's waits (kubemigrate.Options.Timeout), together.
-const staleMigration = 15 * time.Minute
-
 // replaceDeparted deletes a pod whose container migrated away and that
 // its controller kept: its processes run in no pod, or one the
 // controller does not know, as when its migration went wrong after they
@@ -461,7 +457,7 @@ const staleMigration = 15 * time.Minute
 // migration deletes it.
 func (o *operator) replaceDeparted(ctx context.Context, obj any) {
 	p, ok := obj.(*corev1.Pod)
-	if !ok || p.DeletionTimestamp != nil || !kubemigrate.Departed(p) || kubemigrate.Migrating(p, staleMigration) {
+	if !ok || p.DeletionTimestamp != nil || !kubemigrate.Departed(p) || kubemigrate.Migrating(p, staleAfter) {
 		return
 	}
 	owner := metav1.GetControllerOf(p)

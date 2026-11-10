@@ -133,16 +133,7 @@ type Result struct {
 // is deleted once its processes run in the target; if the migration
 // fails, the target is deleted and the source carries on.
 func Migrate(ctx context.Context, cs kubernetes.Interface, ns, name string, o Options) (res Result, retErr error) {
-	if o.Timeout == 0 {
-		o.Timeout = 5 * time.Minute
-	}
-	if o.GCR == "" {
-		o.GCR = "/usr/local/bin/gcr"
-	}
-	log := o.Log
-	if log == nil {
-		log = func(string, ...any) {}
-	}
+	o, log := o.defaults()
 	src, err := cs.CoreV1().Pods(ns).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return res, err
