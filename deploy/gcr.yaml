@@ -83,7 +83,7 @@ spec:
         - operator: Exists
       containers:
         - name: install
-          image: ghcr.io/makhov/gcr:v0.1.16
+          image: ghcr.io/makhov/gcr:v0.1.17
           imagePullPolicy: IfNotPresent
           securityContext:
             privileged: true
